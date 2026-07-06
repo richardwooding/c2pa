@@ -168,6 +168,14 @@
 .gl-icon svg { width: 18px; height: 18px; }
 .gl-stat { font: 800 2rem/1 var(--gl-mono); color: var(--gl-accent-2); }
 
+/* Clickable card: a gl-card whose primary link (.gl-stretch) covers the whole
+   card, so a click anywhere follows it — while any other links inside stay
+   independently clickable above the overlay. */
+.gl-card-link { position: relative; transition: border-color .12s; }
+.gl-card-link:hover, .gl-card-link:focus-within { border-color: var(--gl-accent); }
+.gl-stretch::after { content: ""; position: absolute; inset: 0; z-index: 1; }
+.gl-card-link a:not(.gl-stretch) { position: relative; z-index: 2; }
+
 /* ---- carousel ---- */
 /* A scroll-snap track of cards. Works without JS (it's just a scrollable row);
    gloam.js adds prev/next, dots, and motion-safe autoplay. The viewport is the
