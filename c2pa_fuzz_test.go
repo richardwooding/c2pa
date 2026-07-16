@@ -45,6 +45,7 @@ func FuzzRead(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_ = Read(context.Background(), JPEG, bytes.NewReader(data))
 		_ = Read(context.Background(), PNG, bytes.NewReader(data))
+		_ = Read(context.Background(), BMFF, bytes.NewReader(data))
 	})
 }
 
@@ -122,6 +123,7 @@ func FuzzValidate(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_ = Validate(context.Background(), JPEG, bytes.NewReader(data))
 		_ = Validate(context.Background(), PNG, bytes.NewReader(data))
+		_ = Validate(context.Background(), BMFF, bytes.NewReader(data))
 	})
 }
 
@@ -209,5 +211,70 @@ func FuzzRFC3161GenTime(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_ = rfc3161GenTime(data)
+	})
+}
+
+// FuzzBMFFParse targets the BMFF box-tree parser and manifest extractor: box
+// sizes are attacker-controlled (32-bit, 64-bit largesize, and size==0
+// to-EOF), containers nest (guarded by maxBMFFDepth), and the C2PA uuid box
+// payload walk crosses several length fields.
+//
+// Contract: never panic, never loop forever, offsets stay in bounds.
+func FuzzBMFFParse(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0, 0, 0, 8, 'f', 't', 'y', 'p'})
+	f.Add([]byte{0, 0, 0, 1, 'm', 'd', 'a', 't', 0, 0, 0, 0, 0, 0, 0, 16}) // largesize
+	f.Add([]byte{0, 0, 0, 0, 'm', 'd', 'a', 't'})                          // to-EOF
+	if b, err := os.ReadFile("testdata/c2pa_signed_video.mp4"); err == nil && len(b) > 4096 {
+		f.Add(b[:4096]) // header region incl. ftyp; keeps the corpus light
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		ctx := context.Background()
+		boxes := parseBMFFBoxes(ctx, data)
+		var walk func([]*bmffBox, int)
+		walk = func(bs []*bmffBox, depth int) {
+			if depth > maxBMFFDepth+1 {
+				t.Fatal("box tree deeper than the depth cap")
+			}
+			for _, b := range bs {
+				if b.start < 0 || b.end > len(data) || b.start+b.headerLen > b.end {
+					t.Fatalf("box out of bounds: %+v (len %d)", b, len(data))
+				}
+				walk(b.children, depth+1)
+			}
+		}
+		walk(boxes, 0)
+		_ = bmffJUMBF(ctx, data)
+		_ = bmffHasUpdateManifest(ctx, data)
+	})
+}
+
+// FuzzBMFFHash targets the exclusion decode + xpath match + range resolution +
+// offset-marker hashing pipeline with attacker-controlled assertion CBOR and
+// asset bytes.
+//
+// Contract: never panic; resolved ranges are sound inputs to the hash walk.
+func FuzzBMFFHash(f *testing.F) {
+	f.Add([]byte{}, []byte{})
+	f.Add(
+		[]byte{0, 0, 0, 8, 'f', 't', 'y', 'p', 0, 0, 0, 12, 'm', 'd', 'a', 't', 1, 2, 3, 4},
+		[]byte{0x81, 0xA1, 0x65, 'x', 'p', 'a', 't', 'h', 0x65, '/', 'm', 'd', 'a', 't'}, // [{"xpath":"/mdat"}]
+	)
+	f.Fuzz(func(t *testing.T, asset, exclCBOR []byte) {
+		ctx := context.Background()
+		var raw any
+		_ = decMode.Unmarshal(exclCBOR, &raw)
+		excl, ok := decodeBMFFExclusions(raw)
+		if !ok {
+			return
+		}
+		top := parseBMFFBoxes(ctx, asset)
+		ranges, ok := bmffExclusionByteRanges(asset, top, excl)
+		if !ok {
+			return
+		}
+		h := sha256.New()
+		hashBMFFTopLevel(ctx, asset, top, ranges, h)
+		_ = h.Sum(nil)
 	})
 }

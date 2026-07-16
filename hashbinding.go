@@ -51,25 +51,44 @@ func (v *validator) verifyAssertionHashes(m *parsedManifest, uri string) {
 
 // verifyHardBinding checks the manifest's hard-binding assertion, which proves
 // the asset content has not changed since signing. For JPEG/PNG this is
-// c2pa.hash.data (a SHA over the whole file minus declared exclusion ranges that
-// cover the manifest itself). c2pa.hash.boxes / BMFF box hashing is reported as
-// unsupported. Absence of any hard binding is a failure.
+// c2pa.hash.data (a SHA over the whole file minus declared exclusion ranges
+// that cover the manifest itself); for BMFF assets it is c2pa.hash.bmff.v2/.v3
+// (verified by verifyBMFFHash). A v1 c2pa.hash.bmff assertion is ignored per
+// spec §18.6.1; a BMFF binding on a non-BMFF asset cannot bind it; and
+// c2pa.hash.boxes remains unsupported. Absence of any usable hard binding is a
+// failure.
 func (v *validator) verifyHardBinding(m *parsedManifest, uri string) {
-	var dataHash, boxesHash *rawAssertion
+	var dataHash, bmffHash, boxesHash *rawAssertion
+	bmffV1 := false
 	for i := range m.assertions {
 		switch m.assertions[i].label {
 		case "c2pa.hash.data":
 			dataHash = &m.assertions[i]
-		case "c2pa.hash.boxes", "c2pa.hash.bmff", "c2pa.hash.bmff.v2":
+		case "c2pa.hash.bmff": // v1: validators must ignore it entirely
+			bmffV1 = true
+		case "c2pa.hash.bmff.v2", "c2pa.hash.bmff.v3":
+			bmffHash = &m.assertions[i]
+		case "c2pa.hash.boxes":
 			boxesHash = &m.assertions[i]
 		}
 	}
 	switch {
+	case bmffHash != nil && v.container == BMFF:
+		v.verifyBMFFHash(bmffHash, uri)
 	case dataHash != nil:
 		v.verifyDataHash(dataHash, uri)
+	case bmffHash != nil:
+		// A BMFF binding cannot bind a non-BMFF asset: treating it as merely
+		// "unsupported" would let a bmff-only manifest wrapped around, say,
+		// tampered JPEG bytes validate with no hard binding checked at all.
+		v.add(StatusHardBindingMissing, uri+"/"+bmffHash.label,
+			"BMFF hard binding cannot bind a non-BMFF asset", nil)
 	case boxesHash != nil:
 		v.add(StatusUnsupported, uri+"/"+boxesHash.label,
-			"box/BMFF hard-binding hashing is not supported for JPEG/PNG", nil)
+			"c2pa.hash.boxes hard-binding hashing is not supported", nil)
+	case bmffV1:
+		v.add(StatusHardBindingMissing, uri,
+			"manifest's only hard binding is a v1 c2pa.hash.bmff assertion, which validators must ignore", nil)
 	default:
 		v.add(StatusHardBindingMissing, uri, "manifest has no hard-binding hash assertion", nil)
 	}

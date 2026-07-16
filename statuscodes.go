@@ -30,6 +30,7 @@ const (
 	StatusAssertionHashedURIMatch     StatusCode = "assertion.hashedURI.match"
 	StatusAssertionDataHashMatch      StatusCode = "assertion.dataHash.match"
 	StatusAssertionBoxesHashMatch     StatusCode = "assertion.boxesHash.match"
+	StatusAssertionBMFFHashMatch      StatusCode = "assertion.bmffHash.match"
 	StatusIngredientManifestValidated StatusCode = "ingredient.manifest.validated"
 )
 
@@ -50,6 +51,8 @@ const (
 	StatusAssertionHashedURIMismatch StatusCode = "assertion.hashedURI.mismatch"
 	StatusAssertionDataHashMismatch  StatusCode = "assertion.dataHash.mismatch"
 	StatusAssertionBoxesHashMismatch StatusCode = "assertion.boxesHash.mismatch"
+	StatusAssertionBMFFHashMismatch  StatusCode = "assertion.bmffHash.mismatch"
+	StatusAssertionBMFFHashMalformed StatusCode = "assertion.bmffHash.malformed"
 	StatusAssertionMissing           StatusCode = "assertion.missing"
 	StatusHardBindingMissing         StatusCode = "hardBinding.missing"
 	StatusAlgorithmUnsupported       StatusCode = "algorithm.unsupported"
@@ -73,6 +76,7 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusAssertionHashedURIMatch:     SeveritySuccess,
 	StatusAssertionDataHashMatch:      SeveritySuccess,
 	StatusAssertionBoxesHashMatch:     SeveritySuccess,
+	StatusAssertionBMFFHashMatch:      SeveritySuccess,
 	StatusIngredientManifestValidated: SeveritySuccess,
 
 	StatusClaimMissing:               SeverityFailure,
@@ -90,6 +94,8 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusAssertionHashedURIMismatch: SeverityFailure,
 	StatusAssertionDataHashMismatch:  SeverityFailure,
 	StatusAssertionBoxesHashMismatch: SeverityFailure,
+	StatusAssertionBMFFHashMismatch:  SeverityFailure,
+	StatusAssertionBMFFHashMalformed: SeverityFailure,
 	StatusAssertionMissing:           SeverityFailure,
 	StatusHardBindingMissing:         SeverityFailure,
 	StatusAlgorithmUnsupported:       SeverityFailure,

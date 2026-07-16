@@ -138,11 +138,12 @@ func defaultConfig() validateConfig {
 
 // validator carries the per-call state through the pipeline.
 type validator struct {
-	ctx     context.Context
-	cfg     validateConfig
-	data    []byte          // the full asset bytes read (up to cfg.maxScan)
-	res     ValidationResult
-	visited map[string]bool // manifest labels already validated (ingredient cycle guard)
+	ctx       context.Context
+	cfg       validateConfig
+	container Container       // the carrier format Validate was called with
+	data      []byte          // the full asset bytes read (up to cfg.maxScan)
+	res       ValidationResult
+	visited   map[string]bool // manifest labels already validated (ingredient cycle guard)
 }
 
 func (v *validator) add(code StatusCode, uri, explain string, err error) {
@@ -182,7 +183,7 @@ func Validate(ctx context.Context, container Container, r io.Reader, opts ...Val
 	for _, o := range opts {
 		o(&cfg)
 	}
-	v := &validator{ctx: ctx, cfg: cfg, visited: map[string]bool{}}
+	v := &validator{ctx: ctx, cfg: cfg, container: container, visited: map[string]bool{}}
 
 	if ctx.Err() != nil {
 		v.add(StatusGeneralError, "", "context cancelled before validation", ctx.Err())
@@ -199,6 +200,9 @@ func Validate(ctx context.Context, container Container, r io.Reader, opts ...Val
 	if len(jumbf) == 0 {
 		v.add(StatusClaimMissing, "", "no C2PA manifest found", nil)
 		return v.finish()
+	}
+	if container == BMFF && bmffHasUpdateManifest(ctx, data) {
+		v.add(StatusUnsupported, "", "BMFF update manifest present but not evaluated", nil)
 	}
 	// Reuse the read path to surface the convenience Info fields.
 	v.res.Info = parseManifest(ctx, jumbf)
@@ -222,6 +226,8 @@ func extractJUMBF(ctx context.Context, container Container, data []byte) []byte 
 		return jpegJUMBF(ctx, data)
 	case PNG:
 		return pngJUMBF(ctx, data)
+	case BMFF:
+		return bmffJUMBF(ctx, data)
 	default:
 		return nil
 	}
@@ -261,8 +267,17 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 
 	// Assertion integrity: each claimed assertion hash must match its box.
 	v.verifyAssertionHashes(m, uri)
-	// Hard binding: the asset content hash must match.
-	v.verifyHardBinding(m, uri)
+	// Hard binding: the asset content hash must match. Only the active
+	// manifest's binding covers the asset being validated — an ingredient
+	// manifest's hard binding refers to the ingredient's ORIGINAL bytes, which
+	// are not available here, so it is reported informationally rather than
+	// half-checked against the wrong asset.
+	if depth == 0 {
+		v.verifyHardBinding(m, uri)
+	} else {
+		v.add(StatusUnsupported, uri,
+			"ingredient manifest hard binding not evaluated (original asset bytes unavailable)", nil)
+	}
 	// Ingredients: recursively validate referenced nested manifests.
 	v.validateIngredients(m, store, depth)
 }

@@ -48,9 +48,17 @@ func (v *validator) verifyCOSE(m *parsedManifest, uri string) (chain []*x509.Cer
 		return nil, msg.Signature, false
 	}
 
-	chain = parseChain(msg.Headers.Protected[cose.HeaderLabelX5Chain])
-	if len(chain) == 0 {
-		chain = parseChain(msg.Headers.Unprotected[cose.HeaderLabelX5Chain])
+	// The chain lives under the COSE x5chain label (RFC 9360, int 33) in the
+	// protected or unprotected header; pre-1.3 c2pa-rs signers (e.g. c2patool
+	// 0.6-era assets) used the text key "x5chain" instead. Accept all four —
+	// the chain is transport, not a signed claim; trust comes from chain
+	// validation against the anchor pool either way.
+	for _, hdr := range []map[any]any{map[any]any(msg.Headers.Protected), map[any]any(msg.Headers.Unprotected)} {
+		for _, key := range []any{cose.HeaderLabelX5Chain, "x5chain"} {
+			if len(chain) == 0 {
+				chain = parseChain(hdr[key])
+			}
+		}
 	}
 	if len(chain) == 0 {
 		v.add(StatusSigningCredentialInvalid, uri, "no x5chain certificate in signature", nil)

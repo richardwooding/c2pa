@@ -52,6 +52,13 @@ const (
 	JPEG Container = "jpeg"
 	// PNG reads the manifest from caBX chunks.
 	PNG Container = "png"
+	// BMFF reads the manifest from a top-level C2PA `uuid` box in any ISO Base
+	// Media File Format file: MP4, MOV, M4A, HEIC, HEIF, AVIF. One constant
+	// covers every brand — the carrier mechanics are identical; sniff the ftyp
+	// brand yourself if you need to distinguish them. Note that Read's MaxScan
+	// (16 MiB) can miss a manifest box placed after a large mdat; Validate's
+	// larger cap usually will not.
+	BMFF Container = "bmff"
 )
 
 // Info is the surfaced, CLAIMED, UNVERIFIED subset of a C2PA manifest. See the
@@ -112,6 +119,8 @@ func Read(ctx context.Context, container Container, r io.Reader) Info {
 		jumbf = jpegJUMBF(ctx, data)
 	case PNG:
 		jumbf = pngJUMBF(ctx, data)
+	case BMFF:
+		jumbf = bmffJUMBF(ctx, data)
 	default:
 		return Info{}
 	}

@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `github.com/richardwooding/c2pa` is a flat (single Go package, no subpackages) **pure-Go** library
-for C2PA / Content Credentials provenance manifests in JPEG and PNG, with **two modes**:
+for C2PA / Content Credentials provenance manifests in JPEG, PNG, and BMFF (MP4/MOV/HEIC/HEIF/
+AVIF), with **two modes**:
 
 - **`Read(ctx, container, r) Info`** — the fast, *unverified* reader. Surfaces what a file CLAIMS
   (generator, title, signer CN, signing time, AI flag) like EXIF or an unverified `From:` header. It
@@ -125,7 +126,15 @@ fuzz targets stay untouched.
   exclusions are *file* byte ranges (fixture: exclude `[20, 117293)`). If the asset exceeds the scan
   cap the hash can't be computed — emit an **informational** status, never a false `dataHash.mismatch`.
   Hash assertions over `rawAssertion.full` (the whole superbox) for `hashed_uri`; sub-slice, never
-  re-encode. BMFF (`c2pa.hash.bmff`) is out of scope (JPEG/PNG only) → informational unsupported.
+  re-encode. BMFF hard bindings (`c2pa.hash.bmff.v2`/`.v3`) ARE verified (`bmffhash.go`): a single
+  ascending pass where each top-level box not wholly excluded contributes its absolute offset as an
+  8-byte big-endian integer followed by its bytes minus exclusion ranges. v1 `c2pa.hash.bmff` must be
+  IGNORED per spec §18.6.1 (v1-only manifests → `hardBinding.missing`); `merkle`/fragmented assets →
+  informational unsupported; a BMFF binding on a non-BMFF container → `hardBinding.missing` (not
+  informational — see verifyHardBinding). Assertion CBOR encodes absent exclusion fields as explicit
+  nulls — every optional-field decode must be nil-tolerant. The standard `/uuid` exclusion relies on
+  its `data` predicate (offset 8 == the C2PA usertype) to exclude only the C2PA box. Exclusion `flags`
+  with `exact=false` use spec bits-set semantics — deliberately NOT c2pa-rs's inverted subset test.
 - **Trust lists are embedded via `go:embed trustlists/*.pem`.** `C2PA-TRUST-LIST.pem` (signing
   anchors) and `C2PA-TSA-TRUST-LIST.pem` (TSA anchors) are the official C2PA conformance lists; they
   go stale — refresh from `c2pa-org/conformance-public`. Callers override via `WithSigningTrust` /
