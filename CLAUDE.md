@@ -163,3 +163,32 @@ own COSE x5chain, so positive tests anchor a test pool at the fixture's own inte
 -mutating the fixture (flip image data → `dataHash.mismatch`; flip an assertion → `hashedURI.mismatch`;
 corrupt the COSE signature → `claimSignature.mismatch`; empty trust pool → `signingCredential.untrusted`)
 and by generating ephemeral certs in-test — no new binary fixtures.
+
+**There is also a generated corpus** (`corpus_gen_test.go`, `corpus_container_test.go`,
+`corpus_test.go`, `corpus_tsa_test.go`, `corpus_timestamp_test.go`, `corpus_fuzz_test.go`) that
+builds valid C2PA assets from scratch — JUMBF superbox/`jumd` writer, assertion store, 1.x and 2.x
+claims, COSE_Sign1, JPEG APP11 / PNG caBX framing, and a hand-rolled RFC 3161 / CMS token writer —
+then applies named mutations. It exists because five fixtures cannot express an expired certificate,
+an ES256 signature, or a timestamp that fails one specific way. Everything is built in memory;
+nothing lands in `testdata/`. Four things to know before extending it:
+
+- **`buildAsset` iterates to a fixpoint.** The `c2pa.hash.data` exclusion is circular — the declared
+  `start`/`length` change the CBOR integer width that determines them — so it converges the offsets,
+  then writes the digest in a final pass. The digest lives inside the excluded range, so writing it
+  cannot invalidate it. Anything the generator emits must therefore be **length-stable across
+  passes**, or the fixpoint never settles.
+- **That is why the test TSA signs with RSA PKCS#1 v1.5, not ECDSA.** An ECDSA DER signature is a
+  `SEQUENCE{r,s}` whose length varies with the leading bits of r and s, so a freshly minted token
+  changes size between passes. PKCS#1 v1.5 is fixed-length and deterministic. (The COSE signature is
+  fine either way — COSE ECDSA is raw `r||s`, fixed width.)
+- **The timestamp binding rule is never reimplemented.** `mintTSToken` takes `tbs` from the package's
+  own `coseParts` + `coseCountersignData`, so a generated token cannot drift from what the validator
+  recomputes. Do not hand-roll the CounterSignature array in a test.
+- **Assert on the exported `Status*` constants, never string literals.** `StatusCode.Severity()`
+  treats an unknown code as *informational*, so a typo'd literal degrades silently into a passing
+  test instead of failing.
+
+Four status codes are declared but have no emission site: `claim.multiple`,
+`timeStamp.outsideValidity`, and `assertion.boxesHash.match`/`.mismatch` (the last two dead by
+design while `c2pa.hash.boxes` reports `general.unsupported`). Don't write corpus cases for them
+expecting a result — they need a library change first.
