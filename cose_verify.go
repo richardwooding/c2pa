@@ -1,6 +1,8 @@
 package c2pa
 
 import (
+	"bytes"
+
 	// Registers SHA-256/384/512 so cose.Verifier.Verify can call crypto.Hash.New
 	// for ES*/PS* algorithms. Without these go-cose panics at verify time on an
 	// adversarially-selected algorithm, breaking the never-panic contract.
@@ -32,6 +34,12 @@ func (v *validator) verifyCOSE(m *parsedManifest, uri string) (chain []*x509.Cer
 	}
 	if msg.Payload == nil {
 		msg.Payload = m.claimBytes // detached payload: the signed bytes are the claim
+	} else if !bytes.Equal(msg.Payload, m.claimBytes) {
+		// An attached payload is only honest if it IS the claim box. Verifying a
+		// signature over attacker-chosen bytes while reporting a different claim
+		// would make claimSignature.validated meaningless.
+		v.add(StatusClaimSignatureMismatch, uri, "attached COSE payload is not the claim", nil)
+		return nil, msg.Signature, false
 	}
 	if len(msg.Payload) == 0 {
 		v.add(StatusClaimSignatureMismatch, uri, "no payload to verify", nil)

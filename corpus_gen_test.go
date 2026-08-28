@@ -91,7 +91,7 @@ var (
 	keysErr  error
 )
 
-func testKeys(t *testing.T) *corpusKeys {
+func testKeys(t testing.TB) *corpusKeys {
 	t.Helper()
 	keysOnce.Do(func() {
 		k := &corpusKeys{}
@@ -122,15 +122,14 @@ func testKeys(t *testing.T) *corpusKeys {
 }
 
 type certProfile struct {
-	notBefore   time.Time
-	notAfter    time.Time
-	keyUsage    x509.KeyUsage
-	ekus        []x509.ExtKeyUsage
-	isCA        bool
-	ocspURL     string
-	sigAlg      x509.SignatureAlgorithm
-	omitKeyUse  bool
-	unknownOnly bool
+	notBefore  time.Time
+	notAfter   time.Time
+	keyUsage   x509.KeyUsage
+	ekus       []x509.ExtKeyUsage
+	isCA       bool
+	ocspURL    string
+	caSigAlg   x509.SignatureAlgorithm
+	omitKeyUse bool
 }
 
 type certOpt func(*certProfile)
@@ -158,12 +157,12 @@ func certIsCA() certOpt {
 	return func(p *certProfile) { p.isCA = true }
 }
 
-func certOCSP(url string) certOpt {
-	return func(p *certProfile) { p.ocspURL = url }
-}
-
+// certSHA1 weakens the root's self-signature only. A SHA-1 leaf is rejected by
+// x509.Verify itself and surfaces as signingCredential.untrusted, so it never
+// reaches chain.go's weakSigAlg check; Go does not re-verify a root's own
+// self-signature, so this is the path that does.
 func certSHA1() certOpt {
-	return func(p *certProfile) { p.sigAlg = x509.SHA1WithRSA }
+	return func(p *certProfile) { p.caSigAlg = x509.SHA1WithRSA }
 }
 
 func defaultCertProfile() *certProfile {
@@ -183,7 +182,7 @@ type signerBundle struct {
 	chainD [][]byte
 }
 
-func newCorpusCA(t *testing.T, key *rsa.PrivateKey, sigAlg x509.SignatureAlgorithm) (*x509.Certificate, *rsa.PrivateKey) {
+func newCorpusCA(t testing.TB, key *rsa.PrivateKey, sigAlg x509.SignatureAlgorithm) (*x509.Certificate, *rsa.PrivateKey) {
 	t.Helper()
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
@@ -206,7 +205,7 @@ func newCorpusCA(t *testing.T, key *rsa.PrivateKey, sigAlg x509.SignatureAlgorit
 	return crt, key
 }
 
-func newCorpusSigner(t *testing.T, alg cose.Algorithm, opts ...certOpt) *signerBundle {
+func newCorpusSigner(t testing.TB, alg cose.Algorithm, opts ...certOpt) *signerBundle {
 	t.Helper()
 	k := testKeys(t)
 
@@ -231,8 +230,8 @@ func newCorpusSigner(t *testing.T, alg cose.Algorithm, opts ...certOpt) *signerB
 	}
 
 	caSigAlg := x509.SHA256WithRSA
-	if p.sigAlg == x509.SHA1WithRSA {
-		caSigAlg = x509.SHA1WithRSA
+	if p.caSigAlg != 0 {
+		caSigAlg = p.caSigAlg
 	}
 	ca, caKey := newCorpusCA(t, k.rsaCA, caSigAlg)
 
@@ -251,9 +250,6 @@ func newCorpusSigner(t *testing.T, alg cose.Algorithm, opts ...certOpt) *signerB
 	}
 	if p.ocspURL != "" {
 		tmpl.OCSPServer = []string{p.ocspURL}
-	}
-	if p.sigAlg != 0 {
-		tmpl.SignatureAlgorithm = p.sigAlg
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, pub, caKey)
@@ -289,6 +285,7 @@ type manifestSpec struct {
 	corruptSig    bool
 	forceAlg      cose.Algorithm
 	attachPayload []byte
+	attachSelf    bool
 	dataHashAlg   string
 	noHardBinding bool
 	extraBinding  *assertionSpec
@@ -301,7 +298,7 @@ type assertionSpec struct {
 	raw   []byte
 }
 
-func mustMarshalCBOR(t *testing.T, v any) []byte {
+func mustMarshalCBOR(t testing.TB, v any) []byte {
 	t.Helper()
 	b, err := cbor.Marshal(v)
 	if err != nil {
@@ -310,7 +307,7 @@ func mustMarshalCBOR(t *testing.T, v any) []byte {
 	return b
 }
 
-func hashOf(t *testing.T, alg string, b []byte) []byte {
+func hashOf(t testing.TB, alg string, b []byte) []byte {
 	t.Helper()
 	h, ok := hashByName(alg)
 	if !ok {
@@ -323,7 +320,7 @@ func hashOf(t *testing.T, alg string, b []byte) []byte {
 // buildManifest assembles assertions, then the claim that hashes them, then the
 // COSE signature over that claim — the same dependency order the validator
 // unwinds in reverse.
-func buildManifest(t *testing.T, spec manifestSpec) []byte {
+func buildManifest(t testing.TB, spec manifestSpec) []byte {
 	t.Helper()
 	alg := spec.dataHashAlg
 	if alg == "" {
@@ -392,7 +389,7 @@ func buildManifest(t *testing.T, spec manifestSpec) []byte {
 	return superBox(uuidC2PA, label, children...)
 }
 
-func signClaim(t *testing.T, spec manifestSpec, claimBytes []byte) []byte {
+func signClaim(t testing.TB, spec manifestSpec, claimBytes []byte) []byte {
 	t.Helper()
 	sb := spec.signer
 	signer, err := cose.NewSigner(sb.alg, sb.key)
@@ -417,7 +414,7 @@ func signClaim(t *testing.T, spec manifestSpec, claimBytes []byte) []byte {
 	if spec.forceAlg != 0 {
 		msg.Headers.Protected[cose.HeaderLabelAlgorithm] = spec.forceAlg
 	}
-	if spec.attachPayload == nil {
+	if spec.attachPayload == nil && !spec.attachSelf {
 		msg.Payload = nil
 	}
 	b, err := msg.MarshalCBOR()

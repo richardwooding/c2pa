@@ -105,7 +105,7 @@ func assembleAsset(container Container, store []byte) (asset []byte, exclStart, 
 // changes the size that determines them) by iterating to a fixpoint, then does
 // one final pass to write the real digest. The digest lives inside the excluded
 // range, so writing it cannot invalidate it.
-func buildAsset(t *testing.T, container Container, spec manifestSpec) []byte {
+func buildAsset(t testing.TB, container Container, spec manifestSpec) []byte {
 	t.Helper()
 	alg := spec.dataHashAlg
 	if alg == "" {

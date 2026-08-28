@@ -171,6 +171,12 @@ func TestCorpusNegatives(t *testing.T) {
 			want:      StatusSigningCredentialInvalid,
 		},
 		{
+			name:      "sha-1 signature in the chain",
+			container: JPEG,
+			certOpts:  []certOpt{certSHA1()},
+			want:      StatusSigningCredentialInvalid,
+		},
+		{
 			name:      "leaf is a CA",
 			container: JPEG,
 			certOpts:  []certOpt{certIsCA()},
@@ -270,12 +276,11 @@ func TestCorpusNoManifest(t *testing.T) {
 	}
 }
 
-// TestCorpusAttachedPayloadSubstitution documents a signature-verification gap:
-// verifyCOSE injects the claim box bytes only when the COSE payload is detached
-// (cose_verify.go:33), and never compares an attached payload against the claim
-// box. A forged manifest can therefore ship a signature over bytes it chose
-// while the claim that is parsed, reported and hash-checked comes from a
-// different box.
+// TestCorpusAttachedPayloadSubstitution pins the guard against substituting a
+// signed payload for the claim box: verifyCOSE injects the claim bytes when the
+// payload is detached (which is what real C2PA signers emit), so an ATTACHED
+// payload must equal the claim box or the signature proves nothing about the
+// claim that is actually parsed and reported.
 func TestCorpusAttachedPayloadSubstitution(t *testing.T) {
 	sb := newCorpusSigner(t, cose.AlgorithmES256)
 
@@ -295,15 +300,27 @@ func TestCorpusAttachedPayloadSubstitution(t *testing.T) {
 		t.Fatalf("test setup wrong: Read saw the attacker payload, not the claim box")
 	}
 
-	if res.Has(StatusClaimSignatureValidated) {
-		t.Logf("KNOWN GAP: signature validated over an attached payload that is not the claim box; "+
-			"reported generator is %q while the signed bytes say %q",
-			info.ClaimGenerator, "not-the-real-generator/9.9")
-	}
 	if !res.Has(StatusClaimSignatureMismatch) {
-		t.Logf("KNOWN GAP: no %s recorded; statuses were %v", StatusClaimSignatureMismatch, codes(res))
+		t.Errorf("want %s for a substituted payload; got %v", StatusClaimSignatureMismatch, codes(res))
+	}
+	if res.Has(StatusClaimSignatureValidated) {
+		t.Errorf("signature must not validate over bytes that are not the claim; got %v", codes(res))
 	}
 	if res.Valid {
-		t.Logf("KNOWN GAP: manifest reported Valid=true")
+		t.Errorf("Valid = true for a manifest whose signature does not cover its claim")
+	}
+}
+
+// TestCorpusAttachedPayloadMatchingClaim keeps the guard narrow: an attached
+// payload that IS the claim box stays valid.
+func TestCorpusAttachedPayloadMatchingClaim(t *testing.T) {
+	sb := newCorpusSigner(t, cose.AlgorithmES256)
+	asset := buildAsset(t, JPEG, manifestSpec{signer: sb, attachSelf: true})
+	res := runCorpus(t, JPEG, asset, sb)
+	if !res.Valid {
+		t.Fatalf("attached payload equal to the claim should validate; got %v", codes(res))
+	}
+	if !res.Has(StatusClaimSignatureValidated) {
+		t.Errorf("missing %s; got %v", StatusClaimSignatureValidated, codes(res))
 	}
 }
