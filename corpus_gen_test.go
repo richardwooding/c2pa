@@ -286,6 +286,9 @@ type manifestSpec struct {
 	forceAlg      cose.Algorithm
 	attachPayload []byte
 	attachSelf    bool
+	tsKind        int // 0 none, 1 sigTst (1.x), 2 sigTst2 (2.x)
+	tsa           *testTSA
+	tsOpts        []tsTokenOpt
 	dataHashAlg   string
 	noHardBinding bool
 	extraBinding  *assertionSpec
@@ -421,7 +424,40 @@ func signClaim(t testing.TB, spec manifestSpec, claimBytes []byte) []byte {
 	if err != nil {
 		t.Fatalf("marshal cose: %v", err)
 	}
-	return b
+	if spec.tsKind == 0 {
+		return b
+	}
+	return attachTimestamp(t, spec, msg, b, claimBytes)
+}
+
+// attachTimestamp mints a token over the countersign data the validator will
+// recompute, then re-marshals the envelope with it in the unprotected header.
+// The protected bytes and the signature are untouched, so the claim signature
+// stays valid.
+func attachTimestamp(t testing.TB, spec manifestSpec, msg *cose.Sign1Message, marshalled, claimBytes []byte) []byte {
+	t.Helper()
+	protected, signature, ok := coseParts(marshalled)
+	if !ok {
+		t.Fatalf("coseParts failed on a freshly marshalled envelope")
+	}
+	counterPayload := claimBytes
+	label := "sigTst"
+	if spec.tsKind == 2 {
+		counterPayload, _ = cbor.Marshal(signature)
+		label = "sigTst2"
+	}
+	der := mintTSToken(t, spec.tsa, coseCountersignData(counterPayload, protected), spec.tsOpts...)
+
+	msg.Headers.Unprotected[label] = tstHeader(der)
+	msg.Headers.RawUnprotected = nil
+	out, err := msg.MarshalCBOR()
+	if err != nil {
+		t.Fatalf("marshal cose with timestamp: %v", err)
+	}
+	if got, _ := extractTSToken(msg.Headers.Unprotected); len(got) == 0 {
+		t.Fatalf("timestamp header did not survive re-marshalling")
+	}
+	return out
 }
 
 func storeBox(manifests ...[]byte) []byte {

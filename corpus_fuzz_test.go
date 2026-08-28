@@ -3,6 +3,7 @@ package c2pa
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/veraison/go-cose"
 )
@@ -64,5 +65,22 @@ func FuzzCorpusValidate(f *testing.F) {
 				t.Fatalf("Valid=%v with %d failure statuses", res.Valid, failures)
 			}
 		}
+	})
+}
+
+// FuzzCorpusTimestamp mutates generated RFC 3161 tokens. The existing timestamp
+// seeds are the one real fixture token; these add both container shapes (bare
+// ContentInfo and TimeStampResp) and both SignerIdentifier forms, so the ASN.1
+// descent is exercised over structures that parse before mutation starts.
+func FuzzCorpusTimestamp(f *testing.F) {
+	ta := newTestTSA(f)
+	tbs := []byte("countersign placeholder")
+	f.Add(mintTSToken(f, ta, tbs))
+	f.Add(mintTSToken(f, ta, tbs, tsWrapInResp()))
+	f.Add(mintTSToken(f, ta, tbs, tsSubjectKeyID()))
+	f.Fuzz(func(t *testing.T, der []byte) {
+		v := &validator{cfg: validateConfig{clock: func() time.Time { return corpusEpoch }}}
+		v.verifyTimestampToken(der, tbs, "fuzz")
+		rfc3161GenTime(der)
 	})
 }
