@@ -23,57 +23,87 @@ const (
 // terminated strings — MIME, filename, description — and only then the object,
 // so the payload's offset depends on text the file controls.
 //
-// An unsynchronised tag (header flag 0x80) is not read: its bytes have been
-// rewritten to avoid false frame syncs, and reading it as-is would return a
-// corrupted store rather than nothing.
+// Unsynchronisation (ID3's defence against false MPEG frame syncs — a 0x00
+// stuffed after every 0xFF on write) is reversed rather than refused: in v2.3
+// the tag-level flag covers the whole tag body, so it is de-unsynchronised
+// before the frame walk; in v2.4 it is per-frame (format flag 0x02) and each
+// flagged frame body is restored before the GEOB parse. Frame sizes always
+// measure the on-wire, still-stuffed bytes.
 func mp3JUMBF(ctx context.Context, data []byte) []byte {
 	if len(data) < 10 || string(data[:3]) != "ID3" {
 		return nil
 	}
 	major, flags := data[3], data[5]
-	if major < 3 || major > 4 || flags&0x80 != 0 {
+	if major < 3 || major > 4 {
 		return nil
 	}
 	size := id3Synchsafe(data[6:10])
 	end := min(10+size, len(data))
+	body := data[10:end]
+	if major == 3 && flags&0x80 != 0 {
+		body = id3DeUnsync(body)
+	}
 
-	pos := 10
+	pos := 0
 	if flags&0x40 != 0 { // extended header, whose own size prefix is skipped
-		if pos+4 > end {
+		if pos+4 > len(body) {
 			return nil
 		}
-		extSize := id3Synchsafe(data[pos : pos+4])
+		extSize := id3Synchsafe(body[pos : pos+4])
 		if major == 3 {
-			extSize = int(binary.BigEndian.Uint32(data[pos:pos+4])) + 4
+			extSize = int(binary.BigEndian.Uint32(body[pos:pos+4])) + 4
 		}
 		pos += extSize
 	}
 
-	for frames := 0; frames < maxID3Frames && pos+10 <= end; frames++ {
+	for frames := 0; frames < maxID3Frames && pos >= 0 && pos+10 <= len(body); frames++ {
 		if ctx.Err() != nil {
 			return nil
 		}
-		id := string(data[pos : pos+4])
+		id := string(body[pos : pos+4])
 		if id == "\x00\x00\x00\x00" {
 			return nil // padding: the frames are done
 		}
 		// v2.4 sizes are synchsafe; v2.3 sizes are plain big-endian.
-		frameSize := int(binary.BigEndian.Uint32(data[pos+4 : pos+8]))
+		frameSize := int(binary.BigEndian.Uint32(body[pos+4 : pos+8]))
 		if major == 4 {
-			frameSize = id3Synchsafe(data[pos+4 : pos+8])
+			frameSize = id3Synchsafe(body[pos+4 : pos+8])
 		}
-		body := pos + 10
-		if frameSize <= 0 || body+frameSize > end {
+		frameFlags := body[pos+9]
+		start := pos + 10
+		if frameSize <= 0 || start+frameSize > len(body) {
 			return nil
 		}
 		if id == "GEOB" {
-			if store := id3GEOBStore(data[body : body+frameSize]); store != nil {
+			frame := body[start : start+frameSize]
+			if major == 4 {
+				if frameFlags&0x02 != 0 { // per-frame unsynchronisation
+					frame = id3DeUnsync(frame)
+				}
+				if frameFlags&0x01 != 0 && len(frame) >= 4 { // data-length indicator
+					frame = frame[4:]
+				}
+			}
+			if store := id3GEOBStore(frame); store != nil {
 				return store
 			}
 		}
-		pos = body + frameSize
+		pos = start + frameSize
 	}
 	return nil
+}
+
+// id3DeUnsync reverses ID3v2 unsynchronisation: every 0x00 that follows a 0xFF
+// was stuffed on write and is dropped. Output is never longer than the input.
+func id3DeUnsync(b []byte) []byte {
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); i++ {
+		out = append(out, b[i])
+		if b[i] == 0xFF && i+1 < len(b) && b[i+1] == 0x00 {
+			i++
+		}
+	}
+	return out
 }
 
 // id3GEOBStore returns the object bytes of a GEOB frame body when its MIME type

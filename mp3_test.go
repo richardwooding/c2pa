@@ -77,11 +77,61 @@ func TestMP3JUMBF_WrongMimeIsNotAStore(t *testing.T) {
 	}
 }
 
-func TestMP3JUMBF_UnsynchronisedTagIsRefused(t *testing.T) {
-	store := []byte("would be corrupted if read as-is")
+// id3Unsync applies ID3v2 unsynchronisation the way a writer does: a 0x00 is
+// stuffed after every 0xFF, so the byte stream can never contain a false MPEG
+// frame sync.
+func id3Unsync(b []byte) []byte {
+	var out []byte
+	for _, c := range b {
+		out = append(out, c)
+		if c == 0xFF {
+			out = append(out, 0x00)
+		}
+	}
+	return out
+}
+
+// TestMP3JUMBF_TagLevelUnsynchronisation: v2.3 unsynchronises the whole tag
+// body, so every frame offset shifts. The store deliberately contains 0xFF
+// bytes so the transform is not a no-op.
+func TestMP3JUMBF_TagLevelUnsynchronisation(t *testing.T) {
+	store := []byte{0xFF, 0xE0, 'r', 'e', 'a', 'l', 0xFF, 0xFF, 's', 't', 'o', 'r', 'e'}
+	frames := id3Frame(3, "GEOB", geobBody(0, id3C2PAMime, store))
+	body := id3Unsync(frames)
+
+	tag := append([]byte("ID3"), 3, 0, 0x80)
+	tag = append(tag, id3AppendSynchsafe(len(body))...)
+	tag = append(tag, body...)
+
+	if got := mp3JUMBF(context.Background(), tag); !bytes.Equal(got, store) {
+		t.Errorf("got % x, want % x", got, store)
+	}
+}
+
+// TestMP3JUMBF_PerFrameUnsynchronisation: v2.4 unsynchronises per frame (format
+// flag 0x02), with the frame size measuring the still-stuffed bytes.
+func TestMP3JUMBF_PerFrameUnsynchronisation(t *testing.T) {
+	store := []byte{0xFF, 0x00, 0xFF, 0xE7, 'p', 'a', 'y', 'l', 'o', 'a', 'd'}
+	raw := geobBody(0, id3C2PAMime, store)
+	stuffed := id3Unsync(raw)
+
+	frame := append([]byte("GEOB"), id3AppendSynchsafe(len(stuffed))...)
+	frame = append(frame, 0, 0x02)
+	frame = append(frame, stuffed...)
+
+	if got := mp3JUMBF(context.Background(), id3Tag(4, 0x80, frame)); !bytes.Equal(got, store) {
+		t.Errorf("got % x, want % x", got, store)
+	}
+}
+
+// TestMP3JUMBF_V24TagFlagWithoutFrameFlag: in v2.4 the tag-level bit only says
+// frames MAY be unsynchronised; the frame's own flag governs, so an unflagged
+// frame is read as-is.
+func TestMP3JUMBF_V24TagFlagWithoutFrameFlag(t *testing.T) {
+	store := []byte("no ff bytes here at all")
 	data := id3Tag(4, 0x80, id3Frame(4, "GEOB", geobBody(0, id3C2PAMime, store)))
-	if got := mp3JUMBF(context.Background(), data); got != nil {
-		t.Errorf("an unsynchronised tag must yield nil rather than a corrupted store, got %q", got)
+	if got := mp3JUMBF(context.Background(), data); !bytes.Equal(got, store) {
+		t.Errorf("got %q, want %q", got, store)
 	}
 }
 
