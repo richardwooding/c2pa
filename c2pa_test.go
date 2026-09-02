@@ -227,3 +227,30 @@ func mustCBOR(t *testing.T, v any) []byte {
 	}
 	return b
 }
+
+// TestRead_ActiveManifestOnly pins two Read-path fixes on the video fixture,
+// whose active manifest is signed by "C2PA Signer" via the pre-1.3 text-key
+// x5chain and which embeds an ingredient manifest signed by "Bob":
+//
+//   - SignedBy was empty, because leafCert only read the int64(33) label; and
+//   - with the active manifest unreadable, nothing stopped an ingredient's
+//     values standing in for the asset's.
+func TestRead_ActiveManifestOnly(t *testing.T) {
+	f, err := os.Open("testdata/c2pa_signed_video.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	info := Read(context.Background(), BMFF, f)
+	if !info.Present {
+		t.Fatal("expected a manifest")
+	}
+	if info.SignedBy != "C2PA Signer" {
+		t.Errorf("SignedBy = %q, want the ACTIVE manifest's signer %q (Bob is the ingredient's)",
+			info.SignedBy, "C2PA Signer")
+	}
+	if info.AIGenerated {
+		t.Error("AIGenerated leaked from outside the active manifest")
+	}
+}

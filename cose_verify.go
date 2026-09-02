@@ -61,11 +61,9 @@ func (v *validator) verifyCOSE(m *parsedManifest, uri string) (chain []*x509.Cer
 	// 0.6-era assets) used the text key "x5chain" instead. Accept all four —
 	// the chain is transport, not a signed claim; trust comes from chain
 	// validation against the anchor pool either way.
-	for _, hdr := range []map[any]any{map[any]any(msg.Headers.Protected), map[any]any(msg.Headers.Unprotected)} {
-		for _, key := range []any{cose.HeaderLabelX5Chain, "x5chain"} {
-			if len(chain) == 0 {
-				chain = parseChain(hdr[key])
-			}
+	for _, v := range x5chainCandidates(msg.Headers) {
+		if len(chain) == 0 {
+			chain = parseChain(v)
 		}
 	}
 	if len(chain) == 0 {

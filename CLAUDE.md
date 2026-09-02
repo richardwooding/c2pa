@@ -67,9 +67,13 @@ The two modes are the whole point, and the line between them must stay sharp:
   `SeverityFailure` status was recorded. "Required but absent" (no claim, no signature, no hard
   binding) is encoded as a *failure* status so the roll-up stays a single predicate.
 
-Don't entangle the paths: `Read` uses `parseManifest`; `Validate` uses `parseStore` (in `boxes.go`,
-which additionally keeps raw box bytes + offsets that hashing needs). `Read`'s contract, tests, and
-fuzz targets stay untouched.
+Don't entangle the paths: `Read` builds `Info` via `parseManifest`, which resolves the store with
+`parseStore` (in `boxes.go`) and reads ONLY the active manifest — walking every box let an
+ingredient's AI flag or signer leak into the summary. `Validate` uses `parseStore` directly for the
+raw box bytes + offsets that hashing needs. `Read` still does no crypto; its contract, tests, and
+fuzz targets stay green. The x5chain lookup is shared (`x5chainCandidates`): label 33 AND the
+pre-1.3 text key "x5chain", both headers — `leafCert` reading only the int label left `SignedBy`
+empty for that whole generation of files.
 
 ## Things to know before editing
 

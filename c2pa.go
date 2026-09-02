@@ -281,43 +281,41 @@ func pngJUMBF(ctx context.Context, data []byte) []byte {
 // parseManifest walks the JUMBF box tree, decodes the c2pa.claim and
 // c2pa.actions CBOR, and decodes the c2pa.signature COSE_Sign1 envelope.
 func parseManifest(ctx context.Context, jumbf []byte) Info {
-	info := Info{}
-	WalkBoxes(ctx, jumbf, func(label string, tbox string, content []byte) {
-		switch {
-		case tbox != "cbor":
-			return
-		case strings.HasSuffix(label, "c2pa.claim") || strings.Contains(label, "c2pa.claim.v"):
-			info.Present = true
-			var claim map[string]any
-			if decMode.Unmarshal(content, &claim) == nil {
-				info.ClaimGenerator = claimGenerator(claim)
-				info.Title, _ = claim["dc:title"].(string)
-				info.Format, _ = claim["dc:format"].(string)
-			}
-		case strings.HasSuffix(label, "c2pa.actions") || strings.Contains(label, "c2pa.actions.v"):
-			info.Present = true
-			var act map[string]any
-			if decMode.Unmarshal(content, &act) == nil {
-				if actionsAreAI(act) {
-					info.AIGenerated = true
-				}
-				// Assigned unconditionally, as ClaimGenerator is: a store holds
-				// an actions box per manifest, and keeping the first non-empty
-				// one would let an ingredient's agent stand beside the active
-				// manifest's generator.
-				info.SoftwareAgent = actionsSoftwareAgent(act)
-			}
-		case strings.HasSuffix(label, "c2pa.signature"):
-			// The signature box content is a COSE_Sign1 (a raw CBOR array,
-			// not a text-keyed map), so it bypasses the claim/actions
-			// decode above and is parsed by signerIdentity.
-			info.Present = true
-			if by, at := signerIdentity(content); by != "" || !at.IsZero() {
-				info.SignedBy = by
-				info.SignedAt = at
-			}
+	// Info describes the ACTIVE manifest only. Walking every box in the store
+	// let an ingredient leak into the summary: AIGenerated stuck if any nested
+	// manifest declared AI, and an ingredient's signer stood as SignedBy
+	// whenever the active manifest's own extraction came back empty — the Read
+	// path's sibling of the SignerChain bug fixed in v0.8.0.
+	m := parseStore(ctx, jumbf).active()
+	if m == nil {
+		return Info{}
+	}
+	info := Info{Present: true}
+	if m.claim != nil {
+		info.ClaimGenerator = claimGenerator(m.claim)
+		info.Title, _ = m.claim["dc:title"].(string)
+		info.Format, _ = m.claim["dc:format"].(string)
+	}
+	for i := range m.assertions {
+		a := &m.assertions[i]
+		if a.tbox != "cbor" ||
+			!(strings.HasSuffix(a.label, "c2pa.actions") || strings.Contains(a.label, "c2pa.actions.v")) {
+			continue
 		}
-	})
+		var act map[string]any
+		if decMode.Unmarshal(a.data, &act) == nil {
+			if actionsAreAI(act) {
+				info.AIGenerated = true
+			}
+			// Assigned unconditionally so within this manifest the newest
+			// actions box wins, as before.
+			info.SoftwareAgent = actionsSoftwareAgent(act)
+		}
+	}
+	if by, at := signerIdentity(m.signature); by != "" || !at.IsZero() {
+		info.SignedBy = by
+		info.SignedAt = at
+	}
 	return info
 }
 
@@ -344,15 +342,14 @@ func signerIdentity(coseSign1 []byte) (signedBy string, signedAt time.Time) {
 // (protected first, then unprotected) and parses its first entry — the leaf
 // signer certificate.
 func leafCert(h cose.Headers) *x509.Certificate {
-	for _, store := range []map[any]any{h.Protected, h.Unprotected} {
-		// go-cose keys protected/unprotected headers with its int64 label
-		// constants, so look up the x5chain with cose.HeaderLabelX5Chain
-		// (== 33) rather than an untyped int literal — int(33) would miss.
-		der := firstX5ChainDER(store[cose.HeaderLabelX5Chain])
+	for _, v := range x5chainCandidates(h) {
+		der := firstX5ChainDER(v)
 		if der == nil {
 			continue
 		}
-		if c, err := x509.ParseCertificate(der); err == nil {
+		// parseCert, not bare x509.ParseCertificate: C2PA RSA certs encode an
+		// id-RSASSA-PSS SPKI Go leaves unparsed, and parseCert repairs it.
+		if c, err := parseCert(der); err == nil {
 			return c
 		}
 	}
@@ -361,6 +358,23 @@ func leafCert(h cose.Headers) *x509.Certificate {
 
 // firstX5ChainDER extracts the first DER certificate from an x5chain header
 // value, which may be a single []byte (one cert) or an array of them.
+// x5chainCandidates returns every place a COSE signer chain may live, in
+// precedence order: the x5chain label (RFC 9360, int 33) in the protected then
+// unprotected header, and the text key "x5chain" pre-1.3 c2pa-rs signers used.
+// go-cose keys headers with its int64 constants, so the int lookup must use
+// cose.HeaderLabelX5Chain — an untyped int(33) literal misses the entry.
+func x5chainCandidates(h cose.Headers) []any {
+	var out []any
+	for _, hdr := range []map[any]any{h.Protected, h.Unprotected} {
+		for _, key := range []any{cose.HeaderLabelX5Chain, "x5chain"} {
+			if v, ok := hdr[key]; ok {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
 func firstX5ChainDER(v any) []byte {
 	switch x := v.(type) {
 	case []byte:
