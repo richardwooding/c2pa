@@ -29,6 +29,8 @@ Public surface:
 - `Validate` / `ValidationResult` / `StatusEntry` / `StatusCode` / `Severity` — the verifier and its
   result. `ValidateOption` (`WithSigningTrust`, `WithTimestampTrust`, `WithOnlineRevocation`,
   `WithClock`, `WithMaxIngredientDepth`, `WithMaxScan`, `WithHTTPClient`).
+- `ReadAll(ctx, container, r)` — one Info per store, asset's own first (AttributionAsset), then
+  marker-found unassociated ones (AttributionUnknown). Only PDF returns >1 today (§A.4.3).
 - `ExtractStore(ctx, container, r)` — the raw JUMBF store as embedded; nil means none found.
 - `WalkBoxes(ctx, jumbf, fn)` — lower-level JUMBF box-tree walker. Paired with ExtractStore
   this is what a manifest viewer uses to show assertions `Info` doesn't model.

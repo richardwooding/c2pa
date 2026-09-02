@@ -652,9 +652,21 @@ func pdfActiveStore(ctx context.Context, data []byte, objs *pdfObjects) []byte {
 // compressed out of sight, and a store from an earlier update section that the
 // current catalog no longer associates — §15.5.2.2 keeps those valid.
 func pdfMarkedStore(ctx context.Context, objs *pdfObjects) []byte {
+	if stores := pdfMarkedStores(ctx, objs); len(stores) > 0 {
+		return stores[0]
+	}
+	return nil
+}
+
+// pdfMarkedStores collects every distinct store the §A.4.1 markers identify,
+// newest definition first, under the same candidate budget the single-store
+// path always had. Duplicates arise because a specification matches both
+// markers; they are folded by byte equality.
+func pdfMarkedStores(ctx context.Context, objs *pdfObjects) [][]byte {
 	// A store found this way may equally be an object-level manifest (§A.4.3),
 	// which describes an embedded image or font rather than the document; the
 	// markers are the same and nothing distinguishes them here.
+	var stores [][]byte
 	attempts := 0
 	for _, marker := range []struct {
 		key, want string
@@ -668,19 +680,30 @@ func pdfMarkedStore(ctx context.Context, objs *pdfObjects) []byte {
 	} {
 		for i := len(objs.order) - 1; i >= 0 && attempts < maxPDFStoreAttempts; i-- {
 			if ctx.Err() != nil {
-				return nil
+				return stores
 			}
 			body := objs.order[i].body
 			if marker.read(pdfDict(body), marker.key) != marker.want {
 				continue
 			}
 			attempts++
-			if store := pdfEmbeddedStore(ctx, objs, body); store != nil {
-				return store
+			store := pdfEmbeddedStore(ctx, objs, body)
+			if store == nil {
+				continue
+			}
+			dup := false
+			for _, have := range stores {
+				if bytes.Equal(have, store) {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				stores = append(stores, store)
 			}
 		}
 	}
-	return nil
+	return stores
 }
 
 // pdfStoreTally counts the manifest stores this document associates with itself.

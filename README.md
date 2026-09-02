@@ -151,6 +151,10 @@ each `StatusEntry` has a `Severity` (success / informational / failure).
 
 ## Lower-level
 
+`c2pa.ReadAll(ctx, container, r)` enumerates every store an asset carries — the asset's own first,
+then any store the C2PA markers find that nothing associates (`AttributionUnknown`), such as a
+signed attachment inside a PDF. `Read` is the first entry's view.
+
 `c2pa.ExtractStore(ctx, container, r)` returns the raw JUMBF manifest store exactly as it appears in
 the file, and `c2pa.WalkBoxes(ctx, jumbf, fn)` walks its box tree. Together they reach assertions
 `Read` doesn't model — the pair a manifest viewer wants. A nil store means none was found, not an

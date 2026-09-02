@@ -25,6 +25,7 @@
 package c2pa
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/asn1"
@@ -484,6 +485,66 @@ func rfc3161GenTime(der []byte) time.Time {
 // the 8-byte header — could nest ~MaxScan/8 levels deep and exhaust the
 // goroutine stack. We degrade gracefully (stop descending) instead.
 const maxJUMBFDepth = 64
+
+// ReadAll returns one Info per manifest store the asset carries: the store the
+// asset's own structure associates first, with AttributionAsset, then any
+// store the C2PA markers identify that nothing associates, each with
+// AttributionUnknown. Nil when there is none.
+//
+// Only PDF can return more than one entry today — §A.4.1 embeds a store as an
+// associated file, and §A.4.3 lets an embedded file carry a manifest of its
+// own, so a document and its attachment can both bear provenance. Read is
+// exactly the first entry's view; a triage caller that wants to see a signed
+// attachment inside an unsigned document is who this is for. It grew out of
+// the review discussion on the PDF containers (#14).
+//
+// Like Read: unverified, non-failing, capped at MaxScan.
+func ReadAll(ctx context.Context, container Container, r io.Reader) []Info {
+	if ctx.Err() != nil {
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(r, MaxScan))
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	if container != PDF {
+		info := parseManifest(ctx, extractJUMBF(ctx, container, data))
+		if !info.Present {
+			return nil
+		}
+		info.Attribution = AttributionAsset
+		return []Info{info}
+	}
+
+	objs, primary, src := pdfScan(ctx, data)
+	var out []Info
+	seen := [][]byte{}
+	add := func(store []byte, attr Attribution) {
+		for _, have := range seen {
+			if bytes.Equal(have, store) {
+				return
+			}
+		}
+		info := parseManifest(ctx, store)
+		if !info.Present {
+			return
+		}
+		info.Attribution = attr
+		out = append(out, info)
+		seen = append(seen, store)
+	}
+	if src == pdfStoreCatalog {
+		add(primary, AttributionAsset)
+	} else if src == pdfStoreMarker {
+		add(primary, AttributionUnknown)
+	}
+	if objs != nil {
+		for _, store := range pdfMarkedStores(ctx, objs) {
+			add(store, AttributionUnknown)
+		}
+	}
+	return out
+}
 
 // ExtractStore returns the raw JUMBF manifest store embedded in r, byte for
 // byte as it appears in the file, or nil when the container carries none.
