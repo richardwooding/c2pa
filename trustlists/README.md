@@ -12,6 +12,11 @@ The default C2PA trust anchors, embedded into the package via `go:embed` (see
 Both are the official conformance lists published at
 [c2pa-org/conformance-public](https://github.com/c2pa-org/conformance-public/tree/main/trust-list).
 
+Current snapshot: commit `43213566c9e5` (2026-09-01) — 30 signing anchors,
+22 TSA anchors. The weekly `corpus.yml` workflow refetches the lists and fails
+on drift, so a stale snapshot shows up as a red run rather than as
+`signingCredential.untrusted` on files from newly certified signers.
+
 These lists change over time as the C2PA program admits new authorities. They
 are a point-in-time snapshot — refresh them periodically from the source above:
 
