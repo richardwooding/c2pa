@@ -51,10 +51,9 @@ func FuzzRead(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_ = Read(context.Background(), JPEG, bytes.NewReader(data))
-		_ = Read(context.Background(), PNG, bytes.NewReader(data))
-		_ = Read(context.Background(), BMFF, bytes.NewReader(data))
-		_ = Read(context.Background(), PDF, bytes.NewReader(data))
+		for _, c := range []Container{JPEG, PNG, BMFF, RIFF, TIFF, GIF, MP3, SVG, PDF} {
+			_ = Read(context.Background(), c, bytes.NewReader(data))
+		}
 	})
 }
 
@@ -72,7 +71,7 @@ func FuzzWalkBoxes(f *testing.F) {
 		0x00, 0x00, 0x00, 0x2A, 'j', 'u', 'm', 'b', // jumb, lbox 42
 		0x00, 0x00, 0x00, 0x19, 'j', 'u', 'm', 'd', // jumd, lbox 25
 		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // type UUID
-		0x00,                                        // toggles (no label)
+		0x00,                                             // toggles (no label)
 		0x00, 0x00, 0x00, 0x09, 'c', 'b', 'o', 'r', 0xA0, // cbor child {}
 	})
 	// LBox claiming far more than the buffer holds — must bail, not index OOB.
@@ -105,7 +104,7 @@ func FuzzWalkBoxesRanges(f *testing.F) {
 		0x00, 0x00, 0x00, 0x2A, 'j', 'u', 'm', 'b', // jumb, lbox 42
 		0x00, 0x00, 0x00, 0x19, 'j', 'u', 'm', 'd', // jumd, lbox 25
 		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // type UUID
-		0x00,                                            // toggles (no label)
+		0x00,                                             // toggles (no label)
 		0x00, 0x00, 0x00, 0x09, 'c', 'b', 'o', 'r', 0xA0, // cbor child {}
 	})
 	// LBox larger than the buffer — must bail without indexing OOB.
@@ -130,10 +129,9 @@ func FuzzValidate(f *testing.F) {
 		f.Add(b)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_ = Validate(context.Background(), JPEG, bytes.NewReader(data))
-		_ = Validate(context.Background(), PNG, bytes.NewReader(data))
-		_ = Validate(context.Background(), BMFF, bytes.NewReader(data))
-		_ = Validate(context.Background(), PDF, bytes.NewReader(data))
+		for _, c := range []Container{JPEG, PNG, BMFF, RIFF, TIFF, GIF, MP3, SVG, PDF} {
+			_ = Validate(context.Background(), c, bytes.NewReader(data))
+		}
 	})
 }
 

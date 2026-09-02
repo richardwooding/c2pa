@@ -1,0 +1,63 @@
+name: Corpus
+# Weekly conformance against the official C2PA corpus and the c2pa-rs reference
+# implementation, plus a trust-list drift check — so staleness and divergence
+# show up as a red run instead of silently.
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # c2patool is the differential oracle. Version pinned: its JSON schema
+      # and validation_state tiers are what the harness parses.
+      - name: Install c2patool
+        env:
+          C2PATOOL_VERSION: v0.27.16
+        run: |
+          curl -fsSL -o /tmp/c2patool.tar.gz \
+            "https://github.com/contentauth/c2pa-rs/releases/download/c2patool-${C2PATOOL_VERSION}/c2patool-${C2PATOOL_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          tar -xzf /tmp/c2patool.tar.gz -C /tmp
+          install -m 0755 "$(find /tmp -name c2patool -type f | head -1)" /usr/local/bin/c2patool
+          c2patool --version
+
+      - name: Conformance + differential
+        env:
+          C2PA_CORPUS: download
+          C2PA_DIFF_REPORT: ${{ github.workspace }}/parity.md
+        run: go test -run 'TestConformance' -v -timeout 30m .
+
+      - name: Upload parity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-report
+          path: parity.md
+          if-no-files-found: ignore
+
+      # The embedded trust lists are a point-in-time snapshot of
+      # c2pa-org/conformance-public. Drift means newly certified signers are
+      # validating as untrusted — fail loudly rather than rot silently.
+      - name: Trust-list drift
+        run: |
+          base=https://raw.githubusercontent.com/c2pa-org/conformance-public/main/trust-list
+          curl -fsSL "$base/C2PA-TRUST-LIST.pem"     -o /tmp/signing.pem
+          curl -fsSL "$base/C2PA-TSA-TRUST-LIST.pem" -o /tmp/tsa.pem
+          fail=0
+          diff -q trustlists/C2PA-TRUST-LIST.pem /tmp/signing.pem || fail=1
+          diff -q trustlists/C2PA-TSA-TRUST-LIST.pem /tmp/tsa.pem || fail=1
+          if [ "$fail" = "1" ]; then
+            echo "::error::embedded trust lists have drifted from c2pa-org/conformance-public — refresh trustlists/ (see its README)"
+            exit 1
+          fi
+          echo "trust lists match upstream"
