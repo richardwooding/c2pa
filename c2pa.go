@@ -533,9 +533,10 @@ func ReadAll(ctx context.Context, container Container, r io.Reader) []Info {
 		out = append(out, info)
 		seen = append(seen, store)
 	}
-	if src == pdfStoreCatalog {
+	switch src {
+	case pdfStoreCatalog:
 		add(primary, AttributionAsset)
-	} else if src == pdfStoreMarker {
+	case pdfStoreMarker:
 		add(primary, AttributionUnknown)
 	}
 	if objs != nil {
