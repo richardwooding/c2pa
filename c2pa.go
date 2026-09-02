@@ -298,8 +298,8 @@ func parseManifest(ctx context.Context, jumbf []byte) Info {
 	}
 	for i := range m.assertions {
 		a := &m.assertions[i]
-		if a.tbox != "cbor" ||
-			!(strings.HasSuffix(a.label, "c2pa.actions") || strings.Contains(a.label, "c2pa.actions.v")) {
+		isActions := strings.HasSuffix(a.label, "c2pa.actions") || strings.Contains(a.label, "c2pa.actions.v")
+		if a.tbox != "cbor" || !isActions {
 			continue
 		}
 		var act map[string]any
