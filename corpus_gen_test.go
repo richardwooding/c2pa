@@ -274,24 +274,27 @@ func newCorpusSigner(t testing.TB, alg cose.Algorithm, opts ...certOpt) *signerB
 }
 
 type manifestSpec struct {
-	label         string
-	claimV2       bool
-	signer        *signerBundle
-	assertions    []assertionSpec
-	claimExtra    map[string]any
-	emptyClaim    bool
-	omitSig       bool
-	omitX5Chain   bool
-	corruptSig    bool
-	forceAlg      cose.Algorithm
-	attachPayload []byte
-	attachSelf    bool
-	tsKind        int // 0 none, 1 sigTst (1.x), 2 sigTst2 (2.x)
-	tsa           *testTSA
-	tsOpts        []tsTokenOpt
-	dataHashAlg   string
-	noHardBinding bool
-	extraBinding  *assertionSpec
+	label      string
+	claimV2    bool
+	signer     *signerBundle
+	assertions []assertionSpec
+	claimExtra map[string]any
+	emptyClaim bool
+	// duplicateClaim appends a SECOND claim box to the manifest, which
+	// validation reports as claim.multiple. The first claim is the signed one.
+	duplicateClaim bool
+	omitSig        bool
+	omitX5Chain    bool
+	corruptSig     bool
+	forceAlg       cose.Algorithm
+	attachPayload  []byte
+	attachSelf     bool
+	tsKind         int // 0 none, 1 sigTst (1.x), 2 sigTst2 (2.x)
+	tsa            *testTSA
+	tsOpts         []tsTokenOpt
+	dataHashAlg    string
+	noHardBinding  bool
+	extraBinding   *assertionSpec
 }
 
 type assertionSpec struct {
@@ -379,6 +382,10 @@ func buildManifest(t testing.TB, spec manifestSpec) []byte {
 		children = append(children, superBox(uuidCBOR, claimLabel))
 	} else {
 		children = append(children, superBox(uuidCBOR, claimLabel, leafBox("cbor", claimBytes)))
+	}
+	if spec.duplicateClaim {
+		second := mustMarshalCBOR(t, map[string]any{"dc:title": "an impostor claim"})
+		children = append(children, superBox(uuidCBOR, claimLabel, leafBox("cbor", second)))
 	}
 	if !spec.omitSig {
 		sig := signClaim(t, spec, claimBytes)

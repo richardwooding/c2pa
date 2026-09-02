@@ -236,7 +236,7 @@ nothing lands in `testdata/`. Four things to know before extending it:
   treats an unknown code as *informational*, so a typo'd literal degrades silently into a passing
   test instead of failing.
 
-Four status codes are declared but have no emission site: `claim.multiple`,
-`timeStamp.outsideValidity`, and `assertion.boxesHash.match`/`.mismatch` (the last two dead by
-design while `c2pa.hash.boxes` reports `general.unsupported`). Don't write corpus cases for them
-expecting a result — they need a library change first.
+Two status codes are declared but have no emission site: `assertion.boxesHash.match`/`.mismatch`,
+dead by design while `c2pa.hash.boxes` reports `general.unsupported`. (`claim.multiple` and
+`timeStamp.outsideValidity` gained emission sites in the 2026-09 reliability pass and have corpus
+cases.)

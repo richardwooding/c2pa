@@ -237,6 +237,14 @@ func TestCorpusNegatives(t *testing.T) {
 			},
 			want: StatusClaimRequiredMissing,
 		},
+		{
+			name:      "manifest with two claim boxes",
+			container: JPEG,
+			spec: func(sb *signerBundle) manifestSpec {
+				return manifestSpec{signer: sb, duplicateClaim: true}
+			},
+			want: StatusClaimMultiple,
+		},
 	}
 
 	for _, tc := range tests {

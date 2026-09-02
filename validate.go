@@ -343,6 +343,9 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 	if m.claimBytes == nil {
 		v.add(StatusClaimRequiredMissing, uri, "manifest has no claim", nil)
 	}
+	if m.multipleClaims {
+		v.add(StatusClaimMultiple, uri, "manifest holds more than one claim box", nil)
+	}
 	if m.signature == nil {
 		v.add(StatusClaimSignatureMissing, uri, "manifest has no signature", nil)
 	}

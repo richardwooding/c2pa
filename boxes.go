@@ -106,6 +106,9 @@ type parsedManifest struct {
 	claim      map[string]any // decoded claim, nil if undecodable
 	signature  []byte         // COSE_Sign1 bytes from the c2pa.signature box
 	assertions []rawAssertion
+	// multipleClaims records a second claim box in this manifest — the first
+	// one stands, and validation reports claim.multiple.
+	multipleClaims bool
 }
 
 // parsedStore is the manifest store: one or more manifests, the last of which
@@ -163,6 +166,13 @@ func asManifest(b *box) *parsedManifest {
 	for _, c := range b.children {
 		switch {
 		case isClaimLabel(c.label):
+			if m.claimBytes != nil {
+				// A manifest holds exactly one claim; a second is its own
+				// defined failure (claim.multiple) and must not silently
+				// replace the one the signature covers.
+				m.multipleClaims = true
+				continue
+			}
 			if d := dataChild(c); d != nil {
 				m.claimBytes = d.content
 				var claim map[string]any
