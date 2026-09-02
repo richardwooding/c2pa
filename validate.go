@@ -354,18 +354,35 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 	// certificate's validity window (so a cert valid at signing but now expired
 	// still passes); otherwise fall back to the configured clock.
 	verifyTime := v.cfg.clock()
-	if genTime, trusted := v.verifyTimestamp(m, uri); trusted {
+	genTime, trusted := v.verifyTimestamp(m, uri)
+	if trusted && depth == 0 {
 		// Only the active manifest's timestamp describes THIS asset. An
 		// ingredient's is about the bytes that went into it, so letting the
 		// recursion below overwrite this would report an earlier work's
-		// signing time as the asset's.
-		if depth == 0 {
-			v.res.SignedAt = genTime
-		}
+		// signing time as the asset's. SignedAt stays trusted-only.
+		v.res.SignedAt = genTime
+	}
+	if !genTime.IsZero() {
+		// The validity-window clock uses an attested genTime even when the TSA
+		// is unanchored: the token is cryptographically bound to this signature,
+		// so "the certificate was valid when this was signed" is established
+		// even though timeStamp.untrusted stands (and keeps Valid false). The
+		// alternative manufactures signingCredential.expired out of our refusal
+		// to trust the clock — a worse diagnosis than the trust failure itself,
+		// and one that misfiles legitimately old files as structurally broken.
+		// No verdict weakens: an untrusted timestamp can never make Valid true.
 		verifyTime = genTime
 	}
 
 	if len(chain) > 0 {
+		// A bound genTime outside the signing certificate's own validity window
+		// is its own defined failure, distinct from an expiry measured at the
+		// wall clock.
+		if leaf := chain[0]; !genTime.IsZero() &&
+			(genTime.Before(leaf.NotBefore) || genTime.After(leaf.NotAfter)) {
+			v.add(StatusTimeStampOutsideValidity, uri,
+				"timestamp genTime is outside the signing certificate's validity period", nil)
+		}
 		// Likewise the signer: an ingredient is signed by whoever made the
 		// material, not by whoever signed this asset.
 		if depth == 0 {

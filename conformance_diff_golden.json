@@ -1,0 +1,7 @@
+{
+  "legacy/1.4/image/jpeg/adobe-20220124-CIE-sig-CA.jpg": {
+    "ours": "invalid",
+    "theirs": "valid",
+    "reason": "The file embeds an ingredient manifest whose signature was deliberately tampered (E-sig). c2pa-rs scopes that failure to the ingredient and keeps the active manifest's roll-up Valid; this library's Valid is 'no failure anywhere', so a provably tampered ingredient makes the asset not-Valid. Deliberate: an asset carrying falsified provenance for its own inputs should not present as clean. The per-status URIs still show the failure is the ingredient's."
+  }
+}

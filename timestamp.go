@@ -69,7 +69,9 @@ func (v *validator) verifyTimestamp(m *parsedManifest, uri string) (genTime time
 
 	gt, code := v.verifyTimestampToken(tokenDER, tbs, uri)
 	if code != StatusTimeStampValidated {
-		return time.Time{}, false
+		// gt is non-zero only for StatusTimeStampUntrusted — a token bound to
+		// this signature whose TSA merely does not anchor.
+		return gt, false
 	}
 	v.add(StatusTimeStampValidated, uri, "timestamp verified", nil)
 	return gt, true
@@ -152,8 +154,12 @@ func (v *validator) verifyTimestampToken(der, tbs []byte, uri string) (time.Time
 	}
 
 	// 3. Chain the TSA certificate to the trusted timestamp pool at genTime.
+	// An untrusted chain still returns the genTime: everything cryptographic —
+	// the imprint binding to THIS signature, the signed attributes, the CMS
+	// signature — has passed by here, so the time is attested, just not by an
+	// authority the pool anchors. The caller decides what that is good for.
 	if !v.verifyTSAChain(signer, sd.certs, tstInfo.genTime, uri) {
-		return time.Time{}, StatusTimeStampUntrusted
+		return tstInfo.genTime, StatusTimeStampUntrusted
 	}
 	return tstInfo.genTime, StatusTimeStampValidated
 }
@@ -311,9 +317,9 @@ type signerInfoFields struct {
 func parseSignerInfo(set asn1.RawValue) (signerInfoFields, bool) {
 	var out signerInfoFields
 	var si struct {
-		Version     int
-		SID         asn1.RawValue
-		DigestAlg   struct {
+		Version   int
+		SID       asn1.RawValue
+		DigestAlg struct {
 			Algorithm asn1.ObjectIdentifier
 			Params    asn1.RawValue `asn1:"optional"`
 		}
