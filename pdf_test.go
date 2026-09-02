@@ -180,6 +180,27 @@ func (d *pdfDoc) append(s string) *pdfDoc {
 	return d
 }
 
+// appendUnplacedXref appends a cross-reference section that parses and names its own /Root but
+// places no object at all, plus a startxref pointing at it. A decoy needs nothing more than this to
+// be the last section a reader looks at.
+func (d *pdfDoc) appendUnplacedXref(root int) *pdfDoc {
+	start := len(d.b)
+	d.b = append(d.b, fmt.Sprintf("xref\n0 1\n0000000000 65535 f \n"+
+		"trailer\n<< /Size 1 /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n", root, start)...)
+	return d
+}
+
+// appendMisplacedXref appends a section whose one in-use entry places root at an offset no object
+// sits at, plus a startxref naming it. An in-use entry exists, so anything checking only that the
+// section placed something accepts it.
+func (d *pdfDoc) appendMisplacedXref(root, offset int) *pdfDoc {
+	start := len(d.b)
+	d.b = append(d.b, fmt.Sprintf("xref\n0 1\n0000000000 65535 f \n%d 1\n%010d 00000 n \n"+
+		"trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n",
+		root, offset, root+1, root, start)...)
+	return d
+}
+
 // clone copies the document, so an update section can be appended to a fresh
 // copy without disturbing the bytes of the original.
 func (d *pdfDoc) clone() *pdfDoc {
@@ -420,6 +441,39 @@ func TestPDFJUMBF_AuthoritativeCatalog(t *testing.T) {
 		}
 	})
 
+	t.Run("startxref appended after EOF", func(t *testing.T) {
+		// The decoy brings its own startxref, so the last one in the file no
+		// longer names the genuine table. Taking only the last leaves the
+		// document with no section that places a /Root, and the genuine store is
+		// then never reached.
+		tampered := genuine.clone().
+			append(decoy + "trailer\n<< /Size 903 /Root 900 0 R >>\nstartxref\n0\n%%EOF\n").bytes()
+		if got := pdfJUMBF(ctx, tampered); !bytes.Equal(got, store) {
+			t.Fatalf("appended startxref won: got %q want the genuine store", got)
+		}
+	})
+
+	t.Run("appended xref names a root it does not place", func(t *testing.T) {
+		// The section parses and its trailer carries /Root, so taking a candidate on the presence of
+		// /Root alone accepts it. It places nothing, so the catalog never resolves and the genuine
+		// earlier startxref is never reached: a candidate has to place its root to count.
+		tampered := genuine.clone().
+			append(decoy).appendUnplacedXref(900).bytes()
+		if got := pdfJUMBF(ctx, tampered); !bytes.Equal(got, store) {
+			t.Fatalf("appended xref won: got %q want the genuine store", got)
+		}
+	})
+
+	t.Run("appended xref places a root at an offset nothing sits at", func(t *testing.T) {
+		// The entry is in use, so the section did place something; the offset resolves to no object.
+		// A candidate has to reach the catalog it names, not merely claim a location for it.
+		tampered := genuine.clone().
+			append(decoy).appendMisplacedXref(900, 1).bytes()
+		if got := pdfJUMBF(ctx, tampered); !bytes.Equal(got, store) {
+			t.Fatalf("misplaced xref won: got %q want the genuine store", got)
+		}
+	})
+
 	t.Run("phantom catalog redefining the object", func(t *testing.T) {
 		// The decoy redefines object 1 rather than naming a new one, so it needs
 		// no /Root of its own: the lexical "last definition wins" rule hands it
@@ -657,6 +711,139 @@ func TestPDFJUMBF_SentinelBytesInPayload(t *testing.T) {
 	}
 }
 
+// TestPDFJUMBF_RepairStaysInsideTheObject pins that re-cutting cannot reach past the object being
+// re-cut. The keyword search runs forward from the body start, so a small dictionary sitting just
+// before a stream object can find that stream's `stream` keyword and its indirect /Length and be
+// re-cut through it — handing the document a store it does not associate as its own.
+func TestPDFJUMBF_RepairStaysInsideTheObject(t *testing.T) {
+	store := synthJUMB([]byte("an attachment's manifest"))
+	doc := newPDFDoc().
+		obj(1, "<< /Type /Catalog /AF [3 0 R] >>").
+		// The embedded file the catalog's specification names does not exist, so the §A.4.2.1 chain
+		// resolves to nothing and no store is the document's.
+		obj(3, "<< /Type /Filespec /F (c2pa.c2pa) /UF (c2pa.c2pa) "+
+			"/AFRelationship /C2PA_Manifest /EF << /F 99 0 R >> >>").
+		stream(4, pdfEmbeddedFileDict, store, "9 0 R").
+		obj(9, fmt.Sprint(len(store))).
+		trailer(1).bytes()
+
+	_, got, src := pdfScan(context.Background(), doc)
+	if src == pdfStoreCatalog {
+		t.Fatalf("an unrelated stream was attributed to the document: %q", got)
+	}
+	// Still surfaced by the markers, which is right: it is a store the file carries.
+	if !bytes.Equal(got, store) || src != pdfStoreMarker {
+		t.Fatalf("src=%v got %d bytes, want the store by marker", src, len(got))
+	}
+}
+
+// TestPDFJUMBF_RepairDropsPhantomsFromThePayload pins that re-cutting an object also un-indexes what
+// was read out of its payload. Until the length resolves the object ends at the payload's first
+// `endobj`, so header-shaped bytes after that point are indexed as real objects; one of them naming
+// the stream's own number shadows it, and the store becomes unreachable.
+func TestPDFJUMBF_RepairDropsPhantomsFromThePayload(t *testing.T) {
+	store := synthJUMB([]byte("a title \n4 0 obj\njunk\nendobj\n and more"))
+	doc := newPDFDoc().
+		obj(1, "<< /Type /Catalog /AF [3 0 R] >>").
+		obj(3, pdfC2PAFilespec).
+		stream(4, pdfEmbeddedFileDict, store, "9 0 R").
+		obj(9, fmt.Sprint(len(store))).
+		trailer(1).bytes()
+
+	// Asserted through the source, not just the bytes: the phantom breaks the §A.4.2.1 chain, and the
+	// markers then find the same store with nothing able to say it is the document's. Reporting the
+	// document's own manifest as unattributed is the whole distinction Attribution exists to carry.
+	_, got, src := pdfScan(context.Background(), doc)
+	if !bytes.Equal(got, store) {
+		t.Fatalf("got %d bytes, want %d", len(got), len(store))
+	}
+	if src != pdfStoreCatalog {
+		t.Fatalf("src = %v, want the catalog to still place the store", src)
+	}
+}
+
+// TestPDFJUMBF_PayloadPhantomCannotBlockItsOwnCleanup pins the deadlock between the two halves of
+// the repair. The length object is resolved before any phantom is dropped, so a payload spelling
+// that object's own header shadows the real definition: the length does not resolve, the object is
+// not re-cut, no payload extent is recorded, and the phantom is never dropped either.
+func TestPDFJUMBF_PayloadPhantomCannotBlockItsOwnCleanup(t *testing.T) {
+	store := synthJUMB([]byte("a title \n9 0 obj\n7\nendobj\n and more"))
+	doc := newPDFDoc().
+		obj(1, "<< /Type /Catalog /AF [3 0 R] >>").
+		obj(3, pdfC2PAFilespec).
+		// The length object is written before the stream, which is what lets the payload's copy of
+		// its header win on the lexical "last definition of a number" rule.
+		obj(9, fmt.Sprint(len(store))).
+		stream(4, pdfEmbeddedFileDict, store, "9 0 R").
+		trailer(1).bytes()
+
+	_, got, src := pdfScan(context.Background(), doc)
+	if !bytes.Equal(got, store) {
+		t.Fatalf("got %d bytes, want %d", len(got), len(store))
+	}
+	if src != pdfStoreCatalog {
+		t.Fatalf("src = %v, want the catalog to still place the store", src)
+	}
+}
+
+// TestPDFJUMBF_PayloadPhantomCannotTruncateTheStream pins that a fabricated length cannot cut the
+// object short. Trying several definitions needs more than "the value lands on `endstream`": a
+// payload can carry both a phantom length-object definition and an `endstream` for it to point at,
+// and being earlier in the file it is tried before the real definition. What gives it away is that
+// its own header sits inside the extent it claims, which no real length object can.
+func TestPDFJUMBF_PayloadPhantomCannotTruncateTheStream(t *testing.T) {
+	// The payload carries three things: a phantom definition of the length object, an `endstream` for
+	// its value to land on, and an `endobj` past that for the re-cut body to stop at. %%%% is
+	// replaced in place once the offset is known, so every offset stays put.
+	inner := append([]byte("\n9 0 obj\n%%%%\nendobj\n"), bytes.Repeat([]byte("A"), 60)...)
+	inner = append(inner, "endstream\nendobj\n"...)
+	inner = append(inner, bytes.Repeat([]byte("B"), 60)...)
+	store := synthJUMB(inner)
+
+	at := bytes.Index(store, []byte("endstream"))
+	if at < 0 || at > 9999 {
+		t.Fatalf("internal endstream at %d, unusable", at)
+	}
+	store = bytes.Replace(store, []byte("%%%%"), []byte(fmt.Sprintf("%04d", at)), 1)
+
+	doc := newPDFDoc().
+		obj(1, "<< /Type /Catalog /AF [3 0 R] >>").
+		obj(3, pdfC2PAFilespec).
+		stream(4, pdfEmbeddedFileDict, store, "9 0 R").
+		obj(9, fmt.Sprint(len(store))).
+		trailer(1).bytes()
+
+	got := pdfJUMBF(context.Background(), doc)
+	if !bytes.Equal(got, store) {
+		t.Fatalf("got %d bytes, want the whole %d-byte store", len(got), len(store))
+	}
+}
+
+// TestPDFJUMBF_IndirectLengthWithSentinelInPayload combines the two things the
+// scanner survives one at a time. An indirect /Length cannot be resolved on the
+// forward pass, so the object falls back to the first `endobj`; a store is
+// arbitrary binary and can spell one. The length object is written after the
+// stream, which is what makes the forward pass unable to see it and what a
+// producer emits.
+func TestPDFJUMBF_IndirectLengthWithSentinelInPayload(t *testing.T) {
+	ctx := context.Background()
+	for _, sentinel := range []string{"endobj", "\nendobj\nendstream\n"} {
+		t.Run(sentinel, func(t *testing.T) {
+			store := synthJUMB([]byte("a title " + sentinel + " and more"))
+			doc := newPDFDoc().
+				obj(1, "<< /Type /Catalog /AF [3 0 R] >>").
+				obj(3, pdfC2PAFilespec).
+				stream(4, pdfEmbeddedFileDict, store, "9 0 R").
+				obj(9, fmt.Sprint(len(store))).
+				trailer(1).bytes()
+
+			if got := pdfJUMBF(ctx, doc); !bytes.Equal(got, store) {
+				t.Fatalf("got %d bytes, want %d", len(got), len(store))
+			}
+		})
+	}
+}
+
 // pdfWithAttachmentManifest builds a document whose catalog associates a plain
 // attachment, while a second embedded file carries a C2PA manifest that nothing
 // in the catalog points at — what §A.4.3 describes, and what an attachment
@@ -803,6 +990,50 @@ func TestPDFJUMBF_PathologicalCost(t *testing.T) {
 			bytes.Repeat([]byte("1 0 obj\n<< /Subtype /application#2Fc2pa /Length 99999 >>\nstream\n"), 50_000)...)
 		if got := pdfJUMBF(ctx, doc); got != nil {
 			t.Fatalf("yielded %d bytes", len(got))
+		}
+	})
+
+	// Every indirect-length stream resolves, so each contributes a payload extent to exclude from the
+	// index. Checking each extent against every object is quadratic, and this document fits well
+	// under Read's 16 MiB cap: 200k of them measured 13.5s that way against 583ms for one merged
+	// walk. The ceiling is calibrated on the merged walk under -race, which is what CI runs.
+	t.Run("many indirect-length streams", func(t *testing.T) {
+		var b bytes.Buffer
+		b.WriteString("%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n2 0 obj\n0\nendobj\n")
+		for i := 0; i < 200_000; i++ {
+			fmt.Fprintf(&b, "%d 0 obj\n<< /Length 2 0 R >>\nstream\n\nendstream\nendobj\n", 10+i)
+		}
+		b.WriteString("trailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n")
+
+		start := time.Now()
+		if got := pdfJUMBF(ctx, b.Bytes()); got != nil {
+			t.Fatalf("yielded %d bytes", len(got))
+		}
+		if elapsed := time.Since(start); elapsed > 8*time.Second {
+			t.Fatalf("took %v, want the payload-extent walk to stay linear", elapsed)
+		}
+	})
+
+	// Every stream names the same length object, and every definition of it is a fabrication that
+	// never parses. Trying them all is N attempts per stream and N² overall.
+	// maxPDFLengthCandidates is what bounds it: 0.39s under -race against 12.9s unbounded.
+	t.Run("one length object defined many times", func(t *testing.T) {
+		var b bytes.Buffer
+		b.WriteString("%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n")
+		for range 60_000 {
+			b.WriteString("2 0 obj\nnotanumber\nendobj\n")
+		}
+		for i := range 60_000 {
+			fmt.Fprintf(&b, "%d 0 obj\n<< /Length 2 0 R >>\nstream\n\nendstream\nendobj\n", 10+i)
+		}
+		b.WriteString("trailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n")
+
+		start := time.Now()
+		if got := pdfJUMBF(ctx, b.Bytes()); got != nil {
+			t.Fatalf("yielded %d bytes", len(got))
+		}
+		if elapsed := time.Since(start); elapsed > 4*time.Second {
+			t.Fatalf("took %v, want the candidate search to stay bounded", elapsed)
 		}
 	})
 }
@@ -1176,4 +1407,76 @@ func TestValidatePDF_VerifiesSignature(t *testing.T) {
 	if !r.Has(StatusAssertionDataHashMismatch) {
 		t.Errorf("expected the fixture's data hash to mismatch in a PDF: %+v", r.Statuses)
 	}
+}
+
+// buildUnterminatedStreams produces n stream objects that each carry an
+// indirect /Length and never close with `endobj` — the shape that makes the
+// repair pass re-scan to end of file once per object.
+func buildUnterminatedStreams(n int) []byte {
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.7\n")
+	b.WriteString("1 0 obj\n5\nendobj\n")
+	for i := range n {
+		fmt.Fprintf(&b, "%d 0 obj\n<< /Length 1 0 R >>\nstream\nAAAAA\nendstream\n", i+10)
+	}
+	b.WriteString("trailer\n<< /Root 99 0 R >>\nstartxref\n0\n%%EOF\n")
+	return b.Bytes()
+}
+
+// TestPDFEndObjIsBounded pins the property directly, without depending on a
+// clock. pdfEndObj is called once per repaired object, so an unbounded search
+// costs a full pass over the input each time.
+func TestPDFEndObjIsBounded(t *testing.T) {
+	data := bytes.Repeat([]byte("A"), 4*maxPDFEndObjScan) // no `endobj` anywhere
+	if got := pdfEndObj(data, 0); got > maxPDFEndObjScan {
+		t.Errorf("pdfEndObj scanned to %d with no keyword present; must stop at %d", got, maxPDFEndObjScan)
+	}
+	// It must still find a keyword that is genuinely inside the window, which is
+	// where every conforming document puts it.
+	withKeyword := append(bytes.Repeat([]byte("A"), 100), "endobj"...)
+	if got := pdfEndObj(withKeyword, 0); got != 100 {
+		t.Errorf("pdfEndObj = %d, want 100 — the keyword is well inside the window", got)
+	}
+}
+
+// TestPDFRepairCostStaysLinear is the canary for the whole repair path, not just
+// pdfEndObj: any future full-input scan added per object shows up here.
+// Before the bound, 4k to 16k objects went from 108ms to 1.7s — 16x for 4x the
+// work. c2pa-inspector validates with context.Background(), so there is no
+// deadline to cut such a case short; the browser tab simply stops.
+// TestPDFRepairCostStaysLinear pins the bound on pdfEndObj. Resolving an
+// indirect /Length re-cuts the object, and finding its `endobj` by scanning to
+// end of file costs one full pass per repaired object. A document that omits
+// the keyword turns that into quadratic work: before the bound, quadrupling the
+// objects from 8k to 32k took 440ms to 6.9s, and a 16 MiB input ran for minutes.
+// c2pa-inspector validates with context.Background(), so there is no deadline
+// to cut it short — the browser tab simply stops.
+func TestPDFRepairCostStaysLinear(t *testing.T) {
+	const small, factor = 4000, 4
+
+	measure := func(n int) time.Duration {
+		data := buildUnterminatedStreams(n)
+		start := time.Now()
+		pdfJUMBF(context.Background(), data)
+		return time.Since(start)
+	}
+	// Best of three: a loaded machine inflates individual samples, and the
+	// minimum is the one least polluted by whatever else is running.
+	best := func(n int) time.Duration {
+		d := measure(n)
+		for range 2 {
+			d = min(d, measure(n))
+		}
+		return d
+	}
+	base, scaled := best(small), best(small*factor)
+
+	// Linear grows by `factor` (4x), quadratic by factor squared (16x). The
+	// midpoint separates them with headroom on both sides.
+	const tolerated = factor * 2
+	if scaled > base*tolerated {
+		t.Errorf("scaling %dx the objects took %.1fx the time (%v -> %v); the repair pass looks quadratic again",
+			factor, float64(scaled)/float64(max(base, time.Microsecond)), base, scaled)
+	}
+	t.Logf("%d objects %v; %d objects %v", small, base.Round(time.Millisecond), small*factor, scaled.Round(time.Millisecond))
 }

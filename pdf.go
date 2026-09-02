@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"slices"
 	"strconv"
 )
 
@@ -17,19 +18,19 @@ import (
 // indirect reference to the specification containing the active manifest. The
 // stream payload is the raw JUMBF store.
 
-// This is a lexical object scanner, not a full PDF parser: it indexes the
-// `N G obj … endobj` definitions it can see, inflates the object streams among
-// them to index what those hold, and follows the chain from there. PDF 32000-1
-// §7.5.7 forbids a stream object inside an object stream but permits the file
-// specification dictionary carrying the §A.4.1 markers, so the store's bytes
-// being visible does not make the store identifiable — the chain is what does.
+// Objects are found lexically — the `N G obj … endobj` definitions visible in
+// the bytes — and the document is then resolved the way a reader resolves it:
+// cross-reference tables and streams place the objects, object streams are
+// inflated to index what they hold. PDF 32000-1 §7.5.7 forbids a stream object
+// inside an object stream but permits the file specification dictionary
+// carrying the §A.4.1 markers, so the chain is what identifies the store.
 
 // Incremental updates append rather than rewrite, so §A.4.2.1 makes the store
-// in the most recent update section the active manifest: here the last /Root
-// names the current catalog and the last definition of an object number
-// supersedes the ones before it. §A.4.2.1 also asks a consumer to process the
-// stores of ALL update sections as one; that is not done — see the fallback in
-// pdfMarkedStore for how a superseded store is still surfaced.
+// in the most recent update section the active manifest: here the newest
+// cross-reference section that places a /Root names the current catalog, and
+// the last definition of an object number supersedes the ones before it.
+// §A.4.2.1 also asks a consumer to process the stores of ALL update sections as
+// one; that is not done — see pdfMarkedStore for how a superseded store surfaces.
 
 // The names §A.4.1 gives the C2PA embedded file. The /Subtype is accepted but
 // never required: the spec puts it on the file specification dictionary while
@@ -80,6 +81,24 @@ const maxPDFStoreAttempts = 32
 // names /Root. Real documents name it in the newest trailer.
 const maxPDFXrefHops = 32
 
+// maxPDFLengthCandidates bounds how many definitions of one indirect /Length are
+// tried. A conforming document defines it once; a run of them is a payload
+// fabricating headers, and trying every one turns N streams naming N definitions
+// into N² attempts.
+const maxPDFLengthCandidates = 8
+
+// maxPDFEndObjScan bounds the search for the `endobj` closing a repaired stream
+// object. It sits just past an `endstream` the extent already verified, so a
+// few bytes of whitespace is the real distance. Scanning to end of file instead
+// made the repair pass quadratic: one full scan per repaired object, which a
+// document that simply omits the keyword turns into minutes of CPU.
+const maxPDFEndObjScan = 2048
+
+// maxPDFXrefStarts bounds how many startxref keywords are tried, newest first,
+// looking for one whose section places a /Root. A conforming document needs the
+// first; the rest are for one with junk appended after %%EOF.
+const maxPDFXrefStarts = 8
+
 // maxPDFObjectStreams caps how many object streams are inflated to index what
 // they hold, so a document full of them cannot spend the whole decompression
 // budget on the object index alone.
@@ -87,15 +106,17 @@ const maxPDFObjectStreams = 16
 
 // pdfObject is one `N G obj … endobj` definition. body is a subslice of the
 // asset bytes running from just past the `obj` keyword to `endobj`, so a
-// stream's payload stays addressable. hdr is where the definition starts; for
-// one recovered from an object stream, stm and idx say which stream held it and
+// stream's payload stays addressable. hdr is where the definition starts and
+// start where its body does, which is what re-cutting a body needs; for one
+// recovered from an object stream, stm and idx say which stream held it and
 // where. A cross-reference entry names one or the other.
 type pdfObject struct {
-	num  int
-	hdr  int
-	stm  int
-	idx  int
-	body []byte
+	num   int
+	hdr   int
+	start int
+	stm   int
+	idx   int
+	body  []byte
 }
 
 // pdfXrefLoc is where a cross-reference section says an object's current
@@ -114,8 +135,9 @@ func (l pdfXrefLoc) found() bool { return l.offset > 0 || l.stm > 0 }
 // a lookup that resolves an object number to its newest definition.
 type pdfObjects struct {
 	order   []pdfObject
-	newest  map[int]int // object number → index into order
-	inflate int         // decompression budget left for this extraction
+	newest  map[int]int   // object number → index into order
+	byNum   map[int][]int // object number → every index, built on demand
+	inflate int           // decompression budget left for this extraction
 }
 
 // body returns the newest visible definition of an object number, falling back
@@ -268,9 +290,166 @@ func indexPDFObjects(ctx context.Context, data []byte) *pdfObjects {
 			}
 		}
 		objs.newest[num] = len(objs.order)
-		objs.order = append(objs.order, pdfObject{num: num, hdr: hdr, body: data[i:endobj]})
+		objs.order = append(objs.order, pdfObject{
+			num: num, hdr: hdr, start: i, body: data[i:endobj],
+		})
 	}
+	objs.repairIndirectLengths(ctx, data)
 	return objs
+}
+
+// repairIndirectLengths re-cuts the stream objects whose extent the forward pass
+// could not settle. An indirect /Length names an object that may be defined
+// later in the file, so it resolves only once the index is complete; until then
+// the object ends at the first `endobj`, and a manifest store is arbitrary
+// binary that can spell one. Runs before any object stream is indexed, so every
+// entry here is a visible definition whose start addresses the asset bytes.
+func (o *pdfObjects) repairIndirectLengths(ctx context.Context, data []byte) {
+	var payloads []pdfSpan
+
+	for i := range o.order {
+		if ctx.Err() != nil {
+			return
+		}
+		obj := &o.order[i]
+		// Scoped to this object's own body, never to data: the keyword search reads maxPDFDictScan
+		// bytes ahead, so scanning the whole input lets a short dictionary find the NEXT object's
+		// `stream` and its /Length and be re-cut straight through it.
+		body := data[obj.start : obj.start+len(obj.body)]
+		rel, ok := pdfStreamKeyword(body, 0)
+		if !ok {
+			continue
+		}
+		// Only an indirect /Length is unfinished business: a direct one the
+		// forward pass either used or rejected as a lie, and re-deciding it here
+		// would undo that.
+		refs := pdfRefs(body[:rel], "Length", 1)
+		if len(refs) == 0 {
+			continue
+		}
+		start := obj.start + rel
+		end := o.resolveStreamExtent(ctx, data, refs[0], start)
+		if end <= 0 {
+			continue
+		}
+		obj.body = data[obj.start:pdfEndObj(data, end)]
+		payloads = append(payloads, pdfSpan{from: start, to: end})
+	}
+	o.dropIndexedWithin(ctx, payloads)
+}
+
+// resolveStreamExtent reads the length object and returns where the payload
+// opening at start ends. Definitions are tried in file order rather than newest
+// first, because a payload can spell the length object's own header. Two things
+// make a candidate: landing on `endstream`, and its own header sitting outside
+// the extent it claims — a length object cannot live inside the payload it
+// measures, and a phantom that points past itself is exactly what does.
+func (o *pdfObjects) resolveStreamExtent(ctx context.Context, data []byte, num, start int) int {
+	for tried, i := range o.definitions(num) {
+		if tried >= maxPDFLengthCandidates || ctx.Err() != nil {
+			return 0
+		}
+		n, ok := pdfIntBody(o.order[i].body)
+		if !ok {
+			continue
+		}
+		end := pdfStreamExtent(data, start, n)
+		if end <= 0 {
+			continue
+		}
+		if hdr := o.order[i].hdr; hdr >= start && hdr < end {
+			continue
+		}
+		return end
+	}
+	return 0
+}
+
+// definitions returns every index in order defining an object number, built once
+// and reused: resolving each stream by walking the whole index instead would be
+// quadratic in a document that repeats one length object's number.
+func (o *pdfObjects) definitions(num int) []int {
+	if o.byNum == nil {
+		o.byNum = make(map[int][]int, len(o.order))
+		for i := range o.order {
+			o.byNum[o.order[i].num] = append(o.byNum[o.order[i].num], i)
+		}
+	}
+	return o.byNum[num]
+}
+
+// pdfSpan is a half-open byte range of the input.
+type pdfSpan struct{ from, to int }
+
+// dropIndexedWithin forgets the definitions indexed out of a stream payload, now
+// that its real extent is known: while unresolved, the object ended at the
+// payload's first `endobj` and the scan carried on through the rest, so
+// header-shaped bytes became entries. Both order and the spans ascend by file
+// position, so one merged walk replaces a span scan per object — 200k indirect
+// streams is 200k spans. Cancelling abandons the prune, index untouched.
+func (o *pdfObjects) dropIndexedWithin(ctx context.Context, payloads []pdfSpan) {
+	if len(payloads) == 0 || ctx.Err() != nil {
+		return
+	}
+	merged := pdfMergeSpans(payloads)
+
+	kept, next := make([]pdfObject, 0, len(o.order)), 0
+	for i := range o.order {
+		if i%4096 == 0 && ctx.Err() != nil {
+			return
+		}
+		hdr := o.order[i].hdr
+		for next < len(merged) && merged[next].to <= hdr {
+			next++
+		}
+		if next < len(merged) && hdr >= merged[next].from {
+			continue
+		}
+		kept = append(kept, o.order[i])
+	}
+	o.order = kept
+	o.byNum = nil
+	o.newest = make(map[int]int, len(kept))
+	for i := range kept {
+		o.newest[kept[i].num] = i
+	}
+}
+
+// pdfMergeSpans sorts the spans and coalesces the ones that touch, so a single
+// cursor can walk them alongside the objects.
+func pdfMergeSpans(spans []pdfSpan) []pdfSpan {
+	slices.SortFunc(spans, func(a, b pdfSpan) int { return a.from - b.from })
+
+	merged := spans[:1]
+	for _, s := range spans[1:] {
+		last := &merged[len(merged)-1]
+		if s.from <= last.to {
+			last.to = max(last.to, s.to)
+			continue
+		}
+		merged = append(merged, s)
+	}
+	return merged
+}
+
+// pdfIntBody reads the integer an object body holds on its own, which is what an
+// indirect /Length points at.
+func pdfIntBody(body []byte) (int, bool) {
+	p := pdfSkipSpace(body, 0)
+	n, _, ok := pdfUint(body, p, len(body))
+	return n, ok
+}
+
+// pdfEndObj returns where the `endobj` at or after from starts, searching a
+// bounded window. When the keyword is absent the window's end is returned: the
+// caller has already established the payload ends before from, so the body
+// still contains the whole stream.
+func pdfEndObj(data []byte, from int) int {
+	limit := min(from+maxPDFEndObjScan, len(data))
+	if e := bytes.Index(data[from:limit], []byte("endobj")); e >= 0 {
+		return from + e
+	}
+	return limit
 }
 
 // indexObjectStreams adds the objects held inside every visible /Type /ObjStm.
@@ -299,7 +478,7 @@ func (o *pdfObjects) indexObjectStreams(ctx context.Context) {
 // of object number and offset, each relative to /First, and the bodies follow in
 // the same order, so one pair's offset bounds the body before it.
 func (o *pdfObjects) indexObjStm(stm int, body []byte) {
-	dict, raw := pdfStreamPayload(body)
+	dict, raw := o.streamPayload(body)
 	n, okN := pdfInt(dict, "N")
 	first, okF := pdfInt(dict, "First")
 	if len(raw) == 0 || !okN || !okF || n <= 0 || n > maxPDFObjects || first < 0 {
@@ -357,16 +536,36 @@ func (o *pdfObjects) indexObjStm(stm int, body []byte) {
 // indirect /Length cannot be resolved while the index is still being built, so
 // such an object keeps falling back to the first `endobj`.
 func pdfStreamEnd(data []byte, i int) int {
-	k := bytes.Index(data[i:min(len(data), i+maxPDFDictScan)], []byte("stream"))
-	if k < 0 {
+	start, ok := pdfStreamKeyword(data, i)
+	if !ok {
 		return 0
-	}
-	start := i + k
-	if start > 0 && !pdfIsSpace(data[start-1]) && !pdfIsDelim(data[start-1]) {
-		return 0 // part of a longer token, e.g. `endstream`
 	}
 	n, ok := pdfInt(data[i:start], "Length")
 	if !ok || n < 0 {
+		return 0
+	}
+	return pdfStreamExtent(data, start, n)
+}
+
+// pdfStreamKeyword finds the `stream` keyword opening the body that starts at i,
+// as a whole token so `endstream` cannot pass for one.
+func pdfStreamKeyword(data []byte, i int) (int, bool) {
+	k := bytes.Index(data[i:min(len(data), i+maxPDFDictScan)], []byte("stream"))
+	if k < 0 {
+		return 0, false
+	}
+	start := i + k
+	if start > 0 && !pdfIsSpace(data[start-1]) && !pdfIsDelim(data[start-1]) {
+		return 0, false
+	}
+	return start, true
+}
+
+// pdfStreamExtent returns the offset just past a payload of n bytes opening at
+// the `stream` keyword at start, when n lands on `endstream`. Returns 0 when it
+// does not, so a length that lies never decides where the object ends.
+func pdfStreamExtent(data []byte, start, n int) int {
+	if n < 0 {
 		return 0
 	}
 	p := start + len("stream")
@@ -637,7 +836,7 @@ func (o *pdfObjects) streamStore(ctx context.Context, body []byte) []byte {
 	if ctx.Err() != nil || len(body) == 0 {
 		return nil
 	}
-	dict, raw := pdfStreamPayload(body)
+	dict, raw := o.streamPayload(body)
 	if len(raw) == 0 {
 		return nil
 	}
@@ -651,13 +850,13 @@ func (o *pdfObjects) streamStore(ctx context.Context, body []byte) []byte {
 	return store[:binary.BigEndian.Uint32(store[:4])]
 }
 
-// pdfStreamPayload returns the still-encoded bytes between an object's `stream`
-// keyword and its `endstream`. /Length is a hint, verified before use and never
-// trusted — it may be an indirect reference, and a length that lies must not
-// slice past the object — so the keyword search is what bounds the payload.
-// Trailing bytes are left on: the decoders stop at the end of their own stream,
-// and an uncompressed store is trimmed by its superbox length.
-func pdfStreamPayload(body []byte) (dict, payload []byte) {
+// streamPayload returns the still-encoded bytes between an object's `stream`
+// keyword and its `endstream`. /Length is verified against `endstream` before
+// use, so one that lies cannot slice past the object and the keyword search
+// bounds the payload instead; an indirect one is resolved through the index,
+// which is what reaches a payload whose own bytes spell `endstream`. Trailing
+// bytes are left on: an uncompressed store is trimmed by its superbox length.
+func (o *pdfObjects) streamPayload(body []byte) (dict, payload []byte) {
 	for pos := 0; pos < len(body); {
 		k := bytes.Index(body[pos:], []byte("stream"))
 		if k < 0 {
@@ -681,7 +880,13 @@ func pdfStreamPayload(body []byte) (dict, payload []byte) {
 		if p < len(body) && body[p] == '\n' {
 			p++
 		}
-		if n, ok := pdfInt(dict, "Length"); ok && n >= 0 && p+n <= len(body) &&
+		n, ok := pdfInt(dict, "Length")
+		if !ok {
+			if refs := pdfRefs(dict, "Length", 1); len(refs) == 1 {
+				n, ok = pdfIntBody(o.body(refs[0]))
+			}
+		}
+		if ok && n >= 0 && p+n <= len(body) &&
 			bytes.HasPrefix(bytes.TrimLeft(body[p+n:], "\x00\t\n\f\r "), []byte("endstream")) {
 			return dict, body[p : p+n]
 		}
@@ -743,27 +948,60 @@ func pdfDrain(r io.Reader, limit int) []byte {
 	return out
 }
 
-// pdfXrefRoot resolves the catalog the way a conforming reader does: the last
-// startxref gives the offset of the current cross-reference section, whose
-// trailer names /Root. off is where that section says the catalog lives, 0 when
-// it does not spell an offset out. Bytes appended after %%EOF carry no section
-// of their own, so they cannot redirect the document.
+// pdfXrefRoot resolves the catalog the way a conforming reader does: a startxref
+// gives the offset of a cross-reference section, whose trailer names /Root. The
+// last one is tried first and an earlier one only when its section places no
+// /Root at all, so junk appended after %%EOF cannot hide the genuine table by
+// bringing a startxref of its own. loc is where that section says the catalog
+// lives, zero when it does not place it.
 func pdfXrefRoot(
 	ctx context.Context,
 	data []byte,
 	objs *pdfObjects,
 ) (root int, loc pdfXrefLoc, ok bool) {
-	p := bytes.LastIndex(data, []byte("startxref"))
-	if p < 0 {
-		return 0, loc, false
+	end, named := len(data), 0
+	for tries := 0; tries < maxPDFXrefStarts; tries++ {
+		p := bytes.LastIndex(data[:end], []byte("startxref"))
+		if p < 0 {
+			break
+		}
+		end = p
+		pos, _, spelled := pdfUint(data, pdfSkipSpace(data, p+len("startxref")), len(data))
+		if !spelled {
+			continue
+		}
+		candidate, at, placed := pdfXrefChain(ctx, data, objs, pos)
+		// An in-use entry is not a resolution: the offset it carries has to land on the catalog it
+		// names. One placing /Root at offset 1 would otherwise take the document and leave the
+		// genuine earlier startxref untried.
+		if placed && objs.catalog(candidate, at, true) != nil {
+			return candidate, at, true
+		}
+		if candidate > 0 && named == 0 {
+			named = candidate
+		}
 	}
-	pos, _, ok := pdfUint(data, pdfSkipSpace(data, p+len("startxref")), len(data))
-	if !ok {
-		return 0, loc, false
+	if named > 0 {
+		// Some section named a catalog and no section placed it. Reported as placed with nowhere to
+		// look, so the caller fails closed rather than falling back to lexical order, which is the
+		// thing an appended decoy exploits.
+		return named, pdfXrefLoc{}, true
 	}
-	// The whole chain is walked, not just the section naming /Root: an object
-	// the newest update did not touch is placed by an older section. Earlier
-	// sections never overwrite what a newer one already said.
+	return 0, pdfXrefLoc{}, false
+}
+
+// pdfXrefChain walks the /Prev chain from the section at pos and returns the
+// /Root it names, root being non-zero once some trailer named one and placed
+// reporting whether the chain also placed that object. The whole chain is
+// walked: an object the newest update did not touch is placed by an older
+// section. Earlier sections never overwrite what a newer one already said, and
+// each candidate startxref gets its own placements so a decoy cannot seed them.
+func pdfXrefChain(
+	ctx context.Context,
+	data []byte,
+	objs *pdfObjects,
+	pos int,
+) (root int, loc pdfXrefLoc, placed bool) {
 	locs, found := map[int]pdfXrefLoc{}, false
 	for hop := 0; hop < maxPDFXrefHops; hop++ {
 		if ctx.Err() != nil || pos <= 0 || pos >= len(data) {
@@ -787,7 +1025,10 @@ func pdfXrefRoot(
 	if !found {
 		return 0, pdfXrefLoc{}, false
 	}
-	return root, locs[root], true
+	// A trailer naming /Root is not the same as a section placing it: an appended decoy needs only
+	// the name, so the placement is what earns this candidate the document.
+	loc = locs[root]
+	return root, loc, loc.found()
 }
 
 // pdfXrefSection returns the trailer dictionary of the cross-reference section
@@ -862,7 +1103,7 @@ func pdfXrefStream(data []byte, p int, objs *pdfObjects, locs map[int]pdfXrefLoc
 	dict := pdfDict(body)
 
 	w := pdfIntList(dict, "W", 3)
-	_, raw := pdfStreamPayload(body)
+	_, raw := objs.streamPayload(body)
 	if len(w) != 3 || len(raw) == 0 {
 		return dict // not a decodable xref stream; the trailer entries still stand
 	}

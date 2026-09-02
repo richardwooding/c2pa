@@ -92,20 +92,23 @@ fuzz targets stay untouched.
 - **Everything is best-effort and must never panic.** Malformed/truncated/cancelled input returns
   zero values. The RFC 3161 ASN.1 descent (`rfc3161GenTime`) is deliberately defensive at every
   `asn1.Unmarshal` step. This contract is enforced by the fuzz targets — keep them green.
-- **`pdf.go` is a lexical object scanner, not a PDF parser.** The store is an embedded file whose
-  file specification carries `/AFRelationship /C2PA_Manifest`, referenced from the catalog's `/AF`
-  (spec §A.4.1/§A.4.2.1). The catalog and the specification can be compressed into an object
-  stream, so the scan inflates visible `/Type /ObjStm` streams and indexes what they hold. PDF
-  32000-1 §7.5.7 forbids a stream object inside an object stream but permits that file
-  specification dictionary, so **the store's bytes being visible does not make the store
-  identifiable** — do not reach for that argument, it is false, and the marker fallback is not a
-  substitute for the chain. The catalog is resolved the way a reader does, through the last
-  `startxref`: taking the last `/Root` in the file lets bytes appended after `%%EOF` redirect the
-  document. `/Length` is a hint, verified against `endstream` and never trusted; inflation is
-  capped by `maxPDFInflate`. **An object ends past its stream, not at the payload's first
-  `endobj`** — the store is arbitrary binary and can spell that keyword, which silently lost the
-  whole manifest; `pdfStreamEnd` resolves the extent from a direct `/Length`, and an indirect one
-  still falls back. Deliberately NOT implemented: merging the stores of every update section into
+- **`pdf.go` finds objects lexically, then resolves the document the way a reader does.** The store
+  is an embedded file whose file specification carries `/AFRelationship /C2PA_Manifest`, referenced
+  from the catalog's `/AF` (spec §A.4.1/§A.4.2.1). It is not a general PDF library — no page tree,
+  no content streams, no encryption — but it is well past a scanner: it decodes cross-reference
+  streams (`/W` rows, `/Index` ranges, type 2 entries), inflates visible `/Type /ObjStm` streams and
+  tracks which objects came out of one. PDF 32000-1 §7.5.7 forbids a stream object inside an object
+  stream but permits that file specification dictionary, so **the store's bytes being visible does
+  not make the store identifiable** — do not reach for that argument, it is false, and the marker
+  fallback is not a substitute for the chain. The catalog is resolved through `startxref`, newest
+  first, taking the last section that actually places its own `/Root`: taking the last `/Root` in
+  the file lets bytes appended after `%%EOF` redirect the document, and taking only the last
+  `startxref` lets them hide the genuine table instead. `/Length` is a hint, verified against
+  `endstream` and never trusted; an indirect one resolves only once the object index is complete,
+  which is what `repairIndirectLengths` re-cuts those objects for. **An object ends past its stream,
+  not at the payload's first `endobj`** — the store is arbitrary binary and can spell that keyword,
+  which silently lost the whole manifest. Inflation is capped by `maxPDFInflate`.
+  Deliberately NOT implemented: merging the stores of every update section into
   one (§A.4.2.1) — so when more than one store is present, `partialStores` downgrades an
   unresolvable ingredient reference from `ingredient.manifest.mismatch` to informational, because
   §A.4.2.1 permits references across sections and absence from the active store proves nothing.
