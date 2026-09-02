@@ -53,9 +53,10 @@ context — a cancelled call surrenders promptly mid-scan.
 For **RIFF** (WebP, WAV, AVI), the store is a top-level `C2PA` chunk inside the outer `RIFF`
 container; a chunk declaring more bytes than the file holds is refused rather than read past.
 
-For **TIFF** and **DNG**, the store is IFD tag `0xCD41` with field type UNDEFINED; every IFD in the
-chain is checked, and the chain is hop-capped because a next-IFD offset may point backwards.
-BigTIFF is not read.
+For **TIFF**, **BigTIFF** and **DNG**, the store is IFD tag `0xCD41` with field type UNDEFINED;
+every IFD in the chain is checked, and the chain is hop-capped because a next-IFD offset may point
+backwards. Classic and BigTIFF are the same walk at different field widths — 4- vs 8-byte offsets,
+and three counts that classic TIFF deliberately does not share.
 
 For **GIF**, the store is the application extension identified by `C2PA_GIF`, reassembled from its
 data sub-blocks; the block structure is walked rather than scanned, since LZW image data can spell

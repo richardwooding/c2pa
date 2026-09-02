@@ -74,8 +74,8 @@ const (
 	// spills into further RIFF/AVIX containers, but the store lives in the
 	// first.
 	RIFF Container = "riff"
-	// TIFF reads the manifest from IFD tag 0xCD41 in a TIFF or DNG file. DNG is
-	// TIFF, so one constant covers both. BigTIFF is not read.
+	// TIFF reads the manifest from IFD tag 0xCD41 in a TIFF, BigTIFF or DNG
+	// file — classic and BigTIFF are the same walk at different field widths.
 	TIFF Container = "tiff"
 	// GIF reads the manifest from the application extension whose identifier is
 	// "C2PA_GIF", its payload reassembled from the extension's data sub-blocks.
