@@ -11,7 +11,11 @@ import (
 // payloads), box keeps each superbox's full header+payload bytes — required to
 // recompute the SHA hash of a whole assertion for hashed_uri verification.
 type box struct {
-	label    string // jumd label of a superbox; "" for a non-superbox box
+	label string // jumd label of a superbox; "" for a non-superbox box
+	// typeUUID is a superbox's jumd description type UUID, which is what
+	// separates a standard manifest from an update manifest — the labels and
+	// the box structure are otherwise identical.
+	typeUUID [16]byte
 	tbox     string // 4-character box type ("jumb", "cbor", "uuid", …)
 	start    int    // absolute offset of the box's LBox field in the buffer
 	end      int    // start + LBox
@@ -52,8 +56,9 @@ func parseBoxes(ctx context.Context, buf []byte, base, depth int) []*box {
 			content: b[8:lbox],
 		}
 		if tbox == "jumb" {
-			label, restOff, rest := parseJumd(bx.content, off+8)
+			label, typeUUID, restOff, rest := parseJumd(bx.content, off+8)
 			bx.label = label
+			bx.typeUUID = typeUUID
 			bx.children = parseBoxes(ctx, rest, restOff, depth+1)
 		}
 		out = append(out, bx)
@@ -64,19 +69,23 @@ func parseBoxes(ctx context.Context, buf []byte, base, depth int) []*box {
 }
 
 // parseJumd parses the leading jumd description box of a superbox's content and
-// returns its label, the absolute offset of the remaining child boxes, and the
-// remaining child-box bytes. It is the offset-aware counterpart of jumdLabel.
-func parseJumd(content []byte, contentOff int) (label string, restOff int, rest []byte) {
+// returns its label, its 16-byte type UUID, the absolute offset of the
+// remaining child boxes, and the remaining child-box bytes. It is the
+// offset-aware counterpart of jumdLabel.
+func parseJumd(content []byte, contentOff int) (label string, typeUUID [16]byte, restOff int, rest []byte) {
 	if len(content) < 8 {
-		return "", contentOff, content
+		return "", typeUUID, contentOff, content
 	}
 	lbox := int(binary.BigEndian.Uint32(content[:4]))
 	if string(content[4:8]) != "jumd" || lbox < 8 || lbox > len(content) {
-		return "", contentOff, content
+		return "", typeUUID, contentOff, content
 	}
 	d := content[8:lbox]
 	rest = content[lbox:]
 	restOff = contentOff + lbox
+	if len(d) >= 16 {
+		copy(typeUUID[:], d[:16])
+	}
 	if len(d) >= 17 && d[16]&0x02 != 0 { // toggles bit 1: null-terminated label
 		end := 17
 		for end < len(d) && d[end] != 0 {
@@ -84,7 +93,7 @@ func parseJumd(content []byte, contentOff int) (label string, restOff int, rest 
 		}
 		label = string(d[17:end])
 	}
-	return label, restOff, rest
+	return label, typeUUID, restOff, rest
 }
 
 // rawAssertion is one assertion from a manifest's assertion store. boxContent
@@ -109,6 +118,10 @@ type parsedManifest struct {
 	// multipleClaims records a second claim box in this manifest — the first
 	// one stands, and validation reports claim.multiple.
 	multipleClaims bool
+	// update marks an Update Manifest (spec §11.2.3): a manifest that adds
+	// assertions WITHOUT changing the content, so it carries no hard binding of
+	// its own and its parentOf ingredient names the manifest that does.
+	update bool
 }
 
 // parsedStore is the manifest store: one or more manifests, the last of which
@@ -162,7 +175,7 @@ func asManifest(b *box) *parsedManifest {
 	if !hasClaim {
 		return nil
 	}
-	m := &parsedManifest{label: b.label}
+	m := &parsedManifest{label: b.label, update: b.typeUUID == updateManifestUUID}
 	for _, c := range b.children {
 		switch {
 		case isClaimLabel(c.label):
@@ -198,6 +211,15 @@ func asManifest(b *box) *parsedManifest {
 		}
 	}
 	return m
+}
+
+// updateManifestUUID is the JUMBF type UUID an Update Manifest's superbox
+// carries, 6332756D-0011-0010-8000-00AA00389B71 ("c2um"). A standard manifest
+// carries a different one; nothing else distinguishes the two, so this is the
+// only thing that can tell a validator not to demand a hard binding.
+var updateManifestUUID = [16]byte{
+	0x63, 0x32, 0x75, 0x6D, 0x00, 0x11, 0x00, 0x10,
+	0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
 }
 
 // dataChild returns a superbox's first content box (the box after its jumd), or

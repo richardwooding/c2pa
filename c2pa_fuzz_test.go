@@ -253,7 +253,7 @@ func FuzzBMFFParse(f *testing.F) {
 		}
 		walk(boxes, 0)
 		_ = bmffJUMBF(ctx, data)
-		_ = bmffHasUpdateManifest(ctx, data)
+		_ = bmffStores(ctx, data)
 	})
 }
 

@@ -272,7 +272,14 @@ func buildFramedAsset(t testing.TB, frame assetFraming, spec manifestSpec) []byt
 			binding = append(binding, *spec.extraBinding)
 		}
 		withHash.assertions = append(binding, spec.assertions...)
-		return frame(storeBox(buildManifest(t, withHash)))
+		manifests := [][]byte{buildManifest(t, withHash)}
+		if spec.updateOverlay != nil {
+			// Last in the store is the active manifest, so the overlay goes
+			// after the one it updates. It carries no hard binding, so its size
+			// is constant and the exclusion fixpoint still settles.
+			manifests = append(manifests, buildManifest(t, *spec.updateOverlay))
+		}
+		return frame(storeBox(manifests...))
 	}
 
 	start, length := 0, 0

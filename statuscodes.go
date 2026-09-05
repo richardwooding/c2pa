@@ -36,9 +36,20 @@ const (
 
 // Failure status codes.
 const (
-	StatusClaimMissing               StatusCode = "claim.missing"
-	StatusClaimRequiredMissing       StatusCode = "claim.required.missing"
-	StatusClaimMultiple              StatusCode = "claim.multiple"
+	StatusClaimMissing         StatusCode = "claim.missing"
+	StatusClaimRequiredMissing StatusCode = "claim.required.missing"
+	StatusClaimMultiple        StatusCode = "claim.multiple"
+	// StatusManifestUpdateInvalid reports an Update Manifest carrying something
+	// §11.2.3 forbids it: a hard binding, a thumbnail, or an action outside the
+	// four that do not change the content.
+	StatusManifestUpdateInvalid StatusCode = "manifest.update.invalid"
+	// StatusManifestUpdateWrongParents reports an Update Manifest with zero or
+	// more than one parentOf ingredient. Exactly one is required: it names the
+	// manifest being updated, and so the hard binding that covers the content.
+	StatusManifestUpdateWrongParents StatusCode = "manifest.update.wrongParents"
+	// StatusManifestMultipleParents reports a manifest with more than one
+	// parentOf ingredient, which leaves the asset's lineage ambiguous.
+	StatusManifestMultipleParents    StatusCode = "manifest.multipleParents"
 	StatusClaimSignatureMissing      StatusCode = "claimSignature.missing"
 	StatusClaimSignatureMismatch     StatusCode = "claimSignature.mismatch"
 	StatusSigningCredentialUntrusted StatusCode = "signingCredential.untrusted"
@@ -108,6 +119,9 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusAssertionBoxesHashMismatch:   SeverityFailure,
 	StatusAssertionBoxesHashUnknownBox: SeverityFailure,
 	StatusAssertionBoxesHashMalformed:  SeverityFailure,
+	StatusManifestUpdateInvalid:        SeverityFailure,
+	StatusManifestUpdateWrongParents:   SeverityFailure,
+	StatusManifestMultipleParents:      SeverityFailure,
 	StatusAssertionBMFFHashMismatch:    SeverityFailure,
 	StatusAssertionBMFFHashMalformed:   SeverityFailure,
 	StatusAssertionMissing:             SeverityFailure,
