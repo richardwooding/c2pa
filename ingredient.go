@@ -27,12 +27,15 @@ func (v *validator) validateIngredients(m *parsedManifest, store *parsedStore, d
 		}
 		child := resolveManifest(ref, byLabel)
 		if child == nil {
-			// §A.4.2.1 lets a PDF's stores reference across update sections and
-			// asks a consumer to process them as one. Only the active store is
-			// parsed, so absence there proves nothing about the document.
+			// The document's own stores are now read as one across update
+			// sections (§A.4.2.1), so a cross-section reference resolves and
+			// absence is a real finding. What remains unproven is a store no
+			// catalog associates — an attachment's own manifest (§A.4.3) that
+			// this extractor cannot attribute, and so does not parse.
 			if v.partialStores {
 				v.add(StatusUnsupported, a.label,
-					"ingredient references a manifest in a store that was not evaluated", nil)
+					"ingredient references a manifest absent from the document's stores, "+
+						"which also carry an unattributed store that was not evaluated", nil)
 				continue
 			}
 			v.add(StatusIngredientManifestMismatch, a.label, "ingredient references a manifest not present in the store", nil)

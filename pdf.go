@@ -30,7 +30,9 @@ import (
 // cross-reference section that places a /Root names the current catalog, and
 // the last definition of an object number supersedes the ones before it.
 // §A.4.2.1 also asks a consumer to process the stores of ALL update sections as
-// one; that is not done — see pdfMarkedStore for how a superseded store surfaces.
+// one; pdfCatalogStores collects the earlier sections' so the validator can do
+// that, while the active manifest stays the current section's. What is still
+// not merged is a store no catalog associates — see pdfMarkedStore.
 
 // The names §A.4.1 gives the C2PA embedded file. The /Subtype is accepted but
 // never required: the spec puts it on the file specification dictionary while
@@ -1509,4 +1511,72 @@ func pdfHexDigit(c byte) (byte, bool) {
 		return c - 'A' + 10, true
 	}
 	return 0, false
+}
+
+// pdfCatalogStores returns the manifest stores the document's own catalogs
+// associate OTHER than the active one, oldest update section first, alongside
+// the number of associated stores it resolved in total (the active one
+// included).
+//
+// §A.4.2.1 lets a document's stores span incremental update sections and asks a
+// consumer to process them as one. An update that adds a manifest appends a new
+// section with its own catalog; the manifests the earlier sections' catalogs
+// associated are still this document's provenance, so an ingredient defined
+// there is present, not missing. Reading only the current catalog's store is
+// what made it look absent.
+//
+// The active store is excluded rather than ranked: the trailer chain, not the
+// section order, decides which catalog is current — bytes appended after %%EOF
+// can place a catalog the section walk would rank ahead of the real one — so
+// the caller keeps its own active store and appends it last.
+func pdfCatalogStores(ctx context.Context, data []byte, objs *pdfObjects, active []byte) (prior [][]byte, resolved int) {
+	if objs == nil {
+		return nil, 0
+	}
+	bounds := pdfSectionBounds(data)
+	type sectionStore struct {
+		section int
+		store   []byte
+	}
+	var found []sectionStore
+	seen := map[int]bool{}
+	for i := range objs.order {
+		if ctx.Err() != nil {
+			break
+		}
+		catalog := pdfIfCatalog(objs.order[i].body)
+		if catalog == nil {
+			continue
+		}
+		section := pdfSectionOf(bounds, objs.order[i].hdr)
+		for _, ref := range pdfAssociatedFiles(objs, catalog) {
+			filespec := objs.body(ref)
+			if filespec == nil ||
+				pdfName(pdfDict(filespec), "AFRelationship") != pdfC2PARelationship {
+				continue
+			}
+			// Keyed by the embedded-file object, matching how pdfTallyStores
+			// counts, so a store associated again by a later section's catalog
+			// is one store rather than two.
+			num, ok := pdfEmbeddedFileRef(filespec)
+			if !ok || seen[num] {
+				continue
+			}
+			seen[num] = true
+			store := pdfEmbeddedStore(ctx, objs, filespec)
+			if store == nil {
+				continue
+			}
+			resolved++
+			if bytes.Equal(store, active) {
+				continue
+			}
+			found = append(found, sectionStore{section: section, store: store})
+		}
+	}
+	slices.SortStableFunc(found, func(a, b sectionStore) int { return a.section - b.section })
+	for _, f := range found {
+		prior = append(prior, f.store)
+	}
+	return prior, resolved
 }
