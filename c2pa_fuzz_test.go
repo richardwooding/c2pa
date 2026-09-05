@@ -318,3 +318,76 @@ func FuzzPDFParse(f *testing.F) {
 		}
 	})
 }
+
+// FuzzBoxMap targets the JPEG/PNG/GIF box-map walkers with adversarial
+// container bytes. Every box a walker reports is a range something else will
+// hash, so a walker that runs off the end or emits an inverted range would turn
+// a malformed asset into a panic in the verifier.
+//
+// Contract: never panic; every box lies inside the data, boxes are ordered and
+// non-overlapping, and every permitted exclusion stays inside its own box.
+func FuzzBoxMap(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x04, 0x01, 0x01, 0x11, 0xFF, 0xD9})
+	f.Add(append(append([]byte{}, pngSignature...),
+		0x00, 0x00, 0x00, 0x00, 'I', 'E', 'N', 'D', 0x00, 0x00, 0x00, 0x00))
+	f.Add(append([]byte("GIF89a"), 1, 0, 1, 0, 0, 0, 0, gifTrailer))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		ctx := context.Background()
+		for _, c := range []Container{JPEG, PNG, GIF} {
+			boxes, ok := assetBoxMap(ctx, c, data)
+			if !ok {
+				t.Fatalf("%s should have a box map", c)
+			}
+			pos := 0
+			for _, b := range boxes {
+				if b.length < 0 || b.start < pos || b.end() > len(data) {
+					t.Fatalf("%s: box %+v out of bounds or out of order (len %d, pos %d)",
+						c, b, len(data), pos)
+				}
+				pos = b.end()
+				for _, a := range b.allowed {
+					if !a.boundedBy(b.length) {
+						t.Fatalf("%s: permitted exclusion %+v reaches past box %+v", c, a, b)
+					}
+				}
+			}
+		}
+	})
+}
+
+// FuzzBoxesHash targets the full c2pa.hash.boxes pipeline — assertion decode,
+// the lockstep walk against a real box map, exclusion resolution and the
+// hashing — with attacker-controlled assertion CBOR and asset bytes.
+//
+// Contract: never panic, and never report a match for an assertion whose
+// exclusions were not resolved.
+func FuzzBoxesHash(f *testing.F) {
+	f.Add([]byte{}, []byte{})
+	f.Add(
+		append(append([]byte{}, pngSignature...),
+			0x00, 0x00, 0x00, 0x00, 'I', 'E', 'N', 'D', 0x00, 0x00, 0x00, 0x00),
+		// {"boxes":[{"names":["PNGh"],"hash":h'','pad':h''}]}
+		[]byte{0xA1, 0x65, 'b', 'o', 'x', 'e', 's', 0x81, 0xA3,
+			0x65, 'n', 'a', 'm', 'e', 's', 0x81, 0x64, 'P', 'N', 'G', 'h',
+			0x64, 'h', 'a', 's', 'h', 0x40,
+			0x63, 'p', 'a', 'd', 0x40},
+	)
+	f.Fuzz(func(t *testing.T, asset, assertionCBOR []byte) {
+		for _, c := range []Container{JPEG, PNG, GIF, PDF} {
+			v := &validator{
+				ctx:       context.Background(),
+				cfg:       validateConfig{maxScan: ValidateMaxScan},
+				container: c,
+				data:      asset,
+			}
+			v.verifyBoxesHash(&rawAssertion{label: "c2pa.hash.boxes", data: assertionCBOR},
+				"self#jumbf=/c2pa/urn:test", "sha256")
+			for _, s := range v.res.Statuses {
+				if s.Code == StatusAssertionBoxesHashMatch && len(v.data) == 0 {
+					t.Fatalf("%s: reported a match over no asset bytes", c)
+				}
+			}
+		}
+	})
+}

@@ -53,10 +53,15 @@ func (v *validator) verifyAssertionHashes(m *parsedManifest, uri string) {
 // the asset content has not changed since signing. For every container except
 // BMFF this is c2pa.hash.data (a SHA over the whole file minus declared exclusion ranges
 // that cover the manifest itself); for BMFF assets it is c2pa.hash.bmff.v2/.v3
-// (verified by verifyBMFFHash). A v1 c2pa.hash.bmff assertion is ignored per
-// spec §18.6.1; a BMFF binding on a non-BMFF asset cannot bind it; and
-// c2pa.hash.boxes remains unsupported. Absence of any usable hard binding is a
+// (verified by verifyBMFFHash); a structural c2pa.hash.boxes is verified by
+// verifyBoxesHash for the containers whose box naming C2PA defines. A v1
+// c2pa.hash.bmff assertion is ignored per spec §18.6.1 and a BMFF binding on a
+// non-BMFF asset cannot bind it. Absence of any usable hard binding is a
 // failure.
+//
+// When a manifest carries more than one of these, the container-specific
+// binding wins: only one is the asset's real hard binding, and hashing bytes
+// against the wrong model produces a mismatch rather than a verdict.
 func (v *validator) verifyHardBinding(m *parsedManifest, uri string) {
 	var dataHash, bmffHash, boxesHash *rawAssertion
 	bmffV1 := false
@@ -84,8 +89,8 @@ func (v *validator) verifyHardBinding(m *parsedManifest, uri string) {
 		v.add(StatusHardBindingMissing, uri+"/"+bmffHash.label,
 			"BMFF hard binding cannot bind a non-BMFF asset", nil)
 	case boxesHash != nil:
-		v.add(StatusUnsupported, uri+"/"+boxesHash.label,
-			"c2pa.hash.boxes hard-binding hashing is not supported", nil)
+		defaultAlg, _ := m.claim["alg"].(string)
+		v.verifyBoxesHash(boxesHash, uri, defaultAlg)
 	case bmffV1:
 		v.add(StatusHardBindingMissing, uri,
 			"manifest's only hard binding is a v1 c2pa.hash.bmff assertion, which validators must ignore", nil)

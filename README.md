@@ -114,9 +114,12 @@ What it verifies:
 - **COSE signature** — the `COSE_Sign1` over the claim (ES256/384/512, PS256/384/512, EdDSA).
 - **Certificate chain + C2PA profile** — chains the signer to the trust list and enforces the C2PA
   certificate profile (EKU, key usage, no weak algorithms), at the verified signing time.
-- **Hash bindings** — the hard binding (`c2pa.hash.data` for every container but BMFF, `c2pa.hash.bmff.v2`/`.v3`
-  for BMFF assets — fragmented/Merkle BMFF is reported as unsupported) and each assertion's
-  `hashed_uri`.
+- **Hash bindings** — the hard binding and each assertion's `hashed_uri`. The hard binding is
+  `c2pa.hash.data` for every container but BMFF, `c2pa.hash.bmff.v2`/`.v3` for BMFF assets
+  (fragmented/Merkle BMFF is reported as unsupported), or the structural `c2pa.hash.boxes`, which is
+  verified for JPEG segments, PNG chunks and GIF blocks — the containers whose box naming C2PA
+  defines. A box hash may only exclude the manifest store and asset metadata; an exclusion reaching
+  anywhere else is a mismatch, not a permitted edit.
 - **RFC 3161 timestamp** — full CMS signature verification, the TSA chain, and that the timestamp
   covers this signature.
 - **Revocation** — OCSP/CRL, opt-in (off by default), soft-fail.
