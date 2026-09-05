@@ -121,15 +121,34 @@ func parseBMFFLevel(ctx context.Context, data []byte, start, end, depth int) []*
 	return out
 }
 
-// bmffJUMBF locates the C2PA manifest store in a BMFF asset and returns its
-// raw JUMBF bytes. It prefers a box with purpose "manifest", falling back to
-// the first C2PA uuid box of any non-merkle purpose (best-effort, mirroring
-// the other extractors). Returns nil when no manifest is present.
+// bmffJUMBF locates the ACTIVE C2PA manifest store in a BMFF asset and returns
+// its raw JUMBF bytes. Returns nil when no manifest is present.
+//
+// Purpose decides which store is active (spec §A.5.3). Ordinarily there is one
+// box with purpose "manifest". When the asset has been updated without changing
+// its content, the original store's box is relabelled "original" and a new box
+// with purpose "update" is appended as the LAST box of the file — and that
+// update store is then the active one. Preferring "manifest" alone reported the
+// pre-update state as current, which is the wrong claim, the wrong generator
+// and possibly the wrong signer.
 func bmffJUMBF(ctx context.Context, data []byte) []byte {
-	var fallback []byte
+	stores := bmffStores(ctx, data)
+	for _, purpose := range []string{"update", "manifest", "original"} {
+		if s := stores[purpose]; len(s) > 0 {
+			return s
+		}
+	}
+	return stores[""]
+}
+
+// bmffStores returns the C2PA manifest stores in a BMFF asset keyed by box
+// purpose, plus any store of an unrecognised purpose under "". A "merkle" box
+// carries CBOR rather than a store and never appears.
+func bmffStores(ctx context.Context, data []byte) map[string][]byte {
+	out := map[string][]byte{}
 	for _, b := range parseBMFFBoxes(ctx, data) {
 		if ctx.Err() != nil {
-			return nil
+			return out
 		}
 		if b.typ != "uuid" || b.usertype != c2paBoxUUID {
 			continue
@@ -138,29 +157,17 @@ func bmffJUMBF(ctx context.Context, data []byte) []byte {
 		if len(jumbf) == 0 {
 			continue
 		}
-		if purpose == "manifest" {
-			return jumbf
+		key := purpose
+		switch purpose {
+		case "update", "manifest", "original":
+		default:
+			key = ""
 		}
-		if purpose != "merkle" && fallback == nil {
-			fallback = jumbf
-		}
-	}
-	return fallback
-}
-
-// bmffHasUpdateManifest reports whether the asset carries a C2PA uuid box with
-// purpose "update" (an update manifest, which this validator does not
-// evaluate).
-func bmffHasUpdateManifest(ctx context.Context, data []byte) bool {
-	for _, b := range parseBMFFBoxes(ctx, data) {
-		if b.typ != "uuid" || b.usertype != c2paBoxUUID {
-			continue
-		}
-		if purpose, _ := c2paBoxPayload(data, b); purpose == "update" {
-			return true
+		if _, seen := out[key]; !seen {
+			out[key] = jumbf
 		}
 	}
-	return false
+	return out
 }
 
 // c2paBoxPayload decodes a C2PA uuid box: FullBox version/flags, the

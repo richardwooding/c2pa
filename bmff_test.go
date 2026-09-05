@@ -113,10 +113,10 @@ func TestParseBMFFBoxes_LargesizeAndToEOF(t *testing.T) {
 
 func TestParseBMFFBoxes_Malformed(t *testing.T) {
 	cases := map[string][]byte{
-		"empty":          {},
-		"short":          {0, 0},
-		"size too small": {0, 0, 0, 4, 'f', 't', 'y', 'p'},
-		"size too big":   {0xFF, 0xFF, 0xFF, 0xFF, 'f', 't', 'y', 'p'},
+		"empty":           {},
+		"short":           {0, 0},
+		"size too small":  {0, 0, 0, 4, 'f', 't', 'y', 'p'},
+		"size too big":    {0xFF, 0xFF, 0xFF, 0xFF, 'f', 't', 'y', 'p'},
 		"largesize trunc": {0, 0, 0, 1, 'f', 't', 'y', 'p', 0xFF},
 	}
 	for name, data := range cases {
@@ -132,15 +132,30 @@ func TestBMFFJUMBF(t *testing.T) {
 	jumbf := synthJUMB([]byte("payload"))
 	ftyp := synthBox("ftyp", []byte("isom"))
 
-	t.Run("manifest purpose preferred", func(t *testing.T) {
+	t.Run("manifest purpose preferred over an unknown one", func(t *testing.T) {
 		file := bytes.Join([][]byte{
 			ftyp,
-			synthC2PABox("update", synthJUMB([]byte("update!")), 0),
+			synthC2PABox("something-else", synthJUMB([]byte("other!")), 0),
 			synthC2PABox("manifest", jumbf, 0),
 		}, nil)
 		got := bmffJUMBF(context.Background(), file)
 		if !bytes.Equal(got, jumbf) {
 			t.Fatalf("did not prefer manifest purpose: got %q", got)
+		}
+	})
+	t.Run("update purpose outranks manifest", func(t *testing.T) {
+		// §A.5.3 relabels the updated store "original", so a file carrying both
+		// "manifest" and "update" is already out of spec. The update store is
+		// still the later one and still the active manifest; preferring
+		// "manifest" here would report the pre-update state as current.
+		update := synthJUMB([]byte("update!"))
+		file := bytes.Join([][]byte{
+			ftyp,
+			synthC2PABox("manifest", jumbf, 0),
+			synthC2PABox("update", update, 0),
+		}, nil)
+		if got := bmffJUMBF(context.Background(), file); !bytes.Equal(got, update) {
+			t.Fatalf("did not prefer the update store: got %q", got)
 		}
 	})
 	t.Run("zero padding trimmed", func(t *testing.T) {
@@ -173,13 +188,23 @@ func TestBMFFJUMBF(t *testing.T) {
 			t.Fatalf("foreign uuid box should not yield a manifest")
 		}
 	})
-	t.Run("update detection", func(t *testing.T) {
-		file := bytes.Join([][]byte{ftyp, synthC2PABox("update", jumbf, 0)}, nil)
-		if !bmffHasUpdateManifest(context.Background(), file) {
-			t.Fatal("update manifest not detected")
+	t.Run("update store is the active one", func(t *testing.T) {
+		// §A.5.3: the store being updated is relabelled "original" and the
+		// update store is appended last. The update store is then active.
+		original := synthJUMB([]byte("the store that was updated"))
+		file := bytes.Join([][]byte{ftyp,
+			synthC2PABox("original", original, 0),
+			synthC2PABox("update", jumbf, 0),
+		}, nil)
+		if got := bmffJUMBF(context.Background(), file); !bytes.Equal(got, jumbf) {
+			t.Fatal("update store is the active manifest and was not returned")
 		}
-		if bmffHasUpdateManifest(context.Background(), ftyp) {
-			t.Fatal("false positive update detection")
+		stores := bmffStores(context.Background(), file)
+		if !bytes.Equal(stores["original"], original) {
+			t.Fatal("original store not surfaced for reference resolution")
+		}
+		if len(bmffStores(context.Background(), ftyp)) != 0 {
+			t.Fatal("false positive store detection")
 		}
 	})
 }

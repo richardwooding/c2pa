@@ -133,6 +133,12 @@ What it verifies:
 - **RFC 3161 timestamp** — full CMS signature verification, the TSA chain, and that the timestamp
   covers this signature.
 - **Revocation** — OCSP/CRL, opt-in (off by default), soft-fail.
+- **Update manifests** — a manifest that adds assertions without changing the content (spec
+  §11.2.3) carries no hard binding of its own, so one is not demanded of it. What binds the content
+  is the manifest it updates, reached through its single `parentOf` ingredient, and that binding is
+  verified against the asset. An update manifest carrying a hard binding, a thumbnail, or an action
+  that would change content is reported as invalid. For BMFF the updated store stays in the file
+  under purpose `original` and both are read as one.
 - **Ingredients** — recursive validation of nested manifests, with cycle detection.
 
 `r.Valid` is true exactly when no failure-severity status was recorded. Like `Read`, `Validate`

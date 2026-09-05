@@ -186,13 +186,18 @@ type validator struct {
 	data      []byte    // the full asset bytes read (up to cfg.maxScan)
 	res       ValidationResult
 	visited   map[string]bool // manifest labels already validated (ingredient cycle guard)
+	// hardBound records manifests whose hard binding was already verified
+	// against THIS asset — an update manifest's parent, whose binding covers
+	// these bytes even though the ingredient walk reaches it at depth > 0.
+	hardBound map[string]bool
 	// attribution is what the container said the store is a claim about, kept
 	// until parseManifest has built the Info it belongs on.
 	attribution Attribution
 	// priorStores are the carrier's other manifest stores, which §A.4.2.1 asks a
 	// consumer to process together with the active one ("all C2PA Manifests in
 	// all C2PA Manifest Stores as if they were contained in a single C2PA
-	// Manifest Store"). Empty for every container but PDF.
+	// Manifest Store"). PDF's update sections and object-level stores, and
+	// BMFF's "original" store beneath an update manifest.
 	priorStores [][]byte
 }
 
@@ -254,8 +259,14 @@ func Validate(ctx context.Context, container Container, r io.Reader, opts ...Val
 		v.add(StatusClaimMissing, "", "no C2PA manifest found", nil)
 		return v.finish()
 	}
-	if container == BMFF && bmffHasUpdateManifest(ctx, data) {
-		v.add(StatusUnsupported, "", "BMFF update manifest present but not evaluated", nil)
+	if container == BMFF {
+		// §A.5.3: when the active manifest is an update manifest, the store it
+		// updates is still in the file under purpose "original". Both are read
+		// as one so the update's parentOf reference resolves to it.
+		if original := bmffStores(ctx, data)["original"]; len(original) > 0 &&
+			!bytes.Equal(original, jumbf) {
+			v.priorStores = append(v.priorStores, original)
+		}
 	}
 	if container == PDF && !v.checkPDFStores(ctx, data) {
 		return v.finish()
@@ -438,9 +449,17 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 	// manifest's hard binding refers to the ingredient's ORIGINAL bytes, which
 	// are not available here, so it is reported informationally rather than
 	// half-checked against the wrong asset.
-	if depth == 0 {
+	switch {
+	case depth == 0 && m.update:
+		// An update manifest changes no content, so it carries no hard binding
+		// and demanding one would fail every correctly formed asset. What binds
+		// the content is the manifest it updates, reached through its single
+		// parentOf ingredient — and that manifest describes THESE bytes, unlike
+		// an ordinary ingredient's.
+		v.verifyUpdateManifest(m, store, uri)
+	case depth == 0:
 		v.verifyHardBinding(m, uri)
-	} else {
+	case !v.hardBound[m.label]:
 		v.add(StatusUnsupported, uri,
 			"ingredient manifest hard binding not evaluated (original asset bytes unavailable)", nil)
 	}

@@ -32,6 +32,9 @@ func jumbfUUID(tag string) [16]byte {
 
 var (
 	uuidC2PA = jumbfUUID("c2pa")
+	// uuidC2UM is an Update Manifest's superbox type UUID (spec §11.2.3); it is
+	// the only thing that distinguishes one from a standard manifest.
+	uuidC2UM = jumbfUUID("c2um")
 	uuidCBOR = jumbfUUID("cbor")
 	uuidJSON = jumbfUUID("json")
 )
@@ -295,6 +298,13 @@ type manifestSpec struct {
 	dataHashAlg    string
 	noHardBinding  bool
 	extraBinding   *assertionSpec
+	// updateManifest builds the manifest superbox with the Update Manifest type
+	// UUID (§11.2.3) rather than the standard one.
+	updateManifest bool
+	// updateOverlay, when set, appends a SECOND manifest to the store after
+	// this one. The store's last manifest is the active one, so this is how an
+	// asset whose active manifest updates an earlier one is built.
+	updateOverlay *manifestSpec
 }
 
 type assertionSpec struct {
@@ -396,7 +406,11 @@ func buildManifest(t testing.TB, spec manifestSpec) []byte {
 	if label == "" {
 		label = "urn:uuid:00000000-0000-4000-8000-000000000001"
 	}
-	return superBox(uuidC2PA, label, children...)
+	typeUUID := uuidC2PA
+	if spec.updateManifest {
+		typeUUID = uuidC2UM
+	}
+	return superBox(typeUUID, label, children...)
 }
 
 func signClaim(t testing.TB, spec manifestSpec, claimBytes []byte) []byte {

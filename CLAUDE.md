@@ -142,6 +142,27 @@ empty for that whole generation of files.
   so hashing the document produced a false `assertion.dataHash.mismatch`. It is reported
   informational instead: the binding is not absent, its subject is one this extractor does not yet
   isolate. Never report the signer or generator of an embedded or unknown store as the asset's.
+- **Update Manifests (§11.2.3) are recognised by their JUMBF type UUID**, `c2um`
+  (`updateManifestUUID`) — the labels and box structure are identical to a standard manifest's, so
+  `parseJumd` surfacing that UUID is the ONLY thing that can tell one apart. An update manifest
+  records assertions added without changing content, so §11.2.3 forbids it a hard binding: treating
+  the absence as `hardBinding.missing` failed every correctly formed one. What binds the content is
+  the manifest it updates, named by the single `parentOf` ingredient §11.2.3 requires — and that
+  manifest describes THESE bytes, unlike an ordinary ingredient's, so `verifyUpdateManifest` runs
+  `verifyHardBinding` on it against the asset. `v.hardBound` records that, or the ingredient walk
+  reaching the same manifest at depth > 0 would also call it unevaluated. The forbidden set is
+  hard bindings, thumbnails, and any action outside `c2pa.edited.metadata` / `c2pa.opened` /
+  `c2pa.published` / `c2pa.redacted` → `manifest.update.invalid`; zero or several parents →
+  `manifest.update.wrongParents`. **The four allowed actions are a deliberate divergence**:
+  c2pa-rs's own status-code doc describes ANY actions assertion in an update manifest as invalid,
+  which would reject files §11.2.3 permits — the spec text is followed here.
+- **BMFF purpose decides which store is active** (§A.5.3). Ordinarily one box has purpose
+  `manifest`; once the asset is updated the store being updated is relabelled `original` and a new
+  `update` box is appended as the LAST box of the file, and the update store is then active.
+  `bmffJUMBF` prefers update → manifest → original; preferring `manifest` reported the pre-update
+  claim, generator and signer as current. The `original` store goes into `v.priorStores` so the
+  update's `parentOf` reference resolves into it — the same machinery PDF's cross-section merge
+  uses. There is no `bmffHasUpdateManifest` any more; `bmffStores` returns the stores by purpose.
 - **`signedAt` lives in an RFC 3161 timestamp.** `sigTst` (1.x) and `sigTst2` (2.x), both COSE
   unprotected headers, hold `tstTokens[].val`, each a `TimeStampResp` → CMS `SignedData` →
   `TSTInfo.genTime`. The walk handles both a full `TimeStampResp` and a bare `ContentInfo`. **Read
