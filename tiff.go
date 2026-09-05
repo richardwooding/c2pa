@@ -80,7 +80,11 @@ func tiffJUMBF(ctx context.Context, data []byte) []byte {
 		if ctx.Err() != nil {
 			return nil
 		}
-		if next < 0 || next+int64(ifdCountW) > int64(len(data)) {
+		// Subtraction form: next comes from an attacker's eight bytes, so
+		// next+ifdCountW can wrap past MaxInt64 and slip a huge offset through
+		// an addition-form bound — the fuzzer found exactly that, a bare
+		// BigTIFF header pointing its first IFD at MaxInt64-4.
+		if next < 0 || next > int64(len(data))-int64(ifdCountW) {
 			return nil
 		}
 		ifd := int(next)

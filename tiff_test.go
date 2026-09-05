@@ -275,3 +275,25 @@ func FuzzTIFFParse(f *testing.F) {
 		}
 	})
 }
+
+// TestBigTIFFJUMBF_FirstIFDOverflow pins the nightly fuzzer's find: a bare
+// BigTIFF header whose first-IFD pointer is MaxInt64-4. The addition-form
+// bounds check (next+ifdCountW > len) wrapped past MaxInt64 to MinInt64+3,
+// passed, and the IFD slice panicked with that exact negative bound. Only the
+// 8-byte widths can express this — a classic TIFF offset is 32-bit.
+func TestBigTIFFJUMBF_FirstIFDOverflow(t *testing.T) {
+	data := append([]byte{'I', 'I'}, 43, 0, 8, 0, 0, 0)
+	data = binary.LittleEndian.AppendUint64(data, 1<<63-5)
+	if got := tiffJUMBF(context.Background(), data); got != nil {
+		t.Errorf("got %q, want nil", got)
+	}
+	// The same wrap through a next-IFD pointer: a valid empty first IFD whose
+	// next pointer is the huge value.
+	data2 := append([]byte{'I', 'I'}, 43, 0, 8, 0, 0, 0)
+	data2 = binary.LittleEndian.AppendUint64(data2, 16) // first IFD right here
+	data2 = binary.LittleEndian.AppendUint64(data2, 0)  // zero entries
+	data2 = binary.LittleEndian.AppendUint64(data2, 1<<63-5)
+	if got := tiffJUMBF(context.Background(), data2); got != nil {
+		t.Errorf("next-IFD wrap: got %q, want nil", got)
+	}
+}
