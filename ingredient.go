@@ -27,17 +27,10 @@ func (v *validator) validateIngredients(m *parsedManifest, store *parsedStore, d
 		}
 		child := resolveManifest(ref, byLabel)
 		if child == nil {
-			// The document's own stores are now read as one across update
-			// sections (§A.4.2.1), so a cross-section reference resolves and
-			// absence is a real finding. What remains unproven is a store no
-			// catalog associates — an attachment's own manifest (§A.4.3) that
-			// this extractor cannot attribute, and so does not parse.
-			if v.partialStores {
-				v.add(StatusUnsupported, a.label,
-					"ingredient references a manifest absent from the document's stores, "+
-						"which also carry an unattributed store that was not evaluated", nil)
-				continue
-			}
+			// Every store the carrier holds is now resolved against as one
+			// (§A.4.2.1), update sections and object-level manifests included,
+			// so a reference that lands nowhere is a real finding rather than
+			// something this extractor merely failed to look at.
 			v.add(StatusIngredientManifestMismatch, a.label, "ingredient references a manifest not present in the store", nil)
 			continue
 		}

@@ -100,10 +100,18 @@ const (
 	// AttributionAsset means the asset's own structure associates the manifest,
 	// so it is a claim about the asset.
 	AttributionAsset Attribution = "asset"
+	// AttributionEmbedded means the asset's structure associates the manifest
+	// with something the asset CARRIES rather than with the asset itself — a
+	// PDF object-level manifest (spec §A.4.3), attached to the image, font or
+	// other stream whose provenance it records. The attribution is resolved,
+	// not guessed; what it says is that this is a claim about an embedded
+	// resource. Do not report its signer or generator as the asset's.
+	AttributionEmbedded Attribution = "embedded"
 	// AttributionUnknown means the manifest was identified by its markers alone,
-	// with nothing associating it with the asset. It may describe a file the
-	// asset carries (PDF spec §A.4.3), or the reference may simply be
-	// unreadable. Do not report its signer or generator as the asset's.
+	// with nothing associating it with the asset. It may be an embedded
+	// resource's manifest whose referring object could not be resolved, or the
+	// reference may simply be unreadable. Do not report its signer or generator
+	// as the asset's.
 	AttributionUnknown Attribution = "unknown"
 )
 
@@ -190,9 +198,7 @@ func Read(ctx context.Context, container Container, r io.Reader) Info {
 	case PDF:
 		var src pdfStoreSource
 		_, jumbf, src = pdfScan(ctx, data)
-		if src == pdfStoreMarker {
-			attribution = AttributionUnknown
-		}
+		attribution = pdfAttribution(src)
 	default:
 		return Info{}
 	}
@@ -487,14 +493,15 @@ func rfc3161GenTime(der []byte) time.Time {
 const maxJUMBFDepth = 64
 
 // ReadAll returns one Info per manifest store the asset carries: the store the
-// asset's own structure associates first, with AttributionAsset, then any
-// store the C2PA markers identify that nothing associates, each with
+// asset's own structure associates first, with AttributionAsset; then the
+// object-level manifests an object associates with itself, with
+// AttributionEmbedded; then whatever the C2PA markers alone identify, with
 // AttributionUnknown. Nil when there is none.
 //
 // Only PDF can return more than one entry today — §A.4.1 embeds a store as an
-// associated file, and §A.4.3 lets an embedded file carry a manifest of its
-// own, so a document and its attachment can both bear provenance. Read is
-// exactly the first entry's view; a triage caller that wants to see a signed
+// associated file, and §A.4.3 lets an object carry a manifest of its own, so a
+// document and the image inside it can both bear provenance. Read is exactly
+// the first entry's view; a triage caller that wants to see a signed
 // attachment inside an unsigned document is who this is for. It grew out of
 // the review discussion on the PDF containers (#14).
 //
@@ -533,18 +540,34 @@ func ReadAll(ctx context.Context, container Container, r io.Reader) []Info {
 		out = append(out, info)
 		seen = append(seen, store)
 	}
-	switch src {
-	case pdfStoreCatalog:
-		add(primary, AttributionAsset)
-	case pdfStoreMarker:
-		add(primary, AttributionUnknown)
+	if src != pdfStoreNone {
+		add(primary, pdfAttribution(src))
 	}
 	if objs != nil {
+		// An object-level store names the object it describes, so it is
+		// attributed; whatever is left is only the markers' word.
+		for _, os := range pdfObjectStores(ctx, objs) {
+			add(os.store, AttributionEmbedded)
+		}
 		for _, store := range pdfMarkedStores(ctx, objs) {
 			add(store, AttributionUnknown)
 		}
 	}
 	return out
+}
+
+// pdfAttribution maps how a store was found to what that says about who it is a
+// claim about.
+func pdfAttribution(src pdfStoreSource) Attribution {
+	switch src {
+	case pdfStoreCatalog:
+		return AttributionAsset
+	case pdfStoreObject:
+		return AttributionEmbedded
+	case pdfStoreMarker:
+		return AttributionUnknown
+	}
+	return AttributionNone
 }
 
 // ExtractStore returns the raw JUMBF manifest store embedded in r, byte for

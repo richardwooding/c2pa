@@ -69,14 +69,18 @@ For **PDF**, the manifest store is the embedded file the document catalog associ
 bytes appended after `%%EOF` cannot redirect the document; a catalog or file specification
 compressed into an object stream is recovered by inflating it, and a `/FlateDecode` stream is
 inflated under a bound. Where the catalog associates no store, one the spec's markers find is still
-surfaced, with `Info.Attribution` set to `AttributionUnknown` — it may describe a file the document
-carries rather than the document — and `Validate` records the same thing as a status. Stores from
-earlier update sections are not merged into the active manifest as §A.4.2.1 asks.
+surfaced. Where an object associates one of its own (§A.4.3 object-level manifests, attached to an
+image or font stream through its `/AF` entry) that association is resolved, so the manifest is
+reported as a claim about that resource — `Info.Attribution` is `AttributionEmbedded`, and its hard
+binding is not hashed against the document, which would be the wrong subject. Only a store nothing
+associates at all falls back to `AttributionUnknown`. Every store the document carries is resolved
+against as one, across incremental update sections and object levels alike, which is what §A.4.2.1
+asks.
 
 | `Info` field | Meaning |
 |---|---|
 | `Present` | a C2PA manifest was found and parsed |
-| `Attribution` | `AttributionAsset` when the asset's own structure associates the manifest; `AttributionUnknown` when only the C2PA markers identified it, so it may describe a file the asset carries (PDF §A.4.3) — **do not report its signer as the asset's** |
+| `Attribution` | `AttributionAsset` when the asset's own structure associates the manifest; `AttributionEmbedded` when the asset associates it with a resource it CARRIES rather than with itself (PDF §A.4.3); `AttributionUnknown` when only the C2PA markers identified it and nothing places it. For the last two, **do not report its signer as the asset's** |
 | `ClaimGenerator` | the tool that created/edited the asset |
 | `Title` | claim `dc:title` |
 | `Format` | claim `dc:format` (declared media type) |
@@ -156,8 +160,9 @@ each `StatusEntry` has a `Severity` (success / informational / failure).
 ## Lower-level
 
 `c2pa.ReadAll(ctx, container, r)` enumerates every store an asset carries — the asset's own first,
-then any store the C2PA markers find that nothing associates (`AttributionUnknown`), such as a
-signed attachment inside a PDF. `Read` is the first entry's view.
+then the object-level manifests an object associates with itself (`AttributionEmbedded`), such as a
+signed image inside a PDF, then anything the C2PA markers find that nothing places
+(`AttributionUnknown`). `Read` is the first entry's view.
 
 `c2pa.ExtractStore(ctx, container, r)` returns the raw JUMBF manifest store exactly as it appears in
 the file, and `c2pa.WalkBoxes(ctx, jumbf, fn)` walks its box tree. Together they reach assertions

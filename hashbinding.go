@@ -63,6 +63,16 @@ func (v *validator) verifyAssertionHashes(m *parsedManifest, uri string) {
 // binding wins: only one is the asset's real hard binding, and hashing bytes
 // against the wrong model produces a mismatch rather than a verdict.
 func (v *validator) verifyHardBinding(m *parsedManifest, uri string) {
+	// An object-level manifest (§A.4.3) is attached to the image, font or other
+	// stream whose provenance it records, so its hard binding covers THAT
+	// object's bytes. Hashing the carrier's bytes against it would manufacture
+	// a mismatch out of asking the wrong question — the binding is not absent,
+	// it is over a subject this extractor does not yet isolate.
+	if v.attribution == AttributionEmbedded {
+		v.add(StatusUnsupported, uri, "manifest records an embedded object's provenance "+
+			"(§A.4.3); its hard binding covers that object's bytes, which are not evaluated", nil)
+		return
+	}
 	var dataHash, bmffHash, boxesHash *rawAssertion
 	bmffV1 := false
 	for i := range m.assertions {
