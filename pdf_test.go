@@ -1209,10 +1209,11 @@ func assertPDFProducerValid(t *testing.T, asset []byte, sb *signerBundle) {
 	}
 }
 
-// TestValidatePDF_ReportsUnevaluatedStores pins that a document signed twice
-// says so: §A.4.2.1 asks a consumer to process every update section's store as
-// one, and only the active one is evaluated here.
-func TestValidatePDF_ReportsUnevaluatedStores(t *testing.T) {
+// TestValidatePDF_EvaluatesEverySectionsStore pins §A.4.2.1: a document signed
+// twice carries a store per update section, and every one the document's own
+// catalogs associate is read as part of one store. Nothing is left unevaluated,
+// so there is no advisory to raise.
+func TestValidatePDF_EvaluatesEverySectionsStore(t *testing.T) {
 	pool, data := fixtureSigningPool(t)
 	ctx := context.Background()
 	store := extractJUMBF(ctx, JPEG, data)
@@ -1238,11 +1239,14 @@ func TestValidatePDF_ReportsUnevaluatedStores(t *testing.T) {
 	}
 
 	r := Validate(ctx, PDF, bytes.NewReader(two), WithSigningTrust(pool))
-	if !r.Has(StatusUnsupported) {
-		t.Errorf("expected an informational status for the store not evaluated: %+v", r.Statuses)
-	}
 	if !r.Has(StatusClaimSignatureValidated) {
 		t.Errorf("active manifest's signature not validated: %+v", r.Statuses)
+	}
+	for _, s := range r.Statuses {
+		if s.Code == StatusUnsupported && strings.Contains(s.Explanation, "not evaluated") {
+			t.Errorf("both sections' stores are associated and evaluated, "+
+				"so nothing should be reported unevaluated: %q", s.Explanation)
+		}
 	}
 }
 
@@ -1331,11 +1335,19 @@ func TestValidatePDF_AttachmentIsNotASecondStore(t *testing.T) {
 }
 
 // pdfTwoSectionFraming puts a constant store in the base section and the signed
-// one in an incremental update, so the document carries a store this extractor
-// does not evaluate while the active manifest is still the signed one. The base
-// section's bytes never change, which keeps the exclusion fixpoint stable.
-func pdfTwoSectionFraming(store []byte) (asset []byte, exclStart, exclLen int) {
-	earlier := synthJUMB([]byte("an earlier update section's store"))
+// one in an incremental update, so the active manifest is the signed one while
+// an earlier section carries provenance of its own. The base section's bytes
+// never change, which keeps the exclusion fixpoint stable.
+//
+// earlier is that base section's store; it is passed in so a caller can put a
+// real manifest there and reference it across sections.
+func pdfTwoSectionFraming(earlier []byte) assetFraming {
+	return func(store []byte) (asset []byte, exclStart, exclLen int) {
+		return pdfTwoSections(earlier, store)
+	}
+}
+
+func pdfTwoSections(earlier, store []byte) (asset []byte, exclStart, exclLen int) {
 	asset = append(asset, "%PDF-1.7\n"...)
 	asset = append(asset, "1 0 obj\n<< /Type /Catalog /AF [3 0 R] >>\nendobj\n"...)
 	asset = append(asset, "3 0 obj\n<< /Type /Filespec /AFRelationship /C2PA_Manifest"+
@@ -1357,18 +1369,24 @@ func pdfTwoSectionFraming(store []byte) (asset []byte, exclStart, exclLen int) {
 	return asset, exclStart, exclLen
 }
 
-// TestValidatePDF_CrossStoreIngredientIsNotAMismatch pins that an ingredient
-// naming a manifest in an update section this extractor did not evaluate is not
-// reported as a mismatch. §A.4.2.1 permits the reference and asks a consumer to
-// process every store as one; only the active store is parsed here, so an absent
-// manifest is unproven, not wrong.
-func TestValidatePDF_CrossStoreIngredientIsNotAMismatch(t *testing.T) {
+// TestValidatePDF_CrossSectionIngredientResolves is what §A.4.2.1 buys: an
+// ingredient naming a manifest that lives in an EARLIER update section's store
+// resolves, and the manifest it names is validated like any other. Reading only
+// the current catalog's store made that reference look absent.
+func TestValidatePDF_CrossSectionIngredientResolves(t *testing.T) {
+	const earlierLabel = "urn:in-an-earlier-section"
 	sb := newCorpusSigner(t, cose.AlgorithmES256)
-	asset := buildFramedAsset(t, pdfTwoSectionFraming, manifestSpec{
+	earlier := storeBox(buildManifest(t, manifestSpec{
+		signer:        sb,
+		label:         earlierLabel,
+		noHardBinding: true,
+		assertions:    []assertionSpec{markerAssertion()},
+	}))
+	asset := buildFramedAsset(t, pdfTwoSectionFraming(earlier), manifestSpec{
 		signer: sb,
 		assertions: []assertionSpec{
 			markerAssertion(),
-			{label: "c2pa.ingredient", raw: ingredientAssertion(t, "urn:in-an-earlier-section").data},
+			{label: "c2pa.ingredient", raw: ingredientAssertion(t, earlierLabel).data},
 		},
 	})
 
@@ -1380,10 +1398,87 @@ func TestValidatePDF_CrossStoreIngredientIsNotAMismatch(t *testing.T) {
 
 	res := runCorpus(t, PDF, asset, sb)
 	if res.Has(StatusIngredientManifestMismatch) {
-		t.Errorf("cross-store ingredient reported as a mismatch: %v", codes(res))
+		t.Errorf("cross-section ingredient did not resolve: %v", codes(res))
+	}
+	if !res.Has(StatusIngredientManifestValidated) {
+		t.Errorf("missing %s; got %v", StatusIngredientManifestValidated, codes(res))
 	}
 	if !res.Valid {
 		t.Errorf("expected valid, got %v", codes(res))
+	}
+	// The active manifest is still the newest section's, not the one merged in.
+	if res.ActiveManifestLabel == earlierLabel {
+		t.Errorf("an earlier section's manifest became the active one")
+	}
+}
+
+// TestValidatePDF_UnattributedStoreStaysUnevaluated pins the hedge that
+// survives the §A.4.2.1 merge. Merging covers the stores the document's own
+// catalogs associate; a store only the §A.4.1 markers found is an attachment's
+// own manifest (§A.4.3) that nothing attributes, so it is still not evaluated
+// and an unresolvable reference is still unproven rather than wrong.
+func TestValidatePDF_UnattributedStoreStaysUnevaluated(t *testing.T) {
+	sb := newCorpusSigner(t, cose.AlgorithmES256)
+	// No catalog at all, so nothing associates either store: both are reachable
+	// only through the markers on their file specifications.
+	other := storeBox(buildManifest(t, manifestSpec{
+		signer: sb, label: "urn:an-attachments-own", noHardBinding: true,
+	}))
+	framing := func(store []byte) (asset []byte, exclStart, exclLen int) {
+		d := newPDFDoc().
+			obj(3, pdfC2PAFilespec).
+			stream(4, pdfEmbeddedFileDict, store, "").
+			obj(5, "<< /Type /Filespec /AFRelationship /C2PA_Manifest"+
+				" /EF << /F 6 0 R >> >>").
+			stream(6, pdfEmbeddedFileDict, other, "")
+		asset = d.bytes()
+		exclStart = bytes.Index(asset, store)
+		return asset, exclStart, len(store)
+	}
+	asset := buildFramedAsset(t, framing, manifestSpec{
+		signer:     sb,
+		assertions: []assertionSpec{markerAssertion(), {label: "c2pa.ingredient", raw: ingredientAssertion(t, "urn:nowhere").data}},
+	})
+
+	ctx := context.Background()
+	if _, _, src := pdfScan(ctx, asset); src != pdfStoreMarker {
+		t.Fatalf("framing did not produce a marker-only document")
+	}
+	res := runCorpus(t, PDF, asset, sb)
+	if res.Has(StatusIngredientManifestMismatch) {
+		t.Errorf("reference is unproven while a store goes unevaluated, not wrong: %v", codes(res))
+	}
+	found := false
+	for _, st := range res.Statuses {
+		if st.Code == StatusUnsupported && strings.Contains(st.Explanation, "not evaluated") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected an advisory for the unattributed store: %v", codes(res))
+	}
+}
+
+// TestValidatePDF_CrossSectionIngredientStillMissingIsAMismatch is the other
+// half: once every section's store is read, a reference that resolves in none
+// of them is a real finding rather than something unproven. The earlier
+// section here carries a store with no manifest in it at all.
+func TestValidatePDF_CrossSectionIngredientStillMissingIsAMismatch(t *testing.T) {
+	sb := newCorpusSigner(t, cose.AlgorithmES256)
+	asset := buildFramedAsset(t, pdfTwoSectionFraming(storeBox()), manifestSpec{
+		signer: sb,
+		assertions: []assertionSpec{
+			markerAssertion(),
+			{label: "c2pa.ingredient", raw: ingredientAssertion(t, "urn:nowhere").data},
+		},
+	})
+
+	res := runCorpus(t, PDF, asset, sb)
+	if !res.Has(StatusIngredientManifestMismatch) {
+		t.Errorf("missing %s; got %v", StatusIngredientManifestMismatch, codes(res))
+	}
+	if res.Valid {
+		t.Errorf("expected invalid, got %v", codes(res))
 	}
 }
 

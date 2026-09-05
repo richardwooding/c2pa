@@ -191,6 +191,10 @@ type validator struct {
 	// extractor did not parse, so a reference it cannot resolve is unproven
 	// rather than wrong.
 	partialStores bool
+	// priorStores are the earlier update sections' manifest stores, oldest
+	// first, which §A.4.2.1 asks a consumer to process together with the active
+	// one. Empty for every container but PDF.
+	priorStores [][]byte
 }
 
 func (v *validator) add(code StatusCode, uri, explain string, err error) {
@@ -263,7 +267,7 @@ func Validate(ctx context.Context, container Container, r io.Reader, opts ...Val
 		v.res.Info.Attribution = v.attribution
 	}
 
-	store := parseStore(ctx, jumbf)
+	store := v.storeWithPriorSections(ctx, parseStore(ctx, jumbf))
 	m := store.active()
 	if m == nil {
 		v.add(StatusClaimMissing, "", "no parseable manifest in store", nil)
@@ -284,7 +288,7 @@ func Validate(ctx context.Context, container Container, r io.Reader, opts ...Val
 // one update section invalid and asks a consumer to treat that as if no
 // manifests were located, which is a failure, not an advisory.
 func (v *validator) checkPDFStores(ctx context.Context, data []byte) bool {
-	objs, _, src := pdfScan(ctx, data)
+	objs, active, src := pdfScan(ctx, data)
 	if src == pdfStoreMarker {
 		v.attribution = AttributionUnknown
 	}
@@ -299,10 +303,18 @@ func (v *validator) checkPDFStores(ctx context.Context, data []byte) bool {
 			"the document catalog associating none: it may govern an embedded file, not the "+
 			"document, and its signer is not the document's", nil)
 	}
-	if tally.total > 1 {
+	// §A.4.2.1: the earlier update sections' stores are part of this document's
+	// provenance and are validated as one store with the active one.
+	prior, resolved := pdfCatalogStores(ctx, data, objs, active)
+	v.priorStores = prior
+	// What is left over is a store the markers found that no catalog associates
+	// — an attachment's own manifest (§A.4.3), which this extractor cannot
+	// attribute. A reference it cannot resolve stays unproven rather than wrong.
+	if tally.total > max(resolved, 1) {
 		v.partialStores = true
 		v.add(StatusUnsupported, "",
-			"PDF carries additional C2PA manifest stores that were not evaluated", nil)
+			"PDF carries additional C2PA manifest stores that no catalog associates, "+
+				"which were not evaluated", nil)
 	}
 	return true
 }
@@ -410,4 +422,36 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 	}
 	// Ingredients: recursively validate referenced nested manifests.
 	v.validateIngredients(m, store, depth)
+}
+
+// storeWithPriorSections folds the earlier update sections' manifests into the
+// active store, oldest first, so the whole document reads as one manifest store
+// — which is what §A.4.2.1 asks a consumer to do.
+//
+// The active store's manifests stay last, so active() still resolves to the
+// current section's active manifest: an earlier section is extra provenance to
+// resolve references against, never a claim about the document as it stands.
+// A label the active store also defines is dropped from the earlier ones, since
+// a superseded definition of the same manifest is what an incremental update
+// leaves behind.
+func (v *validator) storeWithPriorSections(ctx context.Context, active *parsedStore) *parsedStore {
+	if len(v.priorStores) == 0 {
+		return active
+	}
+	have := make(map[string]bool, len(active.manifests))
+	for _, m := range active.manifests {
+		have[m.label] = true
+	}
+	merged := &parsedStore{}
+	for _, jumbf := range v.priorStores {
+		for _, m := range parseStore(ctx, jumbf).manifests {
+			if have[m.label] {
+				continue
+			}
+			have[m.label] = true
+			merged.manifests = append(merged.manifests, m)
+		}
+	}
+	merged.manifests = append(merged.manifests, active.manifests...)
+	return merged
 }

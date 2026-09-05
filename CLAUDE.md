@@ -115,10 +115,17 @@ empty for that whole generation of files.
   which is what `repairIndirectLengths` re-cuts those objects for. **An object ends past its stream,
   not at the payload's first `endobj`** — the store is arbitrary binary and can spell that keyword,
   which silently lost the whole manifest. Inflation is capped by `maxPDFInflate`.
-  Deliberately NOT implemented: merging the stores of every update section into
-  one (§A.4.2.1) — so when more than one store is present, `partialStores` downgrades an
-  unresolvable ingredient reference from `ingredient.manifest.mismatch` to informational, because
-  §A.4.2.1 permits references across sections and absence from the active store proves nothing.
+  **§A.4.2.1's cross-section merge IS implemented**: `pdfCatalogStores` collects every store the
+  document's own catalogs associate, oldest update section first, and `storeWithPriorSections`
+  folds their manifests in ahead of the active store's — so an ingredient defined in an earlier
+  section resolves, and one that resolves nowhere is a real `ingredient.manifest.mismatch` again.
+  The active store's manifests stay LAST so `active()` still picks the current section's, and a
+  label the active store redefines wins (that is what an incremental update leaves behind). The
+  active store is found through the trailer chain and appended by the caller, never ranked by
+  section order: bytes appended after `%%EOF` can place a catalog the section walk would rank ahead
+  of the real one. `partialStores` survives only for a store no catalog associates — an
+  attachment's own manifest (§A.4.3) — where an unresolvable reference is still downgraded to
+  informational because nothing attributes that store to parse it.
   Object-level manifests (§A.4.3) carry the same markers as document-level ones, so a store the
   catalog does not associate is surfaced with **`Info.Attribution = AttributionUnknown`** rather
   than dropped: an attachment carrying provenance is a finding, and silence leaves a triage caller
