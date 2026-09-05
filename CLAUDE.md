@@ -25,13 +25,15 @@ that would force exporting internal helpers.
 Public surface:
 
 - `Read` / `Info` — fields Present, Attribution, ClaimGenerator, Title, Format, AIGenerated,
-  SoftwareAgent, SignedBy, SignedAt. `Attribution` / `AttributionAsset` / `AttributionUnknown` say
-  whether the manifest is a claim about the asset or about something it carries.
+  SoftwareAgent, SignedBy, SignedAt. `Attribution` / `AttributionAsset` / `AttributionEmbedded` /
+  `AttributionUnknown` say whether the manifest is a claim about the asset, about something it
+  carries, or about something nothing could place.
 - `Validate` / `ValidationResult` / `StatusEntry` / `StatusCode` / `Severity` — the verifier and its
   result. `ValidateOption` (`WithSigningTrust`, `WithTimestampTrust`, `WithOnlineRevocation`,
   `WithClock`, `WithMaxIngredientDepth`, `WithMaxScan`, `WithHTTPClient`).
-- `ReadAll(ctx, container, r)` — one Info per store, asset's own first (AttributionAsset), then
-  marker-found unassociated ones (AttributionUnknown). Only PDF returns >1 today (§A.4.3).
+- `ReadAll(ctx, container, r)` — one Info per store: asset's own first (AttributionAsset), then
+  object-level ones (AttributionEmbedded), then marker-found unplaced ones (AttributionUnknown).
+  Only PDF returns >1 today (§A.4.3).
 - `ExtractStore(ctx, container, r)` — the raw JUMBF store as embedded; nil means none found.
 - `WalkBoxes(ctx, jumbf, fn)` — lower-level JUMBF box-tree walker. Paired with ExtractStore
   this is what a manifest viewer uses to show assertions `Info` doesn't model.
@@ -123,13 +125,23 @@ empty for that whole generation of files.
   label the active store redefines wins (that is what an incremental update leaves behind). The
   active store is found through the trailer chain and appended by the caller, never ranked by
   section order: bytes appended after `%%EOF` can place a catalog the section walk would rank ahead
-  of the real one. `partialStores` survives only for a store no catalog associates — an
-  attachment's own manifest (§A.4.3) — where an unresolvable reference is still downgraded to
-  informational because nothing attributes that store to parse it.
-  Object-level manifests (§A.4.3) carry the same markers as document-level ones, so a store the
-  catalog does not associate is surfaced with **`Info.Attribution = AttributionUnknown`** rather
-  than dropped: an attachment carrying provenance is a finding, and silence leaves a triage caller
-  unable to see it. Never report the signer or generator of such a store as the asset's.
+  of the real one. `pdfOtherStores` widens that to what §A.4.2.1
+  literally asks ("all C2PA Manifests in all C2PA Manifest Stores as if they were contained in a
+  single C2PA Manifest Store"): earlier sections' stores, object-level stores AND marker-found ones
+  are all resolved against as one. `partialStores` is gone with it — folding a store in only puts
+  its manifests within reach of a reference, it grants them nothing, since anything resolved that
+  way is still validated in full and the active store's manifests stay last.
+  **§A.4.3 object-level manifests ARE attributed.** The spec puts the association on the object
+  itself — "adding an AF entry to the object's stream or dictionary" — so `pdfObjectStores` runs the
+  same `/AF` walk the catalog gets, rooted at any other object, and `pdfScan` reports
+  `pdfStoreObject` → **`Info.Attribution = AttributionEmbedded`**. That is a resolved fact, not the
+  guess `AttributionUnknown` was; `AttributionUnknown` now means only that nothing placed the store
+  at all. Consequently `verifyHardBinding` REFUSES to hash the carrier's bytes against an
+  object-level manifest: its binding covers the image or font stream it is attached to (§A.4.3 —
+  "attached as closely as possible to the object that actually stores the data resource described"),
+  so hashing the document produced a false `assertion.dataHash.mismatch`. It is reported
+  informational instead: the binding is not absent, its subject is one this extractor does not yet
+  isolate. Never report the signer or generator of an embedded or unknown store as the asset's.
 - **`signedAt` lives in an RFC 3161 timestamp.** `sigTst` (1.x) and `sigTst2` (2.x), both COSE
   unprotected headers, hold `tstTokens[].val`, each a `TimeStampResp` → CMS `SignedData` →
   `TSTInfo.genTime`. The walk handles both a full `TimeStampResp` and a bare `ContentInfo`. **Read

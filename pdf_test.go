@@ -1296,13 +1296,15 @@ func TestValidatePDF_StoreCountSeesMarkedStores(t *testing.T) {
 		stream(6, pdfEmbeddedFileDict, store, "").
 		trailer(1).bytes()
 
-	r := Validate(ctx, PDF, bytes.NewReader(doc), WithSigningTrust(pool))
-	for _, s := range r.Statuses {
-		if s.Code == StatusUnsupported && strings.Contains(s.Explanation, "not evaluated") {
-			return
-		}
+	if got := pdfTallyStores(ctx, doc, indexPDFObjects(ctx, doc)); got.total != 2 {
+		t.Errorf("counter saw %d /Subtype-only stores, want 2: %+v", got.total, got)
 	}
-	t.Errorf("two /Subtype-only stores reported none unevaluated: %+v", r.Statuses)
+	// Both are folded into the store the validator resolves against, so the
+	// document's manifests are all reachable rather than only the first one's.
+	r := Validate(ctx, PDF, bytes.NewReader(doc), WithSigningTrust(pool))
+	if !r.Has(StatusClaimSignatureValidated) {
+		t.Errorf("no manifest validated: %v", codes(r))
+	}
 }
 
 // TestValidatePDF_AttachmentIsNotASecondStore pins the symmetric case: an
@@ -1412,50 +1414,145 @@ func TestValidatePDF_CrossSectionIngredientResolves(t *testing.T) {
 	}
 }
 
-// TestValidatePDF_UnattributedStoreStaysUnevaluated pins the hedge that
-// survives the §A.4.2.1 merge. Merging covers the stores the document's own
-// catalogs associate; a store only the §A.4.1 markers found is an attachment's
-// own manifest (§A.4.3) that nothing attributes, so it is still not evaluated
-// and an unresolvable reference is still unproven rather than wrong.
-func TestValidatePDF_UnattributedStoreStaysUnevaluated(t *testing.T) {
-	sb := newCorpusSigner(t, cose.AlgorithmES256)
-	// No catalog at all, so nothing associates either store: both are reachable
-	// only through the markers on their file specifications.
-	other := storeBox(buildManifest(t, manifestSpec{
-		signer: sb, label: "urn:an-attachments-own", noHardBinding: true,
-	}))
-	framing := func(store []byte) (asset []byte, exclStart, exclLen int) {
-		d := newPDFDoc().
+// pdfObjectLevelDoc builds §A.4.3's layout: an Image XObject that associates a
+// manifest store of its own through its /AF entry. withCatalog also gives the
+// document a document-level manifest, so the two levels can be told apart.
+func pdfObjectLevelDoc(docStore, objStore []byte, withCatalog bool) []byte {
+	d := newPDFDoc()
+	if withCatalog {
+		d = d.obj(1, "<< /Type /Catalog /AF [3 0 R] >>").
 			obj(3, pdfC2PAFilespec).
-			stream(4, pdfEmbeddedFileDict, store, "").
-			obj(5, "<< /Type /Filespec /AFRelationship /C2PA_Manifest"+
-				" /EF << /F 6 0 R >> >>").
-			stream(6, pdfEmbeddedFileDict, other, "")
-		asset = d.bytes()
-		exclStart = bytes.Index(asset, store)
-		return asset, exclStart, len(store)
+			stream(4, pdfEmbeddedFileDict, docStore, "")
 	}
-	asset := buildFramedAsset(t, framing, manifestSpec{
-		signer:     sb,
-		assertions: []assertionSpec{markerAssertion(), {label: "c2pa.ingredient", raw: ingredientAssertion(t, "urn:nowhere").data}},
-	})
+	// "adding an AF entry to the object's stream or dictionary" — here the
+	// Image XObject whose provenance the manifest records.
+	return d.obj(7, "<< /Type /XObject /Subtype /Image /AF [5 0 R] >>").
+		obj(5, "<< /Type /Filespec /AFRelationship /C2PA_Manifest /EF << /F 6 0 R >> >>").
+		stream(6, pdfEmbeddedFileDict, objStore, "").
+		trailer(1).bytes()
+}
 
+// TestPDFObjectLevelManifestIsAttributed pins §A.4.3: a manifest an object
+// associates with itself is resolved to that object, so it is reported as a
+// claim about an embedded resource rather than as a store nothing could place.
+func TestPDFObjectLevelManifestIsAttributed(t *testing.T) {
 	ctx := context.Background()
-	if _, _, src := pdfScan(ctx, asset); src != pdfStoreMarker {
-		t.Fatalf("framing did not produce a marker-only document")
+	_, data := fixtureSigningPool(t)
+	store := extractJUMBF(ctx, JPEG, data)
+
+	doc := pdfObjectLevelDoc(store, store, false)
+	objs := indexPDFObjects(ctx, doc)
+	objs.indexObjectStreams(ctx)
+	got := pdfObjectStores(ctx, objs)
+	if len(got) != 1 {
+		t.Fatalf("expected one object-level store, got %d", len(got))
 	}
-	res := runCorpus(t, PDF, asset, sb)
-	if res.Has(StatusIngredientManifestMismatch) {
-		t.Errorf("reference is unproven while a store goes unevaluated, not wrong: %v", codes(res))
+	if got[0].object != 7 {
+		t.Errorf("attributed to object %d, want the XObject (7)", got[0].object)
+	}
+	if !bytes.Equal(got[0].store, store) {
+		t.Errorf("object-level store bytes differ from the embedded ones")
+	}
+	if _, _, src := pdfScan(ctx, doc); src != pdfStoreObject {
+		t.Errorf("store source = %v, want pdfStoreObject", src)
+	}
+	if info := Read(ctx, PDF, bytes.NewReader(doc)); info.Attribution != AttributionEmbedded {
+		t.Errorf("Attribution = %q, want %q", info.Attribution, AttributionEmbedded)
+	}
+}
+
+// TestPDFCatalogAssociationOutranksObjectLevel pins that a document with both
+// levels still reports its OWN manifest as the asset's. The object-level one is
+// surfaced beside it, attributed to the resource it describes.
+func TestPDFCatalogAssociationOutranksObjectLevel(t *testing.T) {
+	ctx := context.Background()
+	_, data := fixtureSigningPool(t)
+	docStore := extractJUMBF(ctx, JPEG, data)
+	objStore := synthJUMB(append([]byte("an image's own manifest"), docStore...))
+
+	doc := pdfObjectLevelDoc(docStore, objStore, true)
+	if _, got, src := pdfScan(ctx, doc); src != pdfStoreCatalog || !bytes.Equal(got, docStore) {
+		t.Fatalf("store source = %v, want the catalog's own store", src)
+	}
+	if info := Read(ctx, PDF, bytes.NewReader(doc)); info.Attribution != AttributionAsset {
+		t.Errorf("Attribution = %q, want %q", info.Attribution, AttributionAsset)
+	}
+}
+
+// TestValidatePDF_ObjectLevelBindingIsNotHashedAgainstTheDocument is the false
+// failure this attribution removes. An object-level manifest's hard binding
+// covers the image it is attached to; hashing the whole PDF against it reported
+// assertion.dataHash.mismatch — a verdict manufactured by asking the wrong
+// question of the right bytes.
+func TestValidatePDF_ObjectLevelBindingIsNotHashedAgainstTheDocument(t *testing.T) {
+	ctx := context.Background()
+	pool, data := fixtureSigningPool(t)
+	store := extractJUMBF(ctx, JPEG, data)
+	doc := pdfObjectLevelDoc(nil, store, false)
+
+	r := Validate(ctx, PDF, bytes.NewReader(doc), WithSigningTrust(pool))
+	if r.Has(StatusAssertionDataHashMismatch) {
+		t.Errorf("document's bytes hashed against an object-level binding: %v", codes(r))
+	}
+	if r.Has(StatusHardBindingMissing) {
+		t.Errorf("the binding is present, just over another subject: %v", codes(r))
+	}
+	if r.Info.Attribution != AttributionEmbedded {
+		t.Errorf("Attribution = %q, want %q", r.Info.Attribution, AttributionEmbedded)
 	}
 	found := false
-	for _, st := range res.Statuses {
-		if st.Code == StatusUnsupported && strings.Contains(st.Explanation, "not evaluated") {
+	for _, st := range r.Statuses {
+		if st.Code == StatusUnsupported && strings.Contains(st.Explanation, "§A.4.3") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected an advisory for the unattributed store: %v", codes(res))
+		t.Errorf("expected a §A.4.3 status saying what the manifest describes: %+v", r.Statuses)
+	}
+	if !r.Has(StatusClaimSignatureValidated) {
+		t.Errorf("the object-level manifest's signature should still be verified: %v", codes(r))
+	}
+}
+
+// TestValidatePDF_ComponentOfResolvesToObjectLevelManifest is what §A.4.3
+// recommends producers do — "any object-level manifest that is added be
+// referenced from the active manifest as a componentOf ingredient" — and it
+// only works if the two stores resolve as one, which §A.4.2.1 requires.
+func TestValidatePDF_ComponentOfResolvesToObjectLevelManifest(t *testing.T) {
+	const imageLabel = "urn:the-images-own-manifest"
+	sb := newCorpusSigner(t, cose.AlgorithmES256)
+	objStore := storeBox(buildManifest(t, manifestSpec{
+		signer:        sb,
+		label:         imageLabel,
+		noHardBinding: true,
+		assertions:    []assertionSpec{markerAssertion()},
+	}))
+	framing := func(store []byte) (asset []byte, exclStart, exclLen int) {
+		asset = pdfObjectLevelDoc(store, objStore, true)
+		exclStart = bytes.Index(asset, store)
+		return asset, exclStart, len(store)
+	}
+	asset := buildFramedAsset(t, framing, manifestSpec{
+		signer: sb,
+		assertions: []assertionSpec{
+			markerAssertion(),
+			{label: "c2pa.ingredient", raw: ingredientAssertion(t, imageLabel).data},
+		},
+	})
+
+	res := runCorpus(t, PDF, asset, sb)
+	if res.Has(StatusIngredientManifestMismatch) {
+		t.Errorf("componentOf reference to the object-level manifest did not resolve: %v", codes(res))
+	}
+	if !res.Has(StatusIngredientManifestValidated) {
+		t.Errorf("missing %s; got %v", StatusIngredientManifestValidated, codes(res))
+	}
+	if !res.Valid {
+		t.Errorf("expected valid, got %v", codes(res))
+	}
+	// The document's own manifest is still the active one.
+	if res.ActiveManifestLabel == imageLabel {
+		t.Errorf("the image's manifest became the document's active manifest")
 	}
 }
 

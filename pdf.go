@@ -219,8 +219,13 @@ const (
 	// pdfStoreCatalog: reached through the catalog's /AF, so it is the
 	// document's active manifest.
 	pdfStoreCatalog
-	// pdfStoreMarker: found by the markers with no catalog to attribute it, so
-	// it may govern an embedded file rather than the document.
+	// pdfStoreObject: associated from a non-catalog object's /AF, so it is that
+	// object's manifest (§A.4.3) — a claim about an image, font or other
+	// resource the document carries, not about the document.
+	pdfStoreObject
+	// pdfStoreMarker: found by the markers alone, with nothing associating it.
+	// It may be an object-level manifest whose referring object this extractor
+	// could not resolve, or a reference that is simply unreadable.
 	pdfStoreMarker
 )
 
@@ -245,11 +250,15 @@ func pdfScan(ctx context.Context, data []byte) (*pdfObjects, []byte, pdfStoreSou
 	if store := pdfActiveStore(ctx, data, objs); store != nil {
 		return objs, store, pdfStoreCatalog
 	}
-	// Nothing the catalog associates. The markers may still find a store, but
-	// they cannot say it is the document's — §A.4.3 puts the same relationship on
-	// a manifest describing an embedded file. Reported as unattributed rather
-	// than dropped: an attachment carrying provenance is a finding, and silence
-	// leaves a caller unable to see it at all.
+	// Nothing the catalog associates, so this is not the document's manifest.
+	// §A.4.3 lets an object associate one of its own; resolving that says which
+	// object a store describes, which the identical §A.4.1 markers cannot.
+	if objStores := pdfObjectStores(ctx, objs); len(objStores) > 0 {
+		return objs, objStores[0].store, pdfStoreObject
+	}
+	// Found by the markers with nothing associating it either way. Reported as
+	// unattributed rather than dropped: an attachment carrying provenance is a
+	// finding, and silence leaves a caller unable to see it at all.
 	if store := pdfMarkedStore(ctx, objs); store != nil {
 		return objs, store, pdfStoreMarker
 	}
@@ -1514,9 +1523,7 @@ func pdfHexDigit(c byte) (byte, bool) {
 }
 
 // pdfCatalogStores returns the manifest stores the document's own catalogs
-// associate OTHER than the active one, oldest update section first, alongside
-// the number of associated stores it resolved in total (the active one
-// included).
+// associate OTHER than the active one, oldest update section first.
 //
 // §A.4.2.1 lets a document's stores span incremental update sections and asks a
 // consumer to process them as one. An update that adds a manifest appends a new
@@ -1529,9 +1536,9 @@ func pdfHexDigit(c byte) (byte, bool) {
 // section order, decides which catalog is current — bytes appended after %%EOF
 // can place a catalog the section walk would rank ahead of the real one — so
 // the caller keeps its own active store and appends it last.
-func pdfCatalogStores(ctx context.Context, data []byte, objs *pdfObjects, active []byte) (prior [][]byte, resolved int) {
+func pdfCatalogStores(ctx context.Context, data []byte, objs *pdfObjects, active []byte) (prior [][]byte) {
 	if objs == nil {
-		return nil, 0
+		return nil
 	}
 	bounds := pdfSectionBounds(data)
 	type sectionStore struct {
@@ -1564,11 +1571,7 @@ func pdfCatalogStores(ctx context.Context, data []byte, objs *pdfObjects, active
 			}
 			seen[num] = true
 			store := pdfEmbeddedStore(ctx, objs, filespec)
-			if store == nil {
-				continue
-			}
-			resolved++
-			if bytes.Equal(store, active) {
+			if store == nil || bytes.Equal(store, active) {
 				continue
 			}
 			found = append(found, sectionStore{section: section, store: store})
@@ -1578,5 +1581,72 @@ func pdfCatalogStores(ctx context.Context, data []byte, objs *pdfObjects, active
 	for _, f := range found {
 		prior = append(prior, f.store)
 	}
-	return prior, resolved
+	return prior
+}
+
+// pdfObjectStore is a manifest store an object associates with itself, and the
+// object that did so.
+type pdfObjectStore struct {
+	// object is the number of the stream or dictionary bearing the /AF entry —
+	// the object that stores the data resource the manifest describes.
+	object int
+	store  []byte
+}
+
+// pdfObjectStores returns the object-level manifest stores §A.4.3 defines:
+//
+//	individual objects within a document may also have an associated C2PA
+//	Manifest Store. This is done by adding an AF entry to the object's stream
+//	or dictionary.
+//
+// So the association is the same /AF walk the catalog gets, rooted at any other
+// object — an Image or Form XObject, a font file stream, a structure element.
+// Resolving it is what separates "a manifest describing a file this document
+// carries" from "a manifest we found and cannot place": the markers on the two
+// are identical, and only the referring object tells them apart.
+//
+// The catalog's own associations are excluded; those are document-level and
+// pdfCatalogStores has them. Ordered by object number so the result does not
+// depend on the index's iteration order.
+func pdfObjectStores(ctx context.Context, objs *pdfObjects) []pdfObjectStore {
+	if objs == nil {
+		return nil
+	}
+	var out []pdfObjectStore
+	seen := map[int]bool{}
+	for i := range objs.order {
+		if ctx.Err() != nil {
+			break
+		}
+		body := objs.order[i].body
+		if pdfIfCatalog(body) != nil {
+			continue // document-level; pdfCatalogStores covers it
+		}
+		num := objs.order[i].num
+		if seen[num] {
+			continue // a superseded definition of the same object
+		}
+		// /AF on a stream sits in its dictionary, which pdfDict yields for
+		// both shapes.
+		refs := pdfRefs(pdfDict(body), "AF", maxPDFAssociatedFiles)
+		if len(refs) == 0 {
+			continue
+		}
+		for _, ref := range refs {
+			filespec := objs.body(ref)
+			if filespec == nil ||
+				pdfName(pdfDict(filespec), "AFRelationship") != pdfC2PARelationship {
+				continue
+			}
+			store := pdfEmbeddedStore(ctx, objs, filespec)
+			if store == nil {
+				continue
+			}
+			seen[num] = true
+			out = append(out, pdfObjectStore{object: num, store: store})
+			break
+		}
+	}
+	slices.SortStableFunc(out, func(a, b pdfObjectStore) int { return a.object - b.object })
+	return out
 }

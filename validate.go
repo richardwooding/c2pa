@@ -1,10 +1,12 @@
 package c2pa
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"io"
 	"net/http"
+	"slices"
 	"time"
 )
 
@@ -187,13 +189,10 @@ type validator struct {
 	// attribution is what the container said the store is a claim about, kept
 	// until parseManifest has built the Info it belongs on.
 	attribution Attribution
-	// partialStores records that the carrier holds manifest stores this
-	// extractor did not parse, so a reference it cannot resolve is unproven
-	// rather than wrong.
-	partialStores bool
-	// priorStores are the earlier update sections' manifest stores, oldest
-	// first, which §A.4.2.1 asks a consumer to process together with the active
-	// one. Empty for every container but PDF.
+	// priorStores are the carrier's other manifest stores, which §A.4.2.1 asks a
+	// consumer to process together with the active one ("all C2PA Manifests in
+	// all C2PA Manifest Stores as if they were contained in a single C2PA
+	// Manifest Store"). Empty for every container but PDF.
 	priorStores [][]byte
 }
 
@@ -289,34 +288,59 @@ func Validate(ctx context.Context, container Container, r io.Reader, opts ...Val
 // manifests were located, which is a failure, not an advisory.
 func (v *validator) checkPDFStores(ctx context.Context, data []byte) bool {
 	objs, active, src := pdfScan(ctx, data)
-	if src == pdfStoreMarker {
-		v.attribution = AttributionUnknown
-	}
+	v.attribution = pdfAttribution(src)
 	tally := pdfTallyStores(ctx, data, objs)
 	if tally.attributed && tally.perSection > 1 {
 		v.add(StatusClaimMissing, "", "§15.5.2.2: one update section associates "+
 			"multiple C2PA manifest stores, so none is located", nil)
 		return false
 	}
-	if src == pdfStoreMarker {
+	switch src {
+	case pdfStoreObject:
+		v.add(StatusUnsupported, "", "PDF manifest store is an object-level manifest (§A.4.3), "+
+			"associated from the object whose provenance it records rather than from the "+
+			"document catalog: it is a claim about an embedded resource, and its signer is "+
+			"not the document's", nil)
+	case pdfStoreMarker:
 		v.add(StatusUnsupported, "", "PDF manifest store identified by its C2PA markers alone, "+
-			"the document catalog associating none: it may govern an embedded file, not the "+
-			"document, and its signer is not the document's", nil)
+			"nothing in the document associating it: it may record an embedded resource's "+
+			"provenance rather than the document's, and its signer may not be the document's", nil)
 	}
-	// §A.4.2.1: the earlier update sections' stores are part of this document's
-	// provenance and are validated as one store with the active one.
-	prior, resolved := pdfCatalogStores(ctx, data, objs, active)
-	v.priorStores = prior
-	// What is left over is a store the markers found that no catalog associates
-	// — an attachment's own manifest (§A.4.3), which this extractor cannot
-	// attribute. A reference it cannot resolve stays unproven rather than wrong.
-	if tally.total > max(resolved, 1) {
-		v.partialStores = true
-		v.add(StatusUnsupported, "",
-			"PDF carries additional C2PA manifest stores that no catalog associates, "+
-				"which were not evaluated", nil)
-	}
+	v.priorStores = pdfOtherStores(ctx, data, objs, active)
 	return true
+}
+
+// pdfOtherStores collects every manifest store the document carries apart from
+// the active one: the earlier update sections' (§A.4.2.1), the object-level
+// ones an object associates with itself (§A.4.3), and any the markers alone
+// found. §A.4.2.1 is categorical about what to do with them —
+//
+//	A C2PA Manifest Consumer shall process all C2PA Manifests in all C2PA
+//	Manifest Stores as if they were contained in a single C2PA Manifest Store.
+//
+// — and §A.4.3 recommends an object-level manifest be referenced from the
+// active manifest as a componentOf ingredient, which is precisely a reference
+// that has to resolve across stores.
+//
+// Folding a store in only puts its manifests within reach of a reference. It
+// grants them nothing: a manifest resolved this way is validated like any
+// other, and the active store's manifests stay last so none of these can become
+// the active manifest.
+func pdfOtherStores(ctx context.Context, data []byte, objs *pdfObjects, active []byte) [][]byte {
+	prior := pdfCatalogStores(ctx, data, objs, active)
+	for _, os := range pdfObjectStores(ctx, objs) {
+		prior = append(prior, os.store)
+	}
+	prior = append(prior, pdfMarkedStores(ctx, objs)...)
+	out := prior[:0]
+	for _, store := range prior {
+		if bytes.Equal(store, active) || slices.ContainsFunc(out,
+			func(have []byte) bool { return bytes.Equal(have, store) }) {
+			continue
+		}
+		out = append(out, store)
+	}
+	return out
 }
 
 // extractJUMBF dispatches to the container-specific JUMBF extractor.
