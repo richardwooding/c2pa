@@ -391,3 +391,82 @@ func FuzzBoxesHash(f *testing.F) {
 		}
 	})
 }
+
+// FuzzBMFFMerkle targets the merkle-map decode, the leaf-block cut and the tree
+// rebuild with attacker-controlled assertion CBOR and asset bytes. The
+// declared block sizes are what turn an assertion's size into an allocation,
+// so the leaf cap is as much the contract here as the never-panic rule.
+//
+// Contract: never panic, never allocate past the leaf cap, and never report a
+// match for a merkle map whose leaves were not actually hashed.
+func FuzzBMFFMerkle(f *testing.F) {
+	f.Add([]byte{}, []byte{})
+	f.Add(
+		[]byte{0, 0, 0, 8, 'f', 't', 'y', 'p', 0, 0, 0, 32, 'm', 'd', 'a', 't',
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		// {"alg":"sha256","merkle":[{"count":1,"hashes":[h'00']}]}
+		[]byte{0xA2, 0x63, 'a', 'l', 'g', 0x66, 's', 'h', 'a', '2', '5', '6',
+			0x66, 'm', 'e', 'r', 'k', 'l', 'e', 0x81, 0xA2,
+			0x65, 'c', 'o', 'u', 'n', 't', 0x01,
+			0x66, 'h', 'a', 's', 'h', 'e', 's', 0x81, 0x41, 0x00},
+	)
+	f.Fuzz(func(t *testing.T, asset, assertionCBOR []byte) {
+		v := &validator{
+			ctx:       context.Background(),
+			cfg:       validateConfig{maxScan: ValidateMaxScan},
+			container: BMFF,
+			data:      asset,
+		}
+		v.verifyBMFFHash(&rawAssertion{label: "c2pa.hash.bmff.v3", data: assertionCBOR},
+			"self#jumbf=/c2pa/urn:test")
+		for _, s := range v.res.Statuses {
+			if s.Code == StatusAssertionBMFFHashMatch && len(asset) == 0 {
+				t.Fatalf("reported a match over no asset bytes")
+			}
+		}
+	})
+}
+
+// FuzzMerkleLeafRanges targets the block cut on its own, where the leaf cap
+// lives: an 'mdat' box description and a merkle map are all it takes to ask for
+// an unbounded number of ranges.
+func FuzzMerkleLeafRanges(f *testing.F) {
+	f.Add(0, 64, 8, 0, false)
+	f.Add(0, 1<<30, 2, 0, false)
+	f.Add(16, 100, 0, 3, true)
+	f.Fuzz(func(t *testing.T, start, size, fixed, nVariable int, useVariable bool) {
+		if size < 0 || start < 0 || start > 1<<40 || size > 1<<40 {
+			return
+		}
+		m := merkleMap{count: 1}
+		if useVariable {
+			if nVariable < 0 || nVariable > 4096 {
+				return
+			}
+			m.hasVariable = true
+			m.variableBlockSizes = make([]int, nVariable)
+			for i := range m.variableBlockSizes {
+				m.variableBlockSizes[i] = fixed
+			}
+		} else {
+			m.hasFixed = true
+			m.fixedBlockSize = fixed
+		}
+		box := &bmffBox{typ: "mdat", start: start, end: start + size}
+		ranges, status := merkleLeafRanges(box, m)
+		if status != "" {
+			if ranges != nil {
+				t.Fatalf("rejected cut still returned %d ranges", len(ranges))
+			}
+			return
+		}
+		if len(ranges) > maxMerkleLeaves {
+			t.Fatalf("cut produced %d leaves, past the cap of %d", len(ranges), maxMerkleLeaves)
+		}
+		for _, r := range ranges {
+			if r.length < 0 || r.start < box.start || r.start+r.length > box.end {
+				t.Fatalf("leaf %+v outside its mdat box %+v", r, box)
+			}
+		}
+	})
+}

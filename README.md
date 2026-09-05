@@ -119,11 +119,17 @@ What it verifies:
 - **Certificate chain + C2PA profile** — chains the signer to the trust list and enforces the C2PA
   certificate profile (EKU, key usage, no weak algorithms), at the verified signing time.
 - **Hash bindings** — the hard binding and each assertion's `hashed_uri`. The hard binding is
-  `c2pa.hash.data` for every container but BMFF, `c2pa.hash.bmff.v2`/`.v3` for BMFF assets
-  (fragmented/Merkle BMFF is reported as unsupported), or the structural `c2pa.hash.boxes`, which is
+  `c2pa.hash.data` for every container but BMFF, `c2pa.hash.bmff.v2`/`.v3` for BMFF assets, or the
+  structural `c2pa.hash.boxes`, which is
   verified for JPEG segments, PNG chunks and GIF blocks — the containers whose box naming C2PA
   defines. A box hash may only exclude the manifest store and asset metadata; an exclusion reaching
   anywhere else is a mismatch, not a permitted edit.
+- **Merkle BMFF** — a `c2pa.hash.bmff.v3` `merkle` array is verified as far as a single reader can
+  settle it. A non-fragmented asset whose `mdat` is hashed piecewise is checked in full: the leaves
+  are cut from the box, the tree rebuilt, and the row the assertion stores compared against it. For a
+  fragmented asset the initialization hash is checked, and what needs the other chunk files is named
+  rather than folded into a success — a wrong initialization hash is still a mismatch, since this
+  file disproves it.
 - **RFC 3161 timestamp** — full CMS signature verification, the TSA chain, and that the timestamp
   covers this signature.
 - **Revocation** — OCSP/CRL, opt-in (off by default), soft-fail.
