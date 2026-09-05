@@ -51,13 +51,19 @@ const (
 	StatusAssertionHashedURIMismatch StatusCode = "assertion.hashedURI.mismatch"
 	StatusAssertionDataHashMismatch  StatusCode = "assertion.dataHash.mismatch"
 	StatusAssertionBoxesHashMismatch StatusCode = "assertion.boxesHash.mismatch"
-	StatusAssertionBMFFHashMismatch  StatusCode = "assertion.bmffHash.mismatch"
-	StatusAssertionBMFFHashMalformed StatusCode = "assertion.bmffHash.malformed"
-	StatusAssertionMissing           StatusCode = "assertion.missing"
-	StatusHardBindingMissing         StatusCode = "hardBinding.missing"
-	StatusAlgorithmUnsupported       StatusCode = "algorithm.unsupported"
-	StatusIngredientManifestMismatch StatusCode = "ingredient.manifest.mismatch"
-	StatusGeneralError               StatusCode = "general.error"
+	// StatusAssertionBoxesHashUnknownBox reports that the asset's box structure
+	// does not line up with the boxes[] the assertion describes — a name that
+	// does not match the next box in file order, or a box the assertion leaves
+	// uncovered. Either way the assertion does not bind the asset as it stands.
+	StatusAssertionBoxesHashUnknownBox StatusCode = "assertion.boxesHash.unknownBox"
+	StatusAssertionBoxesHashMalformed  StatusCode = "assertion.boxesHash.malformed"
+	StatusAssertionBMFFHashMismatch    StatusCode = "assertion.bmffHash.mismatch"
+	StatusAssertionBMFFHashMalformed   StatusCode = "assertion.bmffHash.malformed"
+	StatusAssertionMissing             StatusCode = "assertion.missing"
+	StatusHardBindingMissing           StatusCode = "hardBinding.missing"
+	StatusAlgorithmUnsupported         StatusCode = "algorithm.unsupported"
+	StatusIngredientManifestMismatch   StatusCode = "ingredient.manifest.mismatch"
+	StatusGeneralError                 StatusCode = "general.error"
 )
 
 // Informational status codes.
@@ -65,6 +71,12 @@ const (
 	StatusRevocationUnknown StatusCode = "signingCredential.revocation.unknown"
 	StatusTimeStampMissing  StatusCode = "timeStamp.missing"
 	StatusUnsupported       StatusCode = "general.unsupported"
+	// StatusAssertionBoxesHashAdditionalExclusions reports that a box-hash
+	// assertion excluded something beyond the C2PA store itself — asset
+	// metadata, or a whole non-C2PA box skipped with "excluded": true. Those
+	// exclusions are permitted, so this is advisory rather than a failure, but
+	// it says the hard binding covers less of the asset than the baseline.
+	StatusAssertionBoxesHashAdditionalExclusions StatusCode = "assertion.boxesHash.additionalExclusionsPresent"
 )
 
 // statusSeverity maps every known StatusCode to its Severity. Codes absent from
@@ -79,32 +91,36 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusAssertionBMFFHashMatch:      SeveritySuccess,
 	StatusIngredientManifestValidated: SeveritySuccess,
 
-	StatusClaimMissing:               SeverityFailure,
-	StatusClaimRequiredMissing:       SeverityFailure,
-	StatusClaimMultiple:              SeverityFailure,
-	StatusClaimSignatureMissing:      SeverityFailure,
-	StatusClaimSignatureMismatch:     SeverityFailure,
-	StatusSigningCredentialUntrusted: SeverityFailure,
-	StatusSigningCredentialInvalid:   SeverityFailure,
-	StatusSigningCredentialRevoked:   SeverityFailure,
-	StatusSigningCredentialExpired:   SeverityFailure,
-	StatusTimeStampMismatch:          SeverityFailure,
-	StatusTimeStampUntrusted:         SeverityFailure,
-	StatusTimeStampOutsideValidity:   SeverityFailure,
-	StatusAssertionHashedURIMismatch: SeverityFailure,
-	StatusAssertionDataHashMismatch:  SeverityFailure,
-	StatusAssertionBoxesHashMismatch: SeverityFailure,
-	StatusAssertionBMFFHashMismatch:  SeverityFailure,
-	StatusAssertionBMFFHashMalformed: SeverityFailure,
-	StatusAssertionMissing:           SeverityFailure,
-	StatusHardBindingMissing:         SeverityFailure,
-	StatusAlgorithmUnsupported:       SeverityFailure,
-	StatusIngredientManifestMismatch: SeverityFailure,
-	StatusGeneralError:               SeverityFailure,
+	StatusClaimMissing:                 SeverityFailure,
+	StatusClaimRequiredMissing:         SeverityFailure,
+	StatusClaimMultiple:                SeverityFailure,
+	StatusClaimSignatureMissing:        SeverityFailure,
+	StatusClaimSignatureMismatch:       SeverityFailure,
+	StatusSigningCredentialUntrusted:   SeverityFailure,
+	StatusSigningCredentialInvalid:     SeverityFailure,
+	StatusSigningCredentialRevoked:     SeverityFailure,
+	StatusSigningCredentialExpired:     SeverityFailure,
+	StatusTimeStampMismatch:            SeverityFailure,
+	StatusTimeStampUntrusted:           SeverityFailure,
+	StatusTimeStampOutsideValidity:     SeverityFailure,
+	StatusAssertionHashedURIMismatch:   SeverityFailure,
+	StatusAssertionDataHashMismatch:    SeverityFailure,
+	StatusAssertionBoxesHashMismatch:   SeverityFailure,
+	StatusAssertionBoxesHashUnknownBox: SeverityFailure,
+	StatusAssertionBoxesHashMalformed:  SeverityFailure,
+	StatusAssertionBMFFHashMismatch:    SeverityFailure,
+	StatusAssertionBMFFHashMalformed:   SeverityFailure,
+	StatusAssertionMissing:             SeverityFailure,
+	StatusHardBindingMissing:           SeverityFailure,
+	StatusAlgorithmUnsupported:         SeverityFailure,
+	StatusIngredientManifestMismatch:   SeverityFailure,
+	StatusGeneralError:                 SeverityFailure,
 
 	StatusRevocationUnknown: SeverityInformational,
 	StatusTimeStampMissing:  SeverityInformational,
 	StatusUnsupported:       SeverityInformational,
+
+	StatusAssertionBoxesHashAdditionalExclusions: SeverityInformational,
 }
 
 // Severity returns the StatusCode's severity. Unknown codes are informational.

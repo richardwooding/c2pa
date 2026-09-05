@@ -17,8 +17,9 @@ AVIF), RIFF (WebP/WAV/AVI), TIFF (and DNG), GIF, MP3, SVG and PDF, with **two mo
   codes. Pure Go, no cgo.
 
 The package stays one `package c2pa` but is split across topic files (`validate.go`, `pdf.go`, `boxes.go`,
-`cose_verify.go`, `chain.go`, `trust.go`, `hashbinding.go`, `timestamp.go`, `revocation.go`,
-`ingredient.go`, `statuscodes.go`) — flat *import surface*, not one file. Don't introduce subpackages;
+`cose_verify.go`, `chain.go`, `trust.go`, `hashbinding.go`, `bmffhash.go`, `boxmap.go`,
+`boxeshash.go`, `timestamp.go`, `revocation.go`, `ingredient.go`, `statuscodes.go`) — flat
+*import surface*, not one file. Don't introduce subpackages;
 that would force exporting internal helpers.
 
 Public surface:
@@ -178,6 +179,30 @@ empty for that whole generation of files.
   nulls — every optional-field decode must be nil-tolerant. The standard `/uuid` exclusion relies on
   its `data` predicate (offset 8 == the C2PA usertype) to exclude only the C2PA box. Exclusion `flags`
   with `exact=false` use spec bits-set semantics — deliberately NOT c2pa-rs's inverted subset test.
+- **`c2pa.hash.boxes` binds structurally, not by byte range** (`boxeshash.go` over `boxmap.go`). The
+  assertion is an ordered list of entries, each naming one or more CONSECUTIVE boxes and hashing the
+  span they cover; verification re-derives the asset's own box map and walks the two lists in
+  lockstep, so both the names and their order must line up. The box map is a **wire format shared
+  with whoever signed the asset** — names and byte ranges are the signer's convention, and changing
+  one silently breaks already-signed files. The load-bearing conventions: a JPEG box starts at its
+  `0xFF` marker (marker + length field are hashed with the payload) and the SOS box swallows the
+  whole entropy-coded scan, stuffed `FF00` and restart markers included, so image data is bound by
+  SOS rather than left unnamed; a run of APP11 CAI segments collapses into ONE box named `C2PA`; a
+  PNG chunk box spans length + type + data + CRC, the 8-byte signature is the synthetic `PNGh` box
+  (a producer may legitimately omit it, and only it, from the list), and each `caBX` chunk is its
+  own `C2PA` box; a GIF global colour table folds into the LSD box and a local one into its image
+  descriptor's, with image data a separate `TBID` box. Only JPEG, PNG and GIF have a box map —
+  everything else reports `general.unsupported` rather than guessing at a structure.
+  **The permitted-exclusion check is the security boundary.** A box-hash entry may carve ranges out
+  of its own hash, which is exactly how a forged assertion would leave tampered pixels unbound, so
+  every exclusion is checked against what the container says is excludable at all (spec §15.12.3):
+  the manifest store, and asset metadata (a JPEG `COM`/signed `APP1`/`APP13` payload, a PNG
+  `eXIf`/`iTXt`/`tEXt`/`zTXt` payload including its CRC, a GIF comment or XMP extension's sub-block
+  data). Anything else is `assertion.boxesHash.mismatch`. Do not relax this to "the range is inside
+  the box". Exclusions must arrive already increasing and non-overlapping and are validated **as
+  given**, never sorted. Two deliberate divergences from c2pa-rs: the APP11 run must be contiguous,
+  and boxes the assertion never names are `assertion.boxesHash.unknownBox` rather than silently
+  unbound — c2pa-rs stops when its own list runs out, which leaves an appended trailer unchecked.
 - **Trust lists are embedded via `go:embed trustlists/*.pem`.** `C2PA-TRUST-LIST.pem` (signing
   anchors) and `C2PA-TSA-TRUST-LIST.pem` (TSA anchors) are the official C2PA conformance lists; they
   go stale — refresh from `c2pa-org/conformance-public`. Callers override via `WithSigningTrust` /
@@ -236,7 +261,14 @@ nothing lands in `testdata/`. Four things to know before extending it:
   treats an unknown code as *informational*, so a typo'd literal degrades silently into a passing
   test instead of failing.
 
-Two status codes are declared but have no emission site: `assertion.boxesHash.match`/`.mismatch`,
-dead by design while `c2pa.hash.boxes` reports `general.unsupported`. (`claim.multiple` and
-`timeStamp.outsideValidity` gained emission sites in the 2026-09 reliability pass and have corpus
-cases.)
+Every declared status code now has an emission site. (`claim.multiple` and
+`timeStamp.outsideValidity` gained theirs in the 2026-09 reliability pass;
+`assertion.boxesHash.match`/`.mismatch`/`.unknownBox`/`.malformed`/`.additionalExclusionsPresent`
+gained theirs when `c2pa.hash.boxes` was implemented, and have corpus cases in `boxeshash_test.go`.)
+
+**Box-hash corpus assets are built in two passes** (`buildBoxHashAsset`), not by fixpoint like the
+data-hash ones. The first pass has no hard binding and exists only to lay the container out so its
+box map can be read; the second embeds the assertion derived from it. That is sound because a box
+hash covers box CONTENT, not offsets — adding the assertion grows the store's box, whose bytes are
+never hashed, and shifts everything after it without changing any other box's bytes. The builder
+asserts that rather than assuming it.
