@@ -192,12 +192,31 @@ empty for that whole generation of files.
   re-encode. BMFF hard bindings (`c2pa.hash.bmff.v2`/`.v3`) ARE verified (`bmffhash.go`): a single
   ascending pass where each top-level box not wholly excluded contributes its absolute offset as an
   8-byte big-endian integer followed by its bytes minus exclusion ranges. v1 `c2pa.hash.bmff` must be
-  IGNORED per spec §18.6.1 (v1-only manifests → `hardBinding.missing`); `merkle`/fragmented assets →
-  informational unsupported; a BMFF binding on a non-BMFF container → `hardBinding.missing` (not
+  IGNORED per spec §18.6.1 (v1-only manifests → `hardBinding.missing`);
+  a BMFF binding on a non-BMFF container → `hardBinding.missing` (not
   informational — see verifyHardBinding). Assertion CBOR encodes absent exclusion fields as explicit
   nulls — every optional-field decode must be nil-tolerant. The standard `/uuid` exclusion relies on
   its `data` predicate (offset 8 == the C2PA usertype) to exclude only the C2PA box. Exclusion `flags`
   with `exact=false` use spec bits-set semantics — deliberately NOT c2pa-rs's inverted subset test.
+- **Merkle BMFF (`merkle` array) is verified as far as ONE reader can settle it.** Three arrangements
+  exist and the code is shaped by which of them a single file can prove. (a) A **non-fragmented**
+  asset whose `mdat` is hashed piecewise — leaves are cut from the box, the tree is rebuilt, and it
+  is checked in FULL. (b) A **fragmented asset in one flat file** — `initHash` covers everything
+  before the first `moof` and IS checked; each chunk's hash lives in that chunk's own C2PA `merkle`
+  box, which is not parsed, so this reports match-less `general.unsupported` naming what was left.
+  (c) **Fragmented across files** (.m4s) — the chunks are other files and no care with this one
+  produces them. A wrong `initHash` is still a `mismatch`: this file disproves it.
+  Four things that are easy to get wrong: a Merkle leaf starts **16 bytes** into the `mdat` box
+  (`mdatBlockPrefix`) regardless of whether the box uses an 8- or 16-byte header, so it is NOT the
+  box's header length; the tree carries an **unpaired last node up UNCHANGED** rather than
+  duplicating and re-hashing it, which is what makes it C2PA's tree and not the Bitcoin-style one;
+  `hashes` is **any one row** — leaf-most, root, or intermediate — and its LENGTH is what says which,
+  so verification rebuilds every row and matches on length; and `initHash` uses the same offset-marker
+  walk as the flat hash (`hashBMFFTopLevel`), not a plain byte hash — c2pa-rs reaches it through the
+  same `hash_stream_by_alg` path as the flat hash, with `[first moof, EOF)` added to the exclusions.
+  `maxMerkleLeaves` caps the leaf count because `fixedBlockSize` is attacker-controlled and is what
+  turns an assertion's size into our allocation. Merkle maps pair with `mdat` boxes **positionally**,
+  so a count mismatch is reported rather than guessed around.
 - **`c2pa.hash.boxes` binds structurally, not by byte range** (`boxeshash.go` over `boxmap.go`). The
   assertion is an ordered list of entries, each naming one or more CONSECUTIVE boxes and hashing the
   span they cover; verification re-derives the asset's own box map and walks the two lists in
