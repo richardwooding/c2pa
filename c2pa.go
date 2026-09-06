@@ -1,27 +1,41 @@
-// Package c2pa is a pure-Go, read-only reader for C2PA / Content Credentials
-// (https://c2pa.org) provenance manifests embedded in media files.
+// Package c2pa reads, verifies and writes C2PA / Content Credentials
+// (https://c2pa.org) provenance manifests embedded in media files — JPEG, PNG,
+// BMFF (MP4/MOV/HEIC/AVIF), RIFF (WebP/WAV/AVI), TIFF/DNG, GIF, MP3, SVG and
+// PDF — in pure Go, with no cgo and no c2pa-rs.
 //
-// It surfaces what a file CLAIMS about its provenance — the creating tool,
-// title, declared media type, whether it declares AI-generated content, and
-// the signer identity + signing time — by parsing the embedded JUMBF manifest
-// (ISO 19566-5), CBOR-decoding the active manifest's claim and c2pa.actions
-// assertion, and decoding the COSE_Sign1 signature envelope.
+// Three entry points, kept deliberately separate:
 //
-// # This is UNVERIFIED
+//   - Read surfaces what a file CLAIMS — creating tool, title, declared media
+//     type, AI-generated flag, signer identity and signing time — by parsing
+//     the embedded JUMBF manifest store (ISO 19566-5), decoding the active
+//     claim and its c2pa.actions assertion, and reading the COSE_Sign1
+//     envelope's headers. It verifies nothing.
+//   - Validate runs the C2PA validation algorithm: the COSE signature, the
+//     certificate chain and C2PA certificate profile against a trust list, the
+//     hard binding and every assertion hash, the RFC 3161 timestamp, optional
+//     revocation, and ingredients — reporting the specification's §15 status
+//     codes. ValidateFragmented does the same over a DASH/CMAF asset split
+//     across files.
+//   - NewSigner and Signer.Sign write a c2pa.claim.v2 manifest carrying the
+//     container's hard binding, signed once with COSE_Sign1 and optionally
+//     timestamped, at the container's canonical position. An asset that
+//     already carries a manifest keeps it, chained as the new manifest's
+//     parentOf ingredient. The output is validated before a byte is written,
+//     and c2pa-rs's c2patool checks every container's output in CI.
 //
-// The reader is deliberately read-only: it does NOT validate the COSE
-// cryptographic signature, and it does NOT check the signer's certificate
-// chain against the C2PA trust list. Full validation requires the Rust
-// c2pa-rs library via CGO, which this pure-Go package intentionally avoids.
+// # Read is UNVERIFIED
 //
-// Treat every field like EXIF or an email From header: accurate-as-recorded,
+// Treat every Info field like EXIF or an email From header: accurate-as-recorded,
 // not authenticated. SignedBy is who the file CLAIMS signed it, not a verified
 // identity. A file with no manifest yields Info{Present:false}; absence of a
-// signal (e.g. AIGenerated) does not prove its negation.
+// signal (e.g. AIGenerated) does not prove its negation. Trust decisions
+// belong to Validate.
 //
-// All parsing is best-effort and never panics: malformed or truncated input
-// yields zero values rather than an error. Every input-scaled loop honours the
-// supplied context.Context, so a cancelled call surrenders promptly.
+// Read and Validate are best-effort and never panic: malformed or truncated
+// input yields zero values or failure statuses rather than an error. Every
+// input-scaled loop honours the supplied context.Context, so a cancelled call
+// surrenders promptly. Sign is the exception that returns an error — and it
+// writes nothing when it does.
 package c2pa
 
 import (
@@ -81,7 +95,8 @@ const (
 	// "C2PA_GIF", its payload reassembled from the extension's data sub-blocks.
 	GIF Container = "gif"
 	// MP3 reads the manifest from an ID3v2 GEOB frame whose MIME type is
-	// application/c2pa. An unsynchronised tag is not read.
+	// application/c2pa. An unsynchronised tag (v2.3 tag-level, v2.4 per-frame)
+	// is restored before it is read.
 	MP3 Container = "mp3"
 	// SVG reads the manifest from a base64 <c2pa:manifest> element bound to
 	// http://c2pa.org/manifest. The document is parsed as XML, not scanned.

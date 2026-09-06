@@ -11,7 +11,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
 })(window,document,'script','dataLayer','GTM-NB62JPNJ');</script>
 <!-- End Google Tag Manager -->
 <title>c2pa — C2PA / Content Credentials provenance in pure Go</title>
-<meta name="description" content="Read and validate C2PA / Content Credentials manifests in JPEG and PNG — a fast, best-effort claim reader for triage, plus a full cryptographic verifier — with no c2pa-rs and no cgo.">
+<meta name="description" content="Read, verify and write C2PA / Content Credentials manifests in JPEG, PNG, MP4/HEIC, WebP, TIFF, GIF, MP3, SVG and PDF — a fast claim reader for triage, a full cryptographic verifier, and a signer checked against c2pa-rs — with no c2pa-rs dependency and no cgo.">
 <meta property="og:url" content="https://richardwooding.github.io/c2pa/">
 <meta property="og:site_name" content="Richard Wooding">
 <meta property="og:image" content="https://richardwooding.github.io/c2pa/og.png">
@@ -52,6 +52,7 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
     <nav id="nav">
       <a href="#features">Features</a>
       <a href="#usage">Usage</a>
+      <a href="#sign">Sign</a>
       <a href="#install">Install</a>
       <button class="gl-theme-toggle" data-gl-theme-toggle aria-label="Toggle color theme" aria-pressed="true">
         <svg class="gl-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
@@ -68,12 +69,12 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
       <div>
         <p class="gl-eyebrow">go · no cgo · content credentials</p>
         <h1>C2PA provenance, <span class="gl-grad">pure Go.</span></h1>
-        <p class="sub">Read and validate C2PA / Content Credentials manifests in JPEG and PNG — a fast, best-effort claim reader for triage, plus a full cryptographic verifier — with no c2pa-rs and no cgo.</p>
+        <p class="sub">Read, verify and write C2PA / Content Credentials manifests in JPEG, PNG, MP4/HEIC, WebP, TIFF, GIF, MP3, SVG and PDF — a fast claim reader for triage, a full cryptographic verifier, and a signer checked against c2pa-rs — with no c2pa-rs dependency and no cgo.</p>
         <div class="gl-cta">
           <a class="gl-btn primary" href="#install">Install</a>
           <a class="gl-btn ghost" href="https://pkg.go.dev/github.com/richardwooding/c2pa">Go Reference</a>
         </div>
-        <p class="gl-hint">MIT licensed · pure-Go crypto/CBOR/COSE · Go 1.25+</p>
+        <p class="gl-hint">MIT licensed · pure-Go crypto/CBOR/COSE · Go 1.26+</p>
       </div>
       <div class="gl-term">
         <div class="bar">
@@ -82,7 +83,7 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
           <span class="dot" style="background:#27c93f"></span>
           <span class="t">read.go</span>
         </div>
-<pre><span class="n">info</span> := c2pa.Read(ctx, c2pa.JPEG, f) <span class="hd">// or c2pa.PNG</span>
+<pre><span class="n">info</span> := c2pa.Read(ctx, c2pa.JPEG, f) <span class="hd">// or c2pa.PNG, c2pa.BMFF, c2pa.PDF …</span>
 if info.Present {
     fmt.Println(info.ClaimGenerator) <span class="hd">// <span class="ok">"Adobe Firefly"</span></span>
     fmt.Println(info.AIGenerated)    <span class="hd">// declared AI-generated?</span>
@@ -95,8 +96,8 @@ if info.Present {
   <section class="gl-section" id="features">
     <div class="gl-wrap">
       <p class="gl-eyebrow">what you get</p>
-      <h2>Two modes, one pure-Go library.</h2>
-      <p class="gl-lede" style="margin-top:14px">A fast reader that surfaces what a file <em>claims</em>, and a full verifier that <em>proves</em> it — the complete C2PA validation algorithm, no <code>c2pa-rs</code> and no cgo.</p>
+      <h2>Three modes, one pure-Go library.</h2>
+      <p class="gl-lede" style="margin-top:14px">A fast reader that surfaces what a file <em>claims</em>, a full verifier that <em>proves</em> it, and a signer that <em>writes</em> it — the complete C2PA validation algorithm and a writer checked against c2pa-rs, no <code>c2pa-rs</code> dependency and no cgo.</p>
       <div class="gl-grid feat" style="margin-top:32px">
 
         <div class="gl-card">
@@ -115,6 +116,11 @@ if info.Present {
         </div>
 
         <div class="gl-card">
+          <h3><span class="gl-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></span><code>Sign</code> in pure Go</h3>
+          <p>Write <code>c2pa.claim.v2</code> manifests into all nine containers with your own key — COSE_Sign1, optional RFC 3161 timestamps, provenance chained on re-sign — every output validated before it is written, and checked against c2pa-rs's <code>c2patool</code> in CI.</p>
+        </div>
+
+        <div class="gl-card">
           <h3><span class="gl-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 7a4 4 0 1 0-3.9 5H14v3h3v3h4v-4l-5.1-5.1A4 4 0 0 0 15 7z"/></svg></span>Signatures &amp; chains</h3>
           <p>Verifies COSE signatures (ES256/384/512, PS256/384/512, EdDSA), the certificate chain against the C2PA profile, and assertion plus hard-binding hashes.</p>
         </div>
@@ -126,7 +132,7 @@ if info.Present {
 
         <div class="gl-card">
           <h3><span class="gl-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l8 4v5c0 4.4-3.2 8.4-8 9-4.8-.6-8-4.6-8-9V7z"/><path d="M9 12l2 2 4-4"/></svg></span>Batteries included</h3>
-          <p>Official C2PA conformance trust lists embedded in the binary, overridable anchors, and tunable options — for both JPEG and PNG.</p>
+          <p>Official C2PA conformance trust lists embedded in the binary, overridable anchors, and tunable options — across JPEG, PNG, BMFF, RIFF, TIFF, GIF, MP3, SVG and PDF.</p>
         </div>
 
       </div>
@@ -147,11 +153,11 @@ info := c2pa.Read(ctx, c2pa.JPEG, f)
     fmt.Println(info.SignedBy)       <span class="c">// claimed</span>
 }</pre>
 <pre class="gl-code"><span class="c">// Validate — full cryptographic proof</span>
-res, err := c2pa.Validate(ctx, c2pa.JPEG, f, opts)
+res := c2pa.Validate(ctx, c2pa.JPEG, f, opts...)
 <span class="k">if</span> res.Valid {
     fmt.Println(<span class="s">"verified, signed at"</span>, res.SignedAt)
 }
-<span class="k">for</span> _, s := <span class="k">range</span> res.Status {
+<span class="k">for</span> _, s := <span class="k">range</span> res.Statuses {
     fmt.Println(s.Code, s.Severity) <span class="c">// C2PA codes</span>
 }</pre>
       </div>
@@ -166,11 +172,36 @@ res, err := c2pa.Validate(ctx, c2pa.JPEG, f, opts)
     </div>
   </section>
 
+  <section class="gl-section" id="sign">
+    <div class="gl-wrap">
+      <p class="gl-eyebrow">sign</p>
+      <h2>Write Content Credentials.</h2>
+      <p class="gl-lede" style="margin-top:14px">A <code>crypto.Signer</code> and its certificate chain in, a signed asset out — the same nine containers, the COSE algorithm inferred from the key, an RFC 3161 timestamp when you ask for one. An asset that already carries a manifest keeps it as the new manifest's <code>parentOf</code> ingredient. Nothing is written unless the output already validates.</p>
+<pre class="gl-code" style="margin-top:28px">signer, err := c2pa.NewSigner(key, chain,
+    c2pa.WithClaimGenerator(<span class="s">"my-app"</span>, <span class="s">"1.2.0"</span>),
+    c2pa.WithTimestampAuthority(<span class="s">"https://timestamp.digicert.com"</span>)) <span class="c">// optional</span>
+
+err = signer.Sign(ctx, c2pa.JPEG, in, out, c2pa.Manifest{
+    Title: <span class="s">"photo.jpg"</span>,
+    Actions: []c2pa.Action{{
+        Action:            c2pa.ActionCreated,
+        DigitalSourceType: c2pa.DigitalSourceTypeDigitalCapture,
+    }},
+})</pre>
+      <ul class="gl-badges" aria-label="what c2patool reports" style="margin-top:26px">
+        <li class="gl-lang">c2patool: Valid</li>
+        <li class="gl-lang">trust --trust_anchors: Trusted</li>
+        <li class="gl-lang">timeStamp.trusted</li>
+        <li class="gl-lang">ingredient parentOf</li>
+      </ul>
+    </div>
+  </section>
+
   <section class="gl-section" id="install">
     <div class="gl-wrap">
       <p class="gl-eyebrow">install</p>
       <h2>Add it to your module.</h2>
-      <p class="gl-lede" style="margin-top:14px">Pure-Go dependencies only, no cgo. Requires Go 1.25+.</p>
+      <p class="gl-lede" style="margin-top:14px">Pure-Go dependencies only, no cgo. Requires Go 1.26+.</p>
       <div class="gl-install" style="margin-top:26px">
         <div class="gl-snip">
           <span class="lbl">go get</span>
@@ -183,7 +214,7 @@ res, err := c2pa.Validate(ctx, c2pa.JPEG, f, opts)
           <button class="gl-copy" data-gl-copy="i2">Copy</button>
         </div>
       </div>
-      <p class="gl-hint">Requires Go 1.25+. Full API docs on <a href="https://pkg.go.dev/github.com/richardwooding/c2pa">pkg.go.dev</a>.</p>
+      <p class="gl-hint">Requires Go 1.26+. Full API docs on <a href="https://pkg.go.dev/github.com/richardwooding/c2pa">pkg.go.dev</a>.</p>
     </div>
   </section>
 </main>

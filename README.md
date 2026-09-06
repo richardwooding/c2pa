@@ -9,13 +9,16 @@
 
 A small, **pure-Go** (no cgo) library for [C2PA / Content Credentials](https://c2pa.org)
 provenance manifests embedded in **JPEG**, **PNG**, **BMFF** (MP4, MOV, HEIC, HEIF, AVIF),
-**RIFF** (WebP, WAV, AVI), **TIFF** (and DNG), **GIF**, **MP3**, **SVG** and **PDF** files, with two modes:
+**RIFF** (WebP, WAV, AVI), **TIFF** (and DNG), **GIF**, **MP3**, **SVG** and **PDF** files, with three modes:
 
 - **`Read`** — a fast, *unverified* reader. Surfaces what a file *claims* (creating tool, title,
   format, AI-generated flag, signer identity, signing time) like EXIF or an email `From:` header.
 - **`Validate`** — a full, opt-in *verifier*. Checks the COSE signature, the certificate chain
   against the C2PA trust list, assertion and hard-binding hashes, the RFC 3161 timestamp,
   revocation, and ingredients — reporting C2PA status codes. Pure Go, no `c2pa-rs`/CGO.
+- **`Sign`** — a *writer*. Embeds a signed `c2pa.claim.v2` manifest into any of the nine containers
+  with your key and certificate chain, optionally timestamped, chaining any manifest already there.
+  Every container's output is checked against c2pa-rs's `c2patool` in CI.
 
 ```sh
 go get github.com/richardwooding/c2pa
@@ -194,6 +197,105 @@ for _, s := range r.Statuses {
     fmt.Println(s.Code, s.URI, s.Explanation) // a fragment failure's URI ends in "#fragment=<i>"
 }
 ```
+
+## `Sign` — write Content Credentials
+
+`NewSigner` takes a `crypto.Signer` and its certificate chain, leaf first (the root may be left
+out); `Sign` writes a copy of the asset with a `c2pa.claim.v2` manifest embedded at the container's
+canonical position, bound to the content with `c2pa.hash.data` (or `c2pa.hash.bmff.v3` for BMFF).
+The COSE algorithm follows the key. Nothing reaches `out` until the output has passed `Validate`:
+a signed asset this library could not verify is a bug, not an output.
+
+```go
+keyPEM, _ := os.ReadFile("signer.key")  // PKCS#8, unencrypted
+crtPEM, _ := os.ReadFile("signer.crt")  // leaf first, then any intermediates
+kb, _ := pem.Decode(keyPEM)
+key, _ := x509.ParsePKCS8PrivateKey(kb.Bytes)
+var chain []*x509.Certificate
+for b, rest := pem.Decode(crtPEM); b != nil; b, rest = pem.Decode(rest) {
+    c, _ := x509.ParseCertificate(b.Bytes)
+    chain = append(chain, c)
+}
+
+signer, err := c2pa.NewSigner(key.(crypto.Signer), chain,
+    c2pa.WithClaimGenerator("my-app", "1.2.0"))
+if err != nil {
+    return err // ErrSignerKey / ErrSignerChain: the key or chain would not verify
+}
+
+in, _ := os.Open("photo.jpg")
+out, _ := os.Create("photo-signed.jpg")
+err = signer.Sign(ctx, c2pa.JPEG, in, out, c2pa.Manifest{
+    Title: "photo.jpg",
+    Actions: []c2pa.Action{{
+        Action:            c2pa.ActionCreated, // this asset has no earlier provenance
+        DigitalSourceType: c2pa.DigitalSourceTypeDigitalCapture,
+    }},
+})
+```
+
+The first action must be `c2pa.created` (nothing preceded this asset) or `c2pa.opened` (something
+did) — c2pa-rs rejects a manifest without one. `Assertions` adds your own, each a CBOR-encodable
+`Value` or raw `JSON` under any label the generated assertions do not reserve. Verify the result
+with your own anchor:
+
+```go
+pool := x509.NewCertPool()
+pool.AddCert(chain[len(chain)-1])
+r := c2pa.Validate(ctx, c2pa.JPEG, signed, c2pa.WithSigningTrust(pool))
+fmt.Println(r.Valid, r.VerifiedSigner()) // true "My Signer"
+```
+
+A self-signed test chain that satisfies the C2PA certificate profile (`digitalSignature`, a
+constrained EKU, not a CA):
+
+```sh
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 365 \
+  -keyout signer.key -out signer.crt -subj "/CN=My Signer/O=Example" \
+  -addext "keyUsage=critical,digitalSignature" \
+  -addext "extendedKeyUsage=emailProtection" \
+  -addext "basicConstraints=critical,CA:FALSE"
+```
+
+**What c2pa-rs says.** Every container's output is run through c2pa-rs's `c2patool` in CI
+(`sign_interop_test.go`). With a private chain it reports `Valid` with `signingCredential.untrusted`
+— correct, it has never seen your root; with `c2patool photo-signed.jpg trust --trust_anchors
+signer.crt` it reports `Trusted`; a re-signed asset lists the previous manifest as a `parentOf`
+ingredient with no failure deltas; a timestamped one reaches `timeStamp.trusted` once the TSA is
+anchored.
+
+**Timestamping** is opt-in. With a TSA configured, `Sign` timestamps the signature (RFC 3161) after
+signing and embeds the token as `sigTst2`; the reply is verified with the same code `Validate` uses
+— imprint, CMS signature, nonce echo — before it is embedded, and a TSA failure is `ErrTimestamp`
+with nothing written. It is the one path that touches the network.
+
+```go
+signer, err := c2pa.NewSigner(key, chain,
+    c2pa.WithTimestampAuthority("https://timestamp.digicert.com"),
+    c2pa.WithTimestampHTTPClient(&http.Client{Timeout: 10 * time.Second}))
+```
+
+**Re-signing chains provenance.** An asset that already carries Content Credentials keeps them:
+every prior manifest is carried into the new store verbatim and the previous active one becomes the
+new manifest's `parentOf` ingredient, with its validation results recorded as c2pa-rs requires. Open
+it with `ActionOpened`; `ActionCreated` on such an asset is `ErrManifestInvalid`, because a prior
+manifest proves something preceded it. `ExampleSigner_Sign_resign` in
+[`example_test.go`](example_test.go) does this to the ChatGPT PDF and verifies both signers.
+
+**Limits.** Fragmented BMFF (`moof`/`sidx`) is refused with `ErrFragmentedBMFF` (authoring Merkle
+trees per fragment is a separate project); encrypted (`/Encrypt`) or certified (`/Perms`) PDFs and
+ID3v2.2 MP3 tags are refused; only standard `c2pa.claim.v2` manifests are written (no update
+manifests); the store must fit in 64 MiB and the asset under `ValidateMaxScan`. Every existing
+store is removed and the new one written at the container's canonical position — deterministic, and
+a deliberate difference from c2pa-rs's replace-in-place.
+
+| Key | COSE algorithm |
+| --- | --- |
+| ECDSA P-256 | ES256 |
+| ECDSA P-384 | ES384 |
+| ECDSA P-521 | ES512 |
+| RSA ≥ 2048 bits | PS256 |
+| Ed25519 | EdDSA |
 
 ## PDF
 

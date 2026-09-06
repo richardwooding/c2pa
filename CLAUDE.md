@@ -350,8 +350,9 @@ empty for that whole generation of files.
 - **Hard-binding hashes need the whole asset; `MaxScan` truncation is not a mismatch.** `c2pa.hash.data`
   exclusions are *file* byte ranges (fixture: exclude `[20, 117293)`). If the asset exceeds the scan
   cap the hash can't be computed — emit an **informational** status, never a false `dataHash.mismatch`.
-  Hash assertions over `rawAssertion.full` (the whole superbox) for `hashed_uri`; sub-slice, never
-  re-encode. BMFF hard bindings (`c2pa.hash.bmff.v2`/`.v3`) ARE verified (`bmffhash.go`): a single
+  Hash assertions over `rawAssertion.boxContent` (the superbox PAYLOAD — everything after its 8-byte
+  header: jumd + data box) for `hashed_uri`, which is what `hashedURI` writes and c2pa-rs's
+  `calc_manifest_box_hash` reads; sub-slice, never re-encode. BMFF hard bindings (`c2pa.hash.bmff.v2`/`.v3`) ARE verified (`bmffhash.go`): a single
   ascending pass where each top-level box not wholly excluded contributes its absolute offset as an
   8-byte big-endian integer followed by its bytes minus exclusion ranges. v1 `c2pa.hash.bmff` must be
   IGNORED per spec §18.6.1 (v1-only manifests → `hardBinding.missing`);
@@ -447,8 +448,15 @@ empty for that whole generation of files.
 `testdata/c2pa_signed.jpg` is a real signed JPEG from contentauth/c2pa-rs (see `testdata/README.md`
 for provenance + license). `TestActionsAreAI` synthesises CBOR assertions in-memory because there's
 no public AI-positive fixture. `example_test.go` holds the runnable godoc examples — the JPEG pair plus
-`ExampleRead_pdf` / `ExampleValidate_pdf` / `ExampleReadAll_pdf` — and they have real `// Output:`
-blocks, so `go test` checks them. **The README's PDF section is the same three examples**, with each
+`ExampleRead_pdf` / `ExampleValidate_pdf` / `ExampleReadAll_pdf`, and the signer's
+`ExampleSigner_Sign` / `ExampleSigner_Sign_resign` — and they have real `// Output:` blocks, so
+`go test` checks them. The signing examples mint a self-signed P-256 leaf in-test (`exampleSigner`;
+Go's `x509.Verify` accepts a leaf that is itself in the root pool, so a one-cert chain verifies)
+and sign `video_no_manifest.mp4` / re-sign `c2pa_chatgpt.pdf` into buffers — nothing lands in
+`testdata/`. The re-sign example is the PDF and not `c2pa_signed.jpg` on purpose: the ingredient
+only reports `ingredient.manifest.validated` when its own validation adds no failure, and the JPEG
+fixture's DigiCert timestamp is `timeStamp.untrusted` (a FAILURE) against the embedded TSA list,
+which `WithSigningTrust` does not touch; the ChatGPT PDF has no timestamp at all. **The README's PDF section is the same three examples**, with each
 checked value repeated as an inline `// comment` — so those values are verified in `example_test.go`
 and hand-copied in `README.md`. Change one and change the other; nothing catches the README.
 
