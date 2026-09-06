@@ -1017,24 +1017,21 @@ func TestPDFJUMBF_PathologicalCost(t *testing.T) {
 	// Every stream names the same length object, and every definition of it is a fabrication that
 	// never parses. Trying them all is N attempts per stream and N² overall.
 	// maxPDFLengthCandidates is what bounds it: 0.39s under -race against 12.9s unbounded.
+	// Asserted as a ratio for the same reason as above — a 4s ceiling on this
+	// took 4.38s on a loaded runner and went red for no reason.
 	t.Run("one length object defined many times", func(t *testing.T) {
-		var b bytes.Buffer
-		b.WriteString("%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n")
-		for range 60_000 {
-			b.WriteString("2 0 obj\nnotanumber\nendobj\n")
-		}
-		for i := range 60_000 {
-			fmt.Fprintf(&b, "%d 0 obj\n<< /Length 2 0 R >>\nstream\n\nendstream\nendobj\n", 10+i)
-		}
-		b.WriteString("trailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n")
-
-		start := time.Now()
-		if got := pdfJUMBF(ctx, b.Bytes()); got != nil {
-			t.Fatalf("yielded %d bytes", len(got))
-		}
-		if elapsed := time.Since(start); elapsed > 4*time.Second {
-			t.Fatalf("took %v, want the candidate search to stay bounded", elapsed)
-		}
+		assertScalesLinearly(t, 15_000, 4, func(n int) []byte {
+			var b bytes.Buffer
+			b.WriteString("%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n")
+			for range n {
+				b.WriteString("2 0 obj\nnotanumber\nendobj\n")
+			}
+			for i := range n {
+				fmt.Fprintf(&b, "%d 0 obj\n<< /Length 2 0 R >>\nstream\n\nendstream\nendobj\n", 10+i)
+			}
+			b.WriteString("trailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n")
+			return b.Bytes()
+		})
 	})
 }
 
@@ -1077,17 +1074,12 @@ func TestPDFJUMBF_UnterminatedArrayCost(t *testing.T) {
 		}
 	})
 
-	// A smoke guard, not the pin: generous enough for -race on a shared runner,
-	// where the bounded scan of this document has been seen to take ~0.6s.
-	t.Run("whole scan finishes", func(t *testing.T) {
-		doc := pdfOpenArrayDoc(1024, "/Root[")
-		start := time.Now()
-		if got := pdfJUMBF(context.Background(), doc); got != nil {
-			t.Fatalf("yielded %d bytes", len(got))
-		}
-		if d := time.Since(start); d > 5*time.Second {
-			t.Fatalf("1 MiB of unterminated arrays took %v", d)
-		}
+	// The scan is bounded, so quadrupling the document should cost about 4x, not
+	// 16x. A wall-clock ceiling here measured the runner rather than the bound.
+	t.Run("whole scan scales with the document", func(t *testing.T) {
+		assertScalesLinearly(t, 256, 4, func(kib int) []byte {
+			return pdfOpenArrayDoc(kib, "/Root[")
+		})
 	})
 }
 
@@ -1647,9 +1639,10 @@ func TestPDFRepairCostStaysLinear(t *testing.T) {
 	assertScalesLinearly(t, 4000, 4, buildUnterminatedStreams)
 }
 
-// assertScalesLinearly builds the document at `small` and at `small*factor`
-// objects and fails when the larger one took disproportionately longer,
-// which is what a pass that has gone quadratic looks like.
+// assertScalesLinearly builds the document at size `small` and at `small*factor`
+// — whatever unit `build` takes, objects or kibibytes — and fails when the
+// larger one took disproportionately longer, which is what a pass that has gone
+// quadratic looks like.
 //
 // A ratio rather than a wall-clock ceiling, because a ceiling measures the
 // machine as much as the code: the same document that runs in ~1.3s here has
@@ -1679,8 +1672,8 @@ func assertScalesLinearly(t *testing.T, small, factor int, build func(int) []byt
 	// midpoint separates them with headroom on both sides.
 	tolerated := time.Duration(factor * 2)
 	if scaled > base*tolerated {
-		t.Errorf("scaling %dx the objects took %.1fx the time (%v -> %v); the pass looks quadratic again",
+		t.Errorf("scaling the input %dx took %.1fx the time (%v -> %v); the pass looks quadratic again",
 			factor, float64(scaled)/float64(max(base, time.Microsecond)), base, scaled)
 	}
-	t.Logf("%d objects %v; %d objects %v", small, base.Round(time.Millisecond), small*factor, scaled.Round(time.Millisecond))
+	t.Logf("input %d %v; input %d %v", small, base.Round(time.Millisecond), small*factor, scaled.Round(time.Millisecond))
 }

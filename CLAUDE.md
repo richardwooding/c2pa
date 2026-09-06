@@ -354,10 +354,11 @@ including the Merkle paths in `bmffmerkle_test.go`; `manifest.update.invalid` /
 **Cost tests assert a SCALING RATIO, not a wall-clock ceiling.** `assertScalesLinearly` (in
 `pdf_test.go`) builds a document at n and 4n objects and fails when the larger takes more than 8x —
 linear grows 4x, quadratic 16x, and the midpoint separates them. Do not add another
-`time.Since(start) > N*time.Second` guard: an absolute ceiling measures the runner as much as the
-code, and the one that used to guard the payload-extent walk went red on CI at 8.02s for work that
-takes 1.3s locally. The two ceilings still in that file are deliberate smoke guards with ~10x
-headroom that assert no scaling property.
+`time.Since(start) > N*time.Second` guard — there are none left in the file, and that is deliberate.
+Three of them existed; two went red on CI within a day of each other (8.02s against an 8s bound for
+work that takes 1.3s locally, then 4.38s against a 4s bound for 0.39s of work). Headroom is not the
+fix: a shared runner can be 10x slower than a developer machine, which is the same order as the
+regression these are meant to catch, so any bound tight enough to catch one is loose enough to flake.
 
 **Box-hash corpus assets are built in two passes** (`buildBoxHashAsset`), not by fixpoint like the
 data-hash ones. The first pass has no hard binding and exists only to lay the container out so its
