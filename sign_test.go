@@ -254,7 +254,9 @@ func TestSignErrors(t *testing.T) {
 		m         Manifest
 		want      error
 	}{
-		{"unsupported container", PDF, fixtureBytes(t, "c2pa_chatgpt.pdf"), good, ErrUnsupportedContainer},
+		{"unsupported container", Container("tga"), jpg, good, ErrUnsupportedContainer},
+		{"encrypted pdf", PDF, bytes.Replace(unsignedPDF(false), []byte("/Root 1 0 R"), []byte("/Root 1 0 R /Encrypt 7 0 R"), 1), good, ErrUnsupportedContainer},
+		{"pdf without a usable xref", PDF, newPDFDoc().obj(1, "<< /Type /Catalog >>").trailer(1).bytes(), good, ErrUnsupportedContainer},
 		{"fragmented mp4", BMFF, fragmentedFlatAsset(t, 2, 1, 1, 1, nil).asset, good, ErrFragmentedBMFF},
 		{"mp4 with trailing bytes", BMFF, append(minimalMP4(false), 1, 2, 3), good, ErrMalformedAsset},
 		{"no actions", JPEG, jpg, Manifest{Title: "x"}, ErrManifestInvalid},

@@ -23,6 +23,8 @@ func FuzzSign(f *testing.F) {
 	f.Add(unsignedSVG(), uint8(6))
 	f.Add(minimalMP4(false), uint8(7))
 	f.Add(minimalAVIF(true), uint8(7))
+	f.Add(unsignedPDF(false), uint8(8))
+	f.Add(unsignedPDF(true), uint8(8))
 	f.Add([]byte{0xFF, 0xD8, 0xFF, 0xD9}, uint8(0))
 	f.Add([]byte{}, uint8(1))
 	f.Fuzz(func(t *testing.T, data []byte, which uint8) {
@@ -58,6 +60,7 @@ func FuzzEmbedStore(f *testing.F) {
 	f.Add(unsignedSVG(), []byte{0xA0}, uint8(6))
 	f.Add(minimalMP4(true), []byte{0xA0}, uint8(7))
 	f.Add(minimalAVIF(false), []byte{0xA0}, uint8(7))
+	f.Add(unsignedPDF(true), []byte{0xA0}, uint8(8))
 	f.Fuzz(func(t *testing.T, asset, payload []byte, which uint8) {
 		if len(asset) > 1<<20 || len(payload) > 1<<17 {
 			return
@@ -102,13 +105,17 @@ func FuzzBMFFEmbed(f *testing.F) {
 			t.Fatalf("%d offsets became %d", len(before), len(after))
 		}
 		tables := bmffOffsetTables(asset)
+		inOneBox := bmffWithinOneTopLevelBox(asset)
 		for i := range before {
 			o, n := before[i], after[i]
 			if o < 0 || n < 0 || o+8 > len(asset) || n+8 > len(out) {
 				continue // an offset that never addressed anything in bounds
 			}
-			if tables(o, o+8) {
-				continue // garbage input pointing into an offset table, which the rewrite itself changes
+			if tables(o, o+8) || !inOneBox(o, o+8) {
+				// Garbage input: an offset into a table the rewrite itself changes,
+				// or a window straddling a top-level box boundary, which the
+				// inserted box legitimately splits. No real chunk does either.
+				continue
 			}
 			if !bytes.Equal(asset[o:o+8], out[n:n+8]) {
 				t.Fatalf("offset %d → %d no longer addresses the same bytes", o, n)
@@ -136,6 +143,20 @@ func bmffOffsetTables(data []byte) func(start, end int) bool {
 	return func(start, end int) bool {
 		for _, s := range spans {
 			if start < s[1] && end > s[0] {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// bmffWithinOneTopLevelBox reports whether [start, end) lies inside a single
+// top-level box of data.
+func bmffWithinOneTopLevelBox(data []byte) func(start, end int) bool {
+	top := parseBMFFBoxes(context.Background(), data)
+	return func(start, end int) bool {
+		for _, b := range top {
+			if start >= b.start && end <= b.end {
 				return true
 			}
 		}

@@ -105,28 +105,53 @@ func bmffAbsoluteOffsets(t testing.TB, data []byte) []int {
 					}
 				}
 			case "iloc":
+				// Mirrors patchIloc: versions 0-2, items stored elsewhere or
+				// relative to idat carry no file offsets and are skipped.
+				version := data[p]
 				q := p + 4
-				os, bos := int(data[q]>>4), int(data[q+1]>>4)
+				os, ls, bos := int(data[q]>>4), int(data[q]&0x0F), int(data[q+1]>>4)
+				is := 0
+				if version >= 1 {
+					is = int(data[q+1] & 0x0F)
+				}
 				q += 2
-				items := int(binary.BigEndian.Uint16(data[q:]))
-				q += 2
-				for i := 0; i < items; i++ {
-					q += 2 // item_ID (version 0)
-					q += 2 // data_reference_index
-					base := 0
-					if bos == 4 {
-						base = int(binary.BigEndian.Uint32(data[q:]))
+				rd := func(at, w int) int {
+					switch w {
+					case 2:
+						return int(binary.BigEndian.Uint16(data[at:]))
+					case 4:
+						return int(binary.BigEndian.Uint32(data[at:]))
+					case 8:
+						return int(binary.BigEndian.Uint64(data[at:]))
 					}
-					q += bos
-					extents := int(binary.BigEndian.Uint16(data[q:]))
+					return 0
+				}
+				cw := 2
+				if version >= 2 {
+					cw = 4
+				}
+				items := rd(q, cw)
+				q += cw
+				for i := 0; i < items && q < b.end; i++ {
+					q += cw // item_ID
+					cm := 0
+					if version >= 1 {
+						cm = rd(q, 2) & 0x0F
+						q += 2
+					}
+					dataRef := rd(q, 2)
 					q += 2
-					for e := 0; e < extents; e++ {
-						ext := 0
-						if os == 4 {
-							ext = int(binary.BigEndian.Uint32(data[q:]))
+					base := rd(q, bos)
+					q += bos
+					extents := rd(q, 2)
+					q += 2
+					for e := 0; e < extents && q < b.end; e++ {
+						q += is
+						ext := rd(q, os)
+						q += os + ls
+						if dataRef == 0 && cm == 0 && (bos > 0 || os > 0) {
+							out = append(out, base+ext)
 						}
-						out = append(out, base+ext)
-						q += os + 4
 					}
 				}
 			}
@@ -238,7 +263,9 @@ func TestEmbedProperties(t *testing.T) {
 					t.Errorf("bytes outside the exclusion are not the original asset")
 				}
 			}
-			// Re-embedding replaces rather than accumulates.
+			// Re-embedding replaces rather than accumulates — except in PDF,
+			// where an incremental update is appended and the previous
+			// section's store stays where it was by design (§A.4.2.1).
 			outAB, _, err := embedStore(ctx, c, outA, storeB)
 			if err != nil {
 				t.Fatal(err)
@@ -247,8 +274,11 @@ func TestEmbedProperties(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !bytes.Equal(outAB, outB) {
+			if c != PDF && !bytes.Equal(outAB, outB) {
 				t.Errorf("embed(embed(a, A), B) != embed(a, B)")
+			}
+			if c == PDF && !bytes.HasPrefix(outAB, outA) {
+				t.Errorf("a PDF re-sign must append, leaving the previous update section intact")
 			}
 			// One C2PA box in the map, for the containers that have one.
 			boxes, ok := assetBoxMap(ctx, c, outB)
@@ -285,9 +315,111 @@ func TestEmbedRefuses(t *testing.T) {
 	if _, _, err := embedStore(ctx, JPEG, jpg[:len(jpg)/2], good); err == nil {
 		t.Error("a JPEG with no start of scan accepted")
 	}
-	if _, _, err := embedStore(ctx, PDF, fixtureBytes(t, "c2pa_chatgpt.pdf"), good); err == nil {
+	if _, _, err := embedStore(ctx, Container("tga"), unsignedJPEG(t), good); err == nil {
 		t.Error("a container without an embedder accepted")
 	}
+}
+
+// TestEmbedPDF pins the incremental update: found through the catalog by our
+// reader, one store per section, the catalog's generation and other entries
+// preserved, /Names handled in place where it can be, and the refusals.
+func TestEmbedPDF(t *testing.T) {
+	ctx := context.Background()
+	store := storeOf(300)
+	check := func(t *testing.T, out []byte, wantCatalog ...string) {
+		t.Helper()
+		objs, got, src := pdfScan(ctx, out)
+		if !bytes.Equal(got, store) || src != pdfStoreCatalog {
+			t.Fatalf("store not found through the catalog: source %v", src)
+		}
+		if tally := pdfTallyStores(ctx, out, objs); tally.perSection > 1 {
+			t.Errorf("a section's catalog associates %d stores, want 1", tally.perSection)
+		}
+		for _, want := range wantCatalog {
+			if !bytes.Contains(out, []byte(want)) {
+				t.Errorf("output lacks %q", want)
+			}
+		}
+		if !bytes.HasSuffix(out, []byte("%%EOF\n")) {
+			t.Errorf("output does not end with %%EOF")
+		}
+	}
+	t.Run("xref table", func(t *testing.T) {
+		out, excl, err := embedStore(ctx, PDF, unsignedPDF(false), store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, out, "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /AF [4 0 R] /Names << /EmbeddedFiles << /Names [(Content Credentials) 4 0 R] >> >> >>",
+			"xref\n1 1\n", "/Prev ", "/Subtype /application#2Fc2pa", "/AFRelationship /C2PA_Manifest")
+		if !bytes.Equal(out[excl[0].start:excl[0].start+excl[0].length], store) {
+			t.Errorf("exclusion does not cover exactly the stream payload")
+		}
+	})
+	t.Run("xref stream", func(t *testing.T) {
+		out, _, err := embedStore(ctx, PDF, unsignedPDF(true), store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, out, "/Type /XRef", "/W [1 4 2]", "/Index [1 1 5 3]")
+	})
+	t.Run("names cases", func(t *testing.T) {
+		base := func(catalog string) []byte {
+			return newPDFDoc().obj(1, catalog).obj(2, "<< /Type /Pages /Kids [] /Count 0 >>").
+				obj(6, "<< /Type /Filespec /F (other) >>").obj(9, "<< /EmbeddedFiles << /Names [] >> >>").xrefTrailer(1).bytes()
+		}
+		cases := map[string][2]string{
+			"names dict without EmbeddedFiles": {"<< /Type /Catalog /Pages 2 0 R /Names << /Dests << >> >> >>",
+				"/Names << /Dests << >> /EmbeddedFiles << /Names [(Content Credentials) 10 0 R] >> >>"},
+			"flat EmbeddedFiles merged in order": {"<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles << /Names [(Zeta) 6 0 R (Alpha) 6 0 R] >> >> >>",
+				"/Names << /EmbeddedFiles << /Names [(Alpha) 6 0 R (Content Credentials) 10 0 R (Zeta) 6 0 R] >> >>"},
+			"indirect Names left alone":          {"<< /Type /Catalog /Pages 2 0 R /Names 9 0 R >>", "/Names 9 0 R"},
+			"existing AF kept, C2PA one dropped": {"<< /Type /Catalog /Pages 2 0 R /AF [6 0 R] >>", "/AF [6 0 R 10 0 R]"},
+			"other entries verbatim": {"<< /Type /Catalog /Pages 2 0 R /PageMode /UseNone /OpenAction [3 0 R /Fit] >>",
+				"/PageMode /UseNone /OpenAction [3 0 R /Fit] /AF [10 0 R]"},
+		}
+		for name, tc := range cases {
+			t.Run(name, func(t *testing.T) {
+				out, _, err := embedStore(ctx, PDF, base(tc[0]), store)
+				if err != nil {
+					t.Fatal(err)
+				}
+				check(t, out, tc[1])
+			})
+		}
+	})
+	t.Run("re-sign the ChatGPT fixture", func(t *testing.T) {
+		fixture := fixtureBytes(t, "c2pa_chatgpt.pdf")
+		out, _, err := embedStore(ctx, PDF, fixture, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The catalog keeps its generation (12 1) and the prior section's
+		// store is still there for the cross-section merge to find.
+		check(t, out, "12 1 obj\n<<", "/Root 12 1 R /Prev 67082")
+		if !bytes.HasPrefix(out, fixture) {
+			t.Errorf("the original bytes were not preserved verbatim")
+		}
+		if bytes.Count(out, []byte("/AFRelationship /C2PA_Manifest")) != 2 {
+			t.Errorf("both the prior and the new file specification should be present")
+		}
+		// The new catalog must not associate the old store again.
+		if bytes.Contains(out[len(fixture):], []byte("/AF [17 0 R")) {
+			t.Errorf("the new catalog still associates the previous store")
+		}
+	})
+	t.Run("refusals", func(t *testing.T) {
+		for name, in := range map[string][]byte{
+			"encrypted":       bytes.Replace(unsignedPDF(false), []byte("/Root 1 0 R"), []byte("/Root 1 0 R /Encrypt 7 0 R"), 1),
+			"certified":       newPDFDoc().obj(1, "<< /Type /Catalog /Pages 2 0 R /Perms << /DocMDP 8 0 R >> >>").obj(2, "<< >>").xrefTrailer(1).bytes(),
+			"startxref 0":     newPDFDoc().obj(1, "<< /Type /Catalog >>").trailer(1).bytes(),
+			"not a pdf":       []byte("hello"),
+			"catalog missing": newPDFDoc().obj(1, "<< /Type /Pages >>").xrefTrailer(1).bytes(),
+		} {
+			if _, _, err := embedStore(ctx, PDF, in, store); err == nil {
+				t.Errorf("%s: accepted", name)
+			}
+		}
+	})
 }
 
 // storeOf is a small valid store carrying one assertion of the given size.

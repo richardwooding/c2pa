@@ -316,6 +316,20 @@ func minimalAVIF(withBase bool) []byte {
 	return append(head, synthBox("mdat", []byte{1, 2, 3, 4, 5, 6, 7, 8})...)
 }
 
+// unsignedPDF is a small document with a real cross-reference section — a
+// table, or a cross-reference stream — which is what a reader follows to the
+// catalog and what the writer's incremental update must chain to.
+func unsignedPDF(xrefStream bool) []byte {
+	d := newPDFDoc().
+		obj(1, "<< /Type /Catalog /Pages 2 0 R >>").
+		obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>").
+		obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>")
+	if xrefStream {
+		return d.xrefStream(4, 1).bytes()
+	}
+	return d.xrefTrailer(1).bytes()
+}
+
 // bindingMatch and bindingMismatch are the hard-binding status codes a
 // container's signed output earns.
 func bindingMatch(c Container) StatusCode {
@@ -353,13 +367,15 @@ func unsignedInput(t testing.TB, c Container) []byte {
 		return unsignedSVG()
 	case BMFF:
 		return fixtureBytes(t, "video_no_manifest.mp4")
+	case PDF:
+		return unsignedPDF(false)
 	}
 	t.Fatalf("no unsigned input for %s", c)
 	return nil
 }
 
-// signableContainers are the containers Sign supports so far.
-var signableContainers = []Container{JPEG, PNG, GIF, RIFF, TIFF, MP3, SVG, BMFF}
+// signableContainers are the containers Sign supports: all nine.
+var signableContainers = []Container{JPEG, PNG, GIF, RIFF, TIFF, MP3, SVG, BMFF, PDF}
 
 // tamperOutsideStore returns an offset in a signed asset that the hard binding
 // covers but the store does not: the last byte for containers whose store sits

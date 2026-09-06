@@ -182,6 +182,8 @@ func TestSignInterop(t *testing.T) {
 		{"mp4 minimal co64", BMFF, ".mp4", minimalMP4(true)},
 		{"avif extents", BMFF, ".avif", minimalAVIF(false)},
 		{"avif base offset", BMFF, ".avif", minimalAVIF(true)},
+		{"pdf xref table", PDF, ".pdf", unsignedPDF(false)},
+		{"pdf xref stream", PDF, ".pdf", unsignedPDF(true)},
 	}
 	for _, tc := range inputs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -245,7 +247,9 @@ func TestSignInteropResign(t *testing.T) {
 		{"mp3", MP3, ".mp3", unsignedMP3(), true},
 		{"svg", SVG, ".svg", unsignedSVG(), true},
 		{"mp4", BMFF, ".mp4", fixtureBytes(t, "video_no_manifest.mp4"), true},
+		{"pdf", PDF, ".pdf", unsignedPDF(false), true},
 		{"c2pa-rs signed jpeg", JPEG, ".jpg", fixtureBytes(t, "c2pa_signed.jpg"), false},
+		{"ChatGPT signed pdf", PDF, ".pdf", fixtureBytes(t, "c2pa_chatgpt.pdf"), false},
 		{"c2pa-rs signed mp4", BMFF, ".mp4", fixtureBytes(t, "c2pa_signed_video.mp4"), false},
 		{"c2pa-rs signed png", PNG, ".png", fixtureBytes(t, "c2pa_2x_openai.png"), false},
 	}
