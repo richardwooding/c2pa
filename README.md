@@ -255,7 +255,7 @@ c2pa.WalkBoxes(ctx, store, func(label, tbox string, content []byte) {
 
 ## Requirements
 
-- **Go 1.25+** (the floor is set by `golang.org/x/crypto`'s own minimum)
+- **Go 1.26+** (the floor is set by `golang.org/x/crypto`'s own minimum)
 - Pure-Go dependencies only: [`fxamacker/cbor`](https://github.com/fxamacker/cbor) (CBOR),
   [`veraison/go-cose`](https://github.com/veraison/go-cose) (COSE_Sign1), and
   [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) (OCSP). No cgo.
