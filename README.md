@@ -234,6 +234,10 @@ err = signer.Sign(ctx, c2pa.JPEG, in, out, c2pa.Manifest{
 })
 ```
 
+A key that can only sign whole messages — WebCrypto, some HSM or KMS APIs — implements the standard
+`crypto.MessageSigner` too; `Sign` then hands it the COSE structure instead of a digest, with the
+same options and signature encoding `x509.CreateCertificate` uses.
+
 The first action must be `c2pa.created` (nothing preceded this asset) or `c2pa.opened` (something
 did) — c2pa-rs rejects a manifest without one. `Assertions` adds your own, each a CBOR-encodable
 `Value` or raw `JSON` under any label the generated assertions do not reserve. Verify the result

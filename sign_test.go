@@ -5,10 +5,14 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"errors"
+	"io"
+	"math/big"
 	"testing"
 
 	"github.com/veraison/go-cose"
@@ -441,4 +445,154 @@ func TestCOSEPadExact(t *testing.T) {
 			t.Errorf("need %d: %v (%d bytes)", need, err, len(out))
 		}
 	}
+}
+
+// messageOnlySigner is a key that can only sign whole messages, the way
+// WebCrypto's SubtleCrypto.sign and some HSM APIs can: Sign refuses a digest
+// and counts the attempt, SignMessage hashes per opts and signs with the
+// in-memory key. It stands in for the browser key c2pa-inspector wraps.
+type messageOnlySigner struct {
+	key       crypto.Signer
+	signCalls int
+}
+
+func (m *messageOnlySigner) Public() crypto.PublicKey { return m.key.Public() }
+
+func (m *messageOnlySigner) Sign(io.Reader, []byte, crypto.SignerOpts) ([]byte, error) {
+	m.signCalls++
+	return nil, errors.New("messageOnlySigner: digest signing is not available")
+}
+
+func (m *messageOnlySigner) SignMessage(rnd io.Reader, msg []byte, opts crypto.SignerOpts) ([]byte, error) {
+	if opts == nil {
+		return nil, errors.New("messageOnlySigner: nil opts")
+	}
+	if opts.HashFunc() == 0 {
+		return m.key.Sign(rnd, msg, opts) // Ed25519 signs the message itself
+	}
+	h := opts.HashFunc().New()
+	h.Write(msg)
+	return m.key.Sign(rnd, h.Sum(nil), opts)
+}
+
+// TestSignMessageSigner: a crypto.MessageSigner key signs through the
+// Sig_structure path for every algorithm, its Sign is never called, and the
+// envelope is the size the crypto.Signer path reserves.
+func TestSignMessageSigner(t *testing.T) {
+	ec256, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, edKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		key  crypto.Signer
+		alg  cose.Algorithm
+	}{
+		{"ES256", ec256, cose.AlgorithmES256},
+		{"ES384", ec384, cose.AlgorithmES384},
+		{"PS256", rsaKey, cose.AlgorithmPS256},
+		{"EdDSA", edKey, cose.AlgorithmEdDSA},
+	}
+	in := unsignedJPEG(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := newSigningChainFor(t, tc.key)
+			ms := &messageOnlySigner{key: tc.key}
+			s, err := NewSigner(ms, sc.chain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := signBytes(t, s, JPEG, in, createdManifest(tc.name))
+			res := Validate(context.Background(), JPEG, bytes.NewReader(out), WithSigningTrust(sc.roots), WithOnlineRevocation(false))
+			if !res.Valid {
+				t.Fatalf("expected valid, got %v", codes(res))
+			}
+			if ms.signCalls != 0 {
+				t.Errorf("Sign was called %d times; a message signer must only see SignMessage", ms.signCalls)
+			}
+			m := parseStore(context.Background(), extractJUMBF(context.Background(), JPEG, out)).active()
+			var msg cose.Sign1Message
+			if err := msg.UnmarshalCBOR(m.signature); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := msg.Headers.Protected.Algorithm(); got != tc.alg {
+				t.Errorf("protected alg = %v, want %v", got, tc.alg)
+			}
+			ref, err := NewSigner(tc.key, sc.chain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if refOut := signBytes(t, ref, JPEG, in, createdManifest(tc.name)); len(refOut) != len(out) {
+				t.Errorf("message-signer output is %d bytes, crypto.Signer output %d; the reserve must not depend on the signer kind", len(out), len(refOut))
+			}
+		})
+	}
+}
+
+// TestECDSARawFromDER pins the DER → r‖s conversion against Go's own
+// signatures, including ones whose integers need a leading-zero pad, and
+// refuses malformed input rather than emitting a short signature.
+func TestECDSARawFromDER(t *testing.T) {
+	for _, curve := range []elliptic.Curve{elliptic.P256(), elliptic.P384(), elliptic.P521()} {
+		key, err := ecdsa.GenerateKey(curve, rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := (curve.Params().BitSize + 7) / 8
+		digest := make([]byte, 32)
+		for i := range 64 {
+			digest[0] = byte(i)
+			der, err := ecdsa.SignASN1(rand.Reader, key, digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := ecdsaRawFromDER(der, curve)
+			if err != nil {
+				t.Fatalf("%s: %v", curve.Params().Name, err)
+			}
+			if len(raw) != 2*n {
+				t.Fatalf("%s: raw length %d, want %d", curve.Params().Name, len(raw), 2*n)
+			}
+			r, s := new(big.Int).SetBytes(raw[:n]), new(big.Int).SetBytes(raw[n:])
+			if !ecdsa.Verify(&key.PublicKey, digest, r, s) {
+				t.Fatalf("%s: converted signature does not verify", curve.Params().Name)
+			}
+		}
+	}
+	for name, der := range map[string][]byte{
+		"empty":        nil,
+		"not sequence": {0x02, 0x01, 0x01},
+		"trailing":     append(mustSignASN1(t), 0x00),
+		"zero r":       {0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0x01, 0x01},
+		"oversized":    {0x30, 0x25, 0x02, 0x21, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x01, 0x01},
+	} {
+		if _, err := ecdsaRawFromDER(der, elliptic.P256()); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func mustSignASN1(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := ecdsa.SignASN1(rand.Reader, key, make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
 }

@@ -6,8 +6,11 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rsa"
+	"encoding/asn1"
+	"errors"
 	"fmt"
 	"io"
+	"math/big"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/veraison/go-cose"
@@ -54,9 +57,18 @@ func coseAlgorithmFor(pub crypto.PublicKey) (cose.Algorithm, int, error) {
 // payload is attached for the signature and detached afterwards; the caller
 // re-supplies it as the claim bytes when verifying.
 func newSign1(rnd io.Reader, key crypto.Signer, alg cose.Algorithm, chainDER [][]byte, payload []byte) (*cose.Sign1Message, error) {
-	signer, err := cose.NewSigner(alg, key)
-	if err != nil {
-		return nil, err
+	var signer cose.Signer
+	if ms, ok := key.(crypto.MessageSigner); ok {
+		_, sigLen, err := coseAlgorithmFor(key.Public())
+		if err != nil {
+			return nil, err
+		}
+		signer = &messageSigner{alg: alg, key: ms, pub: key.Public(), sigLen: sigLen}
+	} else {
+		var err error
+		if signer, err = cose.NewSigner(alg, key); err != nil {
+			return nil, err
+		}
 	}
 	msg := cose.NewSign1Message()
 	msg.Headers.Protected[cose.HeaderLabelAlgorithm] = alg
@@ -73,6 +85,78 @@ func newSign1(rnd io.Reader, key crypto.Signer, alg cose.Algorithm, chainDER [][
 	}
 	msg.Payload = nil
 	return msg, nil
+}
+
+// messageSigner adapts a key implementing the standard crypto.MessageSigner —
+// one that signs whole messages rather than a digest handed to it, which is
+// all WebCrypto's SubtleCrypto.sign and some HSM/KMS APIs offer — to go-cose's
+// Signer. go-cose only knows crypto.Signer: for ECDSA it hashes the
+// Sig_structure itself and calls Sign(rand, digest, nil), which such a key
+// cannot serve. Here the key receives the Sig_structure, with the opts and the
+// encoding contract x509.CreateCertificate uses (it goes through
+// crypto.SignMessage): the hash for ECDSA, PSS options for RSA, crypto.Hash(0)
+// for Ed25519; DER back for ECDSA — converted to COSE's raw r‖s here — raw for
+// RSA-PSS and Ed25519. One key type therefore serves both the certificate and
+// the COSE signature.
+type messageSigner struct {
+	alg    cose.Algorithm
+	key    crypto.MessageSigner
+	pub    crypto.PublicKey
+	sigLen int
+}
+
+func (m *messageSigner) Algorithm() cose.Algorithm { return m.alg }
+
+func (m *messageSigner) Sign(rnd io.Reader, content []byte) ([]byte, error) {
+	var opts crypto.SignerOpts
+	switch m.alg {
+	case cose.AlgorithmES256:
+		opts = crypto.SHA256
+	case cose.AlgorithmES384:
+		opts = crypto.SHA384
+	case cose.AlgorithmES512:
+		opts = crypto.SHA512
+	case cose.AlgorithmPS256:
+		opts = &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: crypto.SHA256}
+	case cose.AlgorithmEdDSA:
+		opts = crypto.Hash(0)
+	default:
+		return nil, fmt.Errorf("unsupported algorithm %v for a message signer", m.alg)
+	}
+	sig, err := m.key.SignMessage(rnd, content, opts)
+	if err != nil {
+		return nil, err
+	}
+	if pub, ok := m.pub.(*ecdsa.PublicKey); ok {
+		if sig, err = ecdsaRawFromDER(sig, pub.Curve); err != nil {
+			return nil, err
+		}
+	}
+	if len(sig) != m.sigLen {
+		return nil, fmt.Errorf("message signer returned a %d-byte signature; %v needs %d", len(sig), m.alg, m.sigLen)
+	}
+	return sig, nil
+}
+
+// ecdsaRawFromDER converts an ASN.1 SEQUENCE{r, s} ECDSA signature — what
+// crypto.Signer and crypto.MessageSigner return for ECDSA keys — to the fixed
+// width r‖s COSE carries (RFC 9053 §2.1), each integer left-padded to the
+// curve's byte size. A malformed or oversized integer is an error, never a
+// short signature.
+func ecdsaRawFromDER(der []byte, curve elliptic.Curve) ([]byte, error) {
+	var sig struct{ R, S *big.Int }
+	rest, err := asn1.Unmarshal(der, &sig)
+	if err != nil || len(rest) != 0 || sig.R == nil || sig.S == nil || sig.R.Sign() <= 0 || sig.S.Sign() <= 0 {
+		return nil, errors.New("ECDSA signature is not a DER SEQUENCE of two positive integers")
+	}
+	n := (curve.Params().BitSize + 7) / 8
+	if sig.R.BitLen() > n*8 || sig.S.BitLen() > n*8 {
+		return nil, errors.New("ECDSA signature integer exceeds the curve size")
+	}
+	out := make([]byte, 2*n)
+	sig.R.FillBytes(out[:n])
+	sig.S.FillBytes(out[n:])
+	return out, nil
 }
 
 // coseTimestampTBS is what a sigTst2 timestamp covers (§13.2): the COSE
