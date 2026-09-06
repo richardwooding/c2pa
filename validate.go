@@ -449,6 +449,13 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 	// manifest's hard binding refers to the ingredient's ORIGINAL bytes, which
 	// are not available here, so it is reported informationally rather than
 	// half-checked against the wrong asset.
+	// An asset has one lineage: more than one parentOf ingredient leaves which
+	// manifest it descends from ambiguous. An update manifest's own parent
+	// count is checked by verifyUpdateManifest, which is more specific.
+	if !m.update && len(v.parentIngredients(m)) > 1 {
+		v.add(StatusManifestMultipleParents, uri,
+			"manifest declares more than one parentOf ingredient", nil)
+	}
 	switch {
 	case depth == 0 && m.update:
 		// An update manifest changes no content, so it carries no hard binding

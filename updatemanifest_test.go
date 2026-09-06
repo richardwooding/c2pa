@@ -220,3 +220,31 @@ func TestBMFFUpdateManifestStoreIsActive(t *testing.T) {
 		t.Errorf("update store not surfaced")
 	}
 }
+
+// TestManifestMultipleParents pins that a standard manifest declaring more than
+// one parentOf ingredient is reported: an asset descends from one manifest, and
+// two parents leave which one ambiguous.
+func TestManifestMultipleParents(t *testing.T) {
+	sb := newCorpusSigner(t, cose.AlgorithmES256)
+	one := parentOfAssertion(t, "urn:uuid:00000000-0000-4000-8000-0000000000a1")
+	two := parentOfAssertion(t, "urn:uuid:00000000-0000-4000-8000-0000000000a2")
+	two.label = "c2pa.ingredient.v3__2"
+
+	asset := buildAsset(t, JPEG, manifestSpec{
+		signer:     sb,
+		assertions: []assertionSpec{markerAssertion(), one, two},
+	})
+	res := runCorpus(t, JPEG, asset, sb)
+	if !res.Has(StatusManifestMultipleParents) {
+		t.Errorf("missing %s; got %v", StatusManifestMultipleParents, codes(res))
+	}
+
+	// One parent is the ordinary case and must stay quiet.
+	single := buildAsset(t, JPEG, manifestSpec{
+		signer:     sb,
+		assertions: []assertionSpec{markerAssertion(), one},
+	})
+	if res := runCorpus(t, JPEG, single, sb); res.Has(StatusManifestMultipleParents) {
+		t.Errorf("a single parentOf ingredient is normal: %v", codes(res))
+	}
+}
