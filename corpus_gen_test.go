@@ -242,7 +242,10 @@ type manifestSpec struct {
 	tsOpts         []tsTokenOpt
 	dataHashAlg    string
 	noHardBinding  bool
-	extraBinding   *assertionSpec
+	// bmffBinding writes c2pa.hash.bmff.v3 (the offset-marker hash with the
+	// standard exclusions) instead of c2pa.hash.data; buildAsset sets it for BMFF.
+	bmffBinding  bool
+	extraBinding *assertionSpec
 	// updateManifest builds the manifest superbox with the Update Manifest type
 	// UUID (§11.2.3) rather than the standard one.
 	updateManifest bool

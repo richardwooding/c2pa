@@ -21,6 +21,8 @@ func FuzzSign(f *testing.F) {
 	f.Add(unsignedTIFF(true), uint8(4))
 	f.Add(unsignedMP3(), uint8(5))
 	f.Add(unsignedSVG(), uint8(6))
+	f.Add(minimalMP4(false), uint8(7))
+	f.Add(minimalAVIF(true), uint8(7))
 	f.Add([]byte{0xFF, 0xD8, 0xFF, 0xD9}, uint8(0))
 	f.Add([]byte{}, uint8(1))
 	f.Fuzz(func(t *testing.T, data []byte, which uint8) {
@@ -54,6 +56,8 @@ func FuzzEmbedStore(f *testing.F) {
 	f.Add(unsignedTIFF(true), []byte{0xA0}, uint8(4))
 	f.Add(unsignedMP3(), []byte{0xA0}, uint8(5))
 	f.Add(unsignedSVG(), []byte{0xA0}, uint8(6))
+	f.Add(minimalMP4(true), []byte{0xA0}, uint8(7))
+	f.Add(minimalAVIF(false), []byte{0xA0}, uint8(7))
 	f.Fuzz(func(t *testing.T, asset, payload []byte, which uint8) {
 		if len(asset) > 1<<20 || len(payload) > 1<<17 {
 			return
@@ -73,4 +77,68 @@ func FuzzEmbedStore(f *testing.F) {
 			t.Fatalf("store did not read back")
 		}
 	})
+}
+
+// FuzzBMFFEmbed targets the offset rewrite alone: mutated MP4/AVIF bytes must
+// never panic, and whenever the embedder succeeds every chunk and item offset
+// must still address the bytes it did before.
+func FuzzBMFFEmbed(f *testing.F) {
+	store := storeBox(superBox(uuidC2MA, "urn:c2pa:fuzz", assertionBox("com.fuzz", []byte{0xA0})))
+	f.Add(minimalMP4(false))
+	f.Add(minimalMP4(true))
+	f.Add(minimalAVIF(false))
+	f.Add(minimalAVIF(true))
+	f.Add(fixtureBytes(f, "video_no_manifest.mp4")[:4096])
+	f.Fuzz(func(t *testing.T, asset []byte) {
+		if len(asset) > 1<<20 {
+			return
+		}
+		out, _, err := embedStore(context.Background(), BMFF, asset, store)
+		if err != nil {
+			return
+		}
+		before, after := bmffAbsoluteOffsets(t, asset), bmffAbsoluteOffsets(t, out)
+		if len(before) != len(after) {
+			t.Fatalf("%d offsets became %d", len(before), len(after))
+		}
+		tables := bmffOffsetTables(asset)
+		for i := range before {
+			o, n := before[i], after[i]
+			if o < 0 || n < 0 || o+8 > len(asset) || n+8 > len(out) {
+				continue // an offset that never addressed anything in bounds
+			}
+			if tables(o, o+8) {
+				continue // garbage input pointing into an offset table, which the rewrite itself changes
+			}
+			if !bytes.Equal(asset[o:o+8], out[n:n+8]) {
+				t.Fatalf("offset %d → %d no longer addresses the same bytes", o, n)
+			}
+		}
+	})
+}
+
+// bmffOffsetTables reports whether [start, end) overlaps a box the rewrite
+// patches — stco, co64, saio, iloc — in data. Real files never point their
+// offsets at their own tables; fuzzed ones do.
+func bmffOffsetTables(data []byte) func(start, end int) bool {
+	var spans [][2]int
+	var walk func(boxes []*bmffBox)
+	walk = func(boxes []*bmffBox) {
+		for _, b := range boxes {
+			switch b.typ {
+			case "stco", "co64", "saio", "iloc":
+				spans = append(spans, [2]int{b.start, b.end})
+			}
+			walk(b.children)
+		}
+	}
+	walk(parseBMFFBoxes(context.Background(), data))
+	return func(start, end int) bool {
+		for _, s := range spans {
+			if start < s[1] && end > s[0] {
+				return true
+			}
+		}
+		return false
+	}
 }

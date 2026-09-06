@@ -19,8 +19,8 @@ AVIF), RIFF (WebP/WAV/AVI), TIFF (and DNG), GIF, MP3, SVG and PDF, with **three 
   Builds a `c2pa.claim.v2` manifest with the container's hard binding, signs it once with COSE_Sign1
   into an envelope of reserved size, embeds it, and validates its own output before writing a byte.
   Every container's output is checked against c2pa-rs's c2patool in CI (`sign_interop_test.go`).
-  JPEG, PNG, GIF, RIFF (WebP/WAV/AVI), TIFF/DNG, MP3 and SVG so far; BMFF and PDF follow in their
-  own PRs. Lives in `sign.go`.
+  JPEG, PNG, GIF, RIFF (WebP/WAV/AVI), TIFF/DNG, MP3, SVG and non-fragmented BMFF (MP4/MOV/HEIC/
+  AVIF) so far; PDF follows in its own PR. Lives in `sign.go`.
 
 The package stays one `package c2pa` but is split across topic files — flat *import surface*, not
 one file:
@@ -39,7 +39,8 @@ one file:
   (deterministic CBOR `encMode`, claim/assertion builders), `cosesign.go` (COSE_Sign1 with x5chain
   in the PROTECTED header and exact-size `pad`), `embed.go` (the embedder contract, `applyEdits`,
   and the JPEG/PNG embedders; the other containers' embedders live beside their readers in
-  `gif.go`, `riff.go`, `tiff.go`, `mp3.go`, `svg.go`)
+  `gif.go`, `riff.go`, `tiff.go`, `mp3.go`, `svg.go`), `bmffembed.go` (the C2PA uuid box after
+  `ftyp` and the `stco`/`co64`/`saio`/`iloc` offset rewrite)
 
 Don't introduce subpackages; that would force exporting internal helpers.
 
@@ -95,6 +96,26 @@ Public surface:
   existing direct-child `<metadata>` or a new one first under `<svg>`, exclusion = the base64 text.
   Refused: ID3v2.2, a c2pa prefix bound elsewhere, a RIFF whose size does not fit the file, a GIF
   without a trailer, a JPEG without SOS.
+- **BMFF signing** (`bmffembed.go`) binds with `c2pa.hash.bmff.v3` — the offset-marker walk with the
+  §A.5.6 exclusions (`/uuid` by usertype at offset 8, `/ftyp`, `/mfra`), written by
+  `bmffStandardExclusions` and hashed by `bmffHashDigest`, which DECODES that same CBOR shape so
+  writer and verifier cannot drift — and the layout fixpoint converges on the output's LENGTH (there
+  are no byte-range offsets to converge). The C2PA uuid box (32-bit size, version/flags 0,
+  `"manifest\0"`, an 8-byte zero merkle offset, the store) goes IMMEDIATELY AFTER `ftyp` (§A.5.3),
+  which moves everything behind it, so every absolute file offset is rewritten through the same
+  `remap` the edits produced: `stco` (u32) / `co64` (u64) entries, `saio` (CENC aux-info offsets),
+  and `iloc` extents (versions 0–2; base_offset alone when it exists and every extent shifts alike,
+  else each extent_offset; items with a data reference or construction method ≠ 0 are skipped). A
+  value that pointed into a removed C2PA box is malformed; a u32 that would overflow is unsupported
+  (stco→co64 conversion is out of scope). **Nothing else checks those offsets** — neither validator
+  hashes them — so `TestEmbedBMFFOffsets` / `FuzzBMFFEmbed` assert that every offset still
+  addresses the same eight bytes, and `TestEmbedBMFFOracle` reproduces `c2pa_signed_video.mp4`
+  byte for byte from `video_no_manifest.mp4` plus its store (the two fixtures differ by exactly one
+  30662-byte box and a 30662 shift of every `stco` entry). Refused with `ErrFragmentedBMFF`: any
+  top-level `moof`, `mfra`, `sidx` or `styp`, or a merkle-purpose C2PA box — a fragmented file's
+  binding is a Merkle tree per fragment, which this release does not author. Also refused: trailing
+  bytes outside any box, no `ftyp`, nothing after `ftyp`. Every existing C2PA uuid box (any purpose)
+  is removed; the core carries the lineage in the new store.
 - `ReadAll(ctx, container, r)` — one Info per store: asset's own first (AttributionAsset), then
   object-level ones (AttributionEmbedded), then marker-found unplaced ones (AttributionUnknown).
   Only PDF returns >1 today (§A.4.3).
@@ -457,8 +478,10 @@ anything noticing, because `x5chainCandidates` reads both.
 **The corpus frames through the production embedders.** `assembleAsset(container, store)` is
 `embedStore(container, unsignedCorpusAsset(container), store)` for every container but PDF, so the
 positive matrix and every negative case exercise INSERTION into an existing asset with the same code
-`Sign` uses; `assetFraming` returns `[]byteRange` because TIFF has two exclusions. PDF keeps its
-hand-built frame until it has an embedder.
+`Sign` uses; `assetFraming` returns `[]byteRange` because TIFF has two exclusions. `buildAsset` sets
+`manifestSpec.bmffBinding` for BMFF, so `buildFramedAsset` writes `c2pa.hash.bmff.v3` and hashes with
+`bmffHashDigest`; the matrix is 9 containers × 4 algorithms × 2 claim versions = 72 rows. PDF keeps
+its hand-built frame until it has an embedder.
 
 **Fragmented assets are built in memory too.** `fragmentedFlatAsset` / `fragmentedFiles`
 (`bmffmerkle_test.go`) lay out flat and split fragmented assets with every merkle box padded to one

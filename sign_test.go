@@ -28,7 +28,7 @@ func TestSignRoundTrip(t *testing.T) {
 				t.Fatalf("expected valid, got %v: %v", codes(res), res.FirstFailure())
 			}
 			for _, want := range []StatusCode{StatusClaimSignatureValidated, StatusSigningCredentialTrusted,
-				StatusAssertionHashedURIMatch, StatusAssertionDataHashMatch} {
+				StatusAssertionHashedURIMatch, bindingMatch(c)} {
 				if !res.Has(want) {
 					t.Errorf("missing %s: %v", want, codes(res))
 				}
@@ -125,7 +125,7 @@ func TestSignTamperOutsideStore(t *testing.T) {
 			tampered := append([]byte(nil), out...)
 			tampered[tamperOutsideStore(c, tampered)] ^= 0xFF
 			res := Validate(context.Background(), c, bytes.NewReader(tampered), WithSigningTrust(sc.roots), WithOnlineRevocation(false))
-			if !res.Has(StatusAssertionDataHashMismatch) || res.Valid {
+			if !res.Has(bindingMismatch(c)) || res.Valid {
 				t.Errorf("edit went unnoticed: %v", codes(res))
 			}
 		})
@@ -254,7 +254,9 @@ func TestSignErrors(t *testing.T) {
 		m         Manifest
 		want      error
 	}{
-		{"unsupported container", BMFF, fixtureBytes(t, "video_no_manifest.mp4"), good, ErrUnsupportedContainer},
+		{"unsupported container", PDF, fixtureBytes(t, "c2pa_chatgpt.pdf"), good, ErrUnsupportedContainer},
+		{"fragmented mp4", BMFF, fragmentedFlatAsset(t, 2, 1, 1, 1, nil).asset, good, ErrFragmentedBMFF},
+		{"mp4 with trailing bytes", BMFF, append(minimalMP4(false), 1, 2, 3), good, ErrMalformedAsset},
 		{"no actions", JPEG, jpg, Manifest{Title: "x"}, ErrManifestInvalid},
 		{"wrong first action", JPEG, jpg, Manifest{Actions: []Action{{Action: "c2pa.edited"}}}, ErrManifestInvalid},
 		{"second inception action", JPEG, jpg, Manifest{Actions: []Action{{Action: ActionCreated}, {Action: ActionOpened}}}, ErrManifestInvalid},

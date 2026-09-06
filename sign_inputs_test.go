@@ -246,6 +246,92 @@ func unsignedSVG() []byte {
 		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"><rect width=\"1\" height=\"1\"/></svg>\n")
 }
 
+// bmffFullBox prefixes payload with a FullBox version and flags of zero.
+func bmffFullBox(payload ...[]byte) []byte {
+	out := []byte{0, 0, 0, 0}
+	for _, p := range payload {
+		out = append(out, p...)
+	}
+	return out
+}
+
+// minimalMP4 is the smallest MP4 with a real chunk-offset table: ftyp, a moov
+// with one video track whose stco (or co64) points into mdat, and an 8-byte
+// mdat. The offset is what the BMFF embedder must rewrite.
+func minimalMP4(co64 bool) []byte {
+	ftyp := synthBox("ftyp", []byte("isom"), []byte{0, 0, 2, 0}, []byte("isom"), []byte("mp41"))
+	build := func(chunkOffset int) []byte {
+		var offsets []byte
+		if co64 {
+			offsets = synthBox("co64", bmffFullBox(binary.BigEndian.AppendUint32(nil, 1), binary.BigEndian.AppendUint64(nil, uint64(chunkOffset))))
+		} else {
+			offsets = synthBox("stco", bmffFullBox(binary.BigEndian.AppendUint32(nil, 1), binary.BigEndian.AppendUint32(nil, uint32(chunkOffset))))
+		}
+		stbl := synthBox("stbl",
+			synthBox("stsd", bmffFullBox([]byte{0, 0, 0, 1}), synthBox("mp4v", make([]byte, 78))),
+			synthBox("stts", bmffFullBox([]byte{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1})),
+			synthBox("stsc", bmffFullBox([]byte{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1})),
+			synthBox("stsz", bmffFullBox([]byte{0, 0, 0, 8, 0, 0, 0, 1})),
+			offsets)
+		minf := synthBox("minf",
+			synthBox("vmhd", bmffFullBox(make([]byte, 8))),
+			synthBox("dinf", synthBox("dref", bmffFullBox([]byte{0, 0, 0, 1}), synthBox("url ", bmffFullBox()))),
+			stbl)
+		mdia := synthBox("mdia",
+			synthBox("mdhd", bmffFullBox(make([]byte, 20))),
+			synthBox("hdlr", bmffFullBox([]byte{0, 0, 0, 0, 'v', 'i', 'd', 'e', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})),
+			minf)
+		moov := synthBox("moov", synthBox("mvhd", bmffFullBox(make([]byte, 96))), synthBox("trak", synthBox("tkhd", bmffFullBox(make([]byte, 80))), mdia))
+		return append(append([]byte{}, ftyp...), moov...)
+	}
+	head := build(0)
+	head = build(len(head) + 8) // the sample sits right after mdat's header
+	return append(head, synthBox("mdat", []byte{1, 2, 3, 4, 5, 6, 7, 8})...)
+}
+
+// minimalAVIF is the smallest AVIF with a real item location: ftyp, a meta
+// with hdlr, pitm and an iloc whose one extent addresses the mdat payload —
+// through a base_offset when withBase is set, through extent_offset otherwise.
+func minimalAVIF(withBase bool) []byte {
+	ftyp := synthBox("ftyp", []byte("avif"), []byte{0, 0, 0, 0}, []byte("avif"), []byte("mif1"))
+	build := func(dataOffset int) []byte {
+		var iloc []byte
+		if withBase {
+			iloc = bmffFullBox([]byte{0x44, 0x40}, // offset_size 4, length_size 4, base_offset_size 4
+				[]byte{0, 1}, []byte{0, 1}, []byte{0, 0}, binary.BigEndian.AppendUint32(nil, uint32(dataOffset)),
+				[]byte{0, 1}, []byte{0, 0, 0, 0}, []byte{0, 0, 0, 8})
+		} else {
+			iloc = bmffFullBox([]byte{0x44, 0x00}, // offset_size 4, length_size 4, no base
+				[]byte{0, 1}, []byte{0, 1}, []byte{0, 0},
+				[]byte{0, 1}, binary.BigEndian.AppendUint32(nil, uint32(dataOffset)), []byte{0, 0, 0, 8})
+		}
+		meta := synthBox("meta", bmffFullBox(),
+			synthBox("hdlr", bmffFullBox([]byte{0, 0, 0, 0, 'p', 'i', 'c', 't', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})),
+			synthBox("pitm", bmffFullBox([]byte{0, 1})),
+			synthBox("iloc", iloc))
+		return append(append([]byte{}, ftyp...), meta...)
+	}
+	head := build(0)
+	head = build(len(head) + 8)
+	return append(head, synthBox("mdat", []byte{1, 2, 3, 4, 5, 6, 7, 8})...)
+}
+
+// bindingMatch and bindingMismatch are the hard-binding status codes a
+// container's signed output earns.
+func bindingMatch(c Container) StatusCode {
+	if c == BMFF {
+		return StatusAssertionBMFFHashMatch
+	}
+	return StatusAssertionDataHashMatch
+}
+
+func bindingMismatch(c Container) StatusCode {
+	if c == BMFF {
+		return StatusAssertionBMFFHashMismatch
+	}
+	return StatusAssertionDataHashMismatch
+}
+
 // unsignedInput returns an unsigned asset of the container, for the containers
 // Sign supports.
 func unsignedInput(t testing.TB, c Container) []byte {
@@ -265,13 +351,15 @@ func unsignedInput(t testing.TB, c Container) []byte {
 		return unsignedMP3()
 	case SVG:
 		return unsignedSVG()
+	case BMFF:
+		return fixtureBytes(t, "video_no_manifest.mp4")
 	}
 	t.Fatalf("no unsigned input for %s", c)
 	return nil
 }
 
 // signableContainers are the containers Sign supports so far.
-var signableContainers = []Container{JPEG, PNG, GIF, RIFF, TIFF, MP3, SVG}
+var signableContainers = []Container{JPEG, PNG, GIF, RIFF, TIFF, MP3, SVG, BMFF}
 
 // tamperOutsideStore returns an offset in a signed asset that the hard binding
 // covers but the store does not: the last byte for containers whose store sits

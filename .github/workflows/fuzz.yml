@@ -43,6 +43,7 @@ jobs:
           - FuzzBoxesHash
           - FuzzSign
           - FuzzEmbedStore
+          - FuzzBMFFEmbed
           - FuzzPDFParse
           - FuzzRIFFParse
           - FuzzTIFFParse
