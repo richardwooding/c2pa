@@ -1,7 +1,9 @@
 package c2pa
 
 import (
+	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -157,6 +159,59 @@ func dataHashAssertion(alg string, excl []byteRange, digest []byte) ([]byte, err
 		"hash":       digest,
 		"pad":        []byte{},
 	})
+}
+
+// bmffStandardExclusions are the exclusions §A.5.6 requires of every
+// c2pa.hash.bmff.v3: the C2PA uuid box (by usertype at offset 8, so foreign
+// uuid boxes stay bound), 'ftyp' and 'mfra'. Returned in the CBOR-ready form
+// the assertion carries; bmffHashDigest decodes that same form to hash with, so
+// writer and verifier cannot drift.
+func bmffStandardExclusions() []any {
+	return []any{
+		map[string]any{"xpath": "/uuid", "data": []any{map[string]any{"offset": 8, "value": c2paBoxUUID[:]}}},
+		map[string]any{"xpath": "/ftyp"},
+		map[string]any{"xpath": "/mfra"},
+	}
+}
+
+// bmffHashAssertion encodes a c2pa.hash.bmff.v3 with a flat hash (§18.6).
+func bmffHashAssertion(alg string, digest []byte) ([]byte, error) {
+	return encMode.Marshal(map[string]any{
+		"exclusions": bmffStandardExclusions(),
+		"alg":        alg,
+		"hash":       digest,
+	})
+}
+
+// bmffStandardSegment resolves the standard exclusions against a BMFF file's
+// own boxes — the segment verifyBMFFHash would build for it.
+func bmffStandardSegment(ctx context.Context, data []byte) (bmffSegment, error) {
+	excl, ok := decodeBMFFExclusions(bmffStandardExclusions())
+	if !ok {
+		return bmffSegment{}, errors.New("standard BMFF exclusions did not decode")
+	}
+	seg, ok := newBMFFSegment(ctx, data, excl)
+	if !ok {
+		return bmffSegment{}, errors.New("no BMFF box structure to hash")
+	}
+	return seg, nil
+}
+
+// bmffHashDigest is the c2pa.hash.bmff.v3 flat hash of a whole BMFF file: the
+// verifier's own offset-marker walk (hashBMFFTopLevel) with the standard
+// exclusions resolved against the file's own boxes, exactly as verifyBMFFHash
+// will recompute it.
+func bmffHashDigest(ctx context.Context, alg string, data []byte) ([]byte, error) {
+	h, ok := hashByName(alg)
+	if !ok {
+		return nil, fmt.Errorf("unsupported hash algorithm %q", alg)
+	}
+	seg, err := bmffStandardSegment(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	hashBMFFTopLevel(ctx, seg.data, seg.top, seg.ranges, h)
+	return h.Sum(nil), nil
 }
 
 // actionsAssertion encodes a c2pa.actions.v2. When ingredients is non-empty it

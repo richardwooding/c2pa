@@ -57,6 +57,8 @@ func embedderFor(c Container) (embedder, bool) {
 		return mp3Embedder{}, true
 	case SVG:
 		return svgEmbedder{}, true
+	case BMFF:
+		return bmffEmbedder{}, true
 	}
 	return nil, false
 }
@@ -95,6 +97,11 @@ func embedStore(ctx context.Context, c Container, asset, store []byte) ([]byte, 
 	}
 	if got := extractJUMBF(ctx, c, out); !bytes.Equal(got, store) {
 		return nil, nil, fmt.Errorf("%w: embedded store does not read back", errCarrierMalformed)
+	}
+	for i, r := range excl {
+		if r.start < 0 || r.length < 0 || r.start+r.length > len(out) || (i > 0 && r.start < excl[i-1].start+excl[i-1].length) {
+			return nil, nil, fmt.Errorf("%w: exclusion %v is out of order or out of bounds", errCarrierMalformed, r)
+		}
 	}
 	return out, excl, nil
 }

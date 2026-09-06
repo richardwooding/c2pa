@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -54,6 +55,160 @@ func TestEmbedFixtureOracle(t *testing.T) {
 	}
 }
 
+// TestEmbedBMFFOracle is the byte-exact oracle for the offset rewrite: the two
+// MP4 fixtures differ by exactly one C2PA box after ftyp and the shift of every
+// chunk offset, so embedding the signed one's store into the unsigned one must
+// reproduce the signed file.
+func TestEmbedBMFFOracle(t *testing.T) {
+	ctx := context.Background()
+	signed := fixtureBytes(t, "c2pa_signed_video.mp4")
+	unsigned := fixtureBytes(t, "video_no_manifest.mp4")
+	store := extractJUMBF(ctx, BMFF, signed)
+	out, excl, err := embedStore(ctx, BMFF, unsigned, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if excl != nil {
+		t.Errorf("BMFF returns no byte-range exclusions, got %v", excl)
+	}
+	if !bytes.Equal(out, signed) {
+		t.Errorf("re-embedding the signed fixture's store into its unsigned twin did not reproduce it (%d vs %d bytes)", len(out), len(signed))
+	}
+	// And the fixture's own manifest still binds the result.
+	res := Validate(ctx, BMFF, bytes.NewReader(out), WithOnlineRevocation(false))
+	if !res.Has(StatusAssertionBMFFHashMatch) {
+		t.Errorf("fixture manifest over the re-embedded file: %v", codes(res))
+	}
+}
+
+// bmffAbsoluteOffsets collects every absolute file offset a BMFF file carries —
+// stco/co64 entries, saio entries, iloc extents — in walk order.
+func bmffAbsoluteOffsets(t testing.TB, data []byte) []int {
+	t.Helper()
+	var out []int
+	var walk func(boxes []*bmffBox)
+	walk = func(boxes []*bmffBox) {
+		for _, b := range boxes {
+			p := b.start + b.headerLen
+			switch b.typ {
+			case "stco", "co64":
+				w := 4
+				if b.typ == "co64" {
+					w = 8
+				}
+				n := int(binary.BigEndian.Uint32(data[p+4 : p+8]))
+				for i := 0; i < n; i++ {
+					if w == 4 {
+						out = append(out, int(binary.BigEndian.Uint32(data[p+8+i*4:])))
+					} else {
+						out = append(out, int(binary.BigEndian.Uint64(data[p+8+i*8:])))
+					}
+				}
+			case "iloc":
+				q := p + 4
+				os, bos := int(data[q]>>4), int(data[q+1]>>4)
+				q += 2
+				items := int(binary.BigEndian.Uint16(data[q:]))
+				q += 2
+				for i := 0; i < items; i++ {
+					q += 2 // item_ID (version 0)
+					q += 2 // data_reference_index
+					base := 0
+					if bos == 4 {
+						base = int(binary.BigEndian.Uint32(data[q:]))
+					}
+					q += bos
+					extents := int(binary.BigEndian.Uint16(data[q:]))
+					q += 2
+					for e := 0; e < extents; e++ {
+						ext := 0
+						if os == 4 {
+							ext = int(binary.BigEndian.Uint32(data[q:]))
+						}
+						out = append(out, base+ext)
+						q += os + 4
+					}
+				}
+			}
+			walk(b.children)
+		}
+	}
+	walk(parseBMFFBoxes(context.Background(), data))
+	return out
+}
+
+// TestEmbedBMFFOffsets pins the one property no validator checks: after the
+// box is inserted, every chunk and item offset still addresses the same
+// bytes, moved by exactly the inserted length.
+func TestEmbedBMFFOffsets(t *testing.T) {
+	ctx := context.Background()
+	store := storeOf(500)
+	inputs := map[string][]byte{
+		"fixture":        fixtureBytes(t, "video_no_manifest.mp4"),
+		"minimal stco":   minimalMP4(false),
+		"minimal co64":   minimalMP4(true),
+		"avif extents":   minimalAVIF(false),
+		"avif base":      minimalAVIF(true),
+		"already signed": fixtureBytes(t, "c2pa_signed_video.mp4"),
+	}
+	for name, in := range inputs {
+		t.Run(name, func(t *testing.T) {
+			before := bmffAbsoluteOffsets(t, in)
+			if len(before) == 0 {
+				t.Fatal("test input carries no offsets to check")
+			}
+			out, _, err := embedStore(ctx, BMFF, in, store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			after := bmffAbsoluteOffsets(t, out)
+			if len(after) != len(before) {
+				t.Fatalf("%d offsets before, %d after", len(before), len(after))
+			}
+			for i := range before {
+				o, n := before[i], after[i]
+				if o+8 > len(in) || n+8 > len(out) || !bytes.Equal(in[o:o+8], out[n:n+8]) {
+					t.Errorf("offset %d → %d no longer addresses the same bytes", o, n)
+				}
+			}
+			// The C2PA box sits right after ftyp and reads back.
+			top := parseBMFFBoxes(ctx, out)
+			if len(top) < 2 || top[0].typ != "ftyp" || top[1].typ != "uuid" || top[1].usertype != c2paBoxUUID {
+				t.Errorf("C2PA box is not immediately after ftyp")
+			}
+			n := 0
+			for _, b := range top {
+				if b.typ == "uuid" && b.usertype == c2paBoxUUID {
+					n++
+				}
+			}
+			if n != 1 {
+				t.Errorf("%d C2PA boxes, want 1", n)
+			}
+		})
+	}
+}
+
+// TestEmbedBMFFRefuses pins what the BMFF writer will not touch.
+func TestEmbedBMFFRefuses(t *testing.T) {
+	ctx := context.Background()
+	store := storeOf(50)
+	for name, in := range map[string][]byte{
+		"fragmented":     fragmentedFlatAsset(t, 2, 1, 1, 1, nil).asset,
+		"trailing bytes": append(minimalMP4(false), 0, 0, 0),
+		"no ftyp":        synthBox("moov", make([]byte, 8)),
+		"only ftyp":      synthBox("ftyp", []byte("isom")),
+		"not bmff":       []byte("not a box structure at all"),
+	} {
+		if _, _, err := embedStore(ctx, BMFF, in, store); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, _, err := embedStore(ctx, BMFF, fragmentedFlatAsset(t, 2, 1, 1, 1, nil).asset, store); !errors.Is(err, errFragmented) {
+		t.Errorf("fragmented input should be errFragmented, got %v", err)
+	}
+}
+
 // TestEmbedProperties pins the contract the signing pipeline relies on.
 func TestEmbedProperties(t *testing.T) {
 	ctx := context.Background()
@@ -70,6 +225,9 @@ func TestEmbedProperties(t *testing.T) {
 				if r.start < 0 || r.start+r.length > len(outA) {
 					t.Fatalf("exclusion %v out of bounds", exclA)
 				}
+			}
+			if c == BMFF && exclA != nil {
+				t.Fatalf("BMFF binds by offset-marker hash, not byte ranges: %v", exclA)
 			}
 			// For the pure insertions, everything outside the exclusion is the
 			// original asset. RIFF rewrites its size (and adds VP8X), TIFF appends
@@ -127,7 +285,7 @@ func TestEmbedRefuses(t *testing.T) {
 	if _, _, err := embedStore(ctx, JPEG, jpg[:len(jpg)/2], good); err == nil {
 		t.Error("a JPEG with no start of scan accepted")
 	}
-	if _, _, err := embedStore(ctx, BMFF, fixtureBytes(t, "video_no_manifest.mp4"), good); err == nil {
+	if _, _, err := embedStore(ctx, PDF, fixtureBytes(t, "c2pa_chatgpt.pdf"), good); err == nil {
 		t.Error("a container without an embedder accepted")
 	}
 }

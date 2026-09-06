@@ -81,6 +81,8 @@ func unsignedCorpusAsset(container Container) []byte {
 		return append(id3Tag(4, 0, nil), 0xFF, 0xFB, 0x90, 0x00)
 	case SVG:
 		return []byte(`<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>`)
+	case BMFF:
+		return minimalMP4(false)
 	}
 	return nil
 }
@@ -127,6 +129,7 @@ func pdfProducerFraming(chain bool) assetFraming {
 // buildAsset builds a signed asset in the container's own framing.
 func buildAsset(t testing.TB, container Container, spec manifestSpec) []byte {
 	t.Helper()
+	spec.bmffBinding = container == BMFF
 	return buildFramedAsset(t, func(store []byte) ([]byte, []byteRange) {
 		return assembleAsset(container, store)
 	}, spec)
@@ -149,7 +152,12 @@ func buildFramedAsset(t testing.TB, frame assetFraming, spec manifestSpec) []byt
 	assemble := func(excl []byteRange, digest []byte) ([]byte, []byteRange) {
 		withHash := spec
 		var binding []assertionSpec
-		if !spec.noHardBinding {
+		if !spec.noHardBinding && spec.bmffBinding {
+			binding = append(binding, assertionSpec{
+				label: "c2pa.hash.bmff.v3",
+				value: map[string]any{"exclusions": bmffStandardExclusions(), "alg": alg, "hash": digest},
+			})
+		} else if !spec.noHardBinding {
 			exclusions := make([]any, 0, len(excl))
 			for _, r := range excl {
 				exclusions = append(exclusions, map[string]any{"start": r.start, "length": r.length})
@@ -179,21 +187,31 @@ func buildFramedAsset(t testing.TB, frame assetFraming, spec manifestSpec) []byt
 	}
 
 	excl := []byteRange{{start: 0, length: 0}}
+	prevLen := -1
 	for i := 0; i < 8; i++ {
-		_, next := assemble(excl, placeholder)
-		if sameRanges(next, excl) {
+		asset, next := assemble(excl, placeholder)
+		if sameRanges(next, excl) && len(asset) == prevLen {
 			break
 		}
-		excl = next
+		excl, prevLen = next, len(asset)
 	}
 
 	asset, next := assemble(excl, placeholder)
-	if !sameRanges(next, excl) {
+	if !sameRanges(next, excl) || len(asset) != prevLen {
 		t.Fatalf("exclusion offsets did not converge: got %v want %v", next, excl)
 	}
 
-	h, _ := hashByName(alg)
-	hashWithExclusions(asset, h, excl)
-	final, _ := assemble(excl, h.Sum(nil))
+	var digest []byte
+	if spec.bmffBinding {
+		var err error
+		if digest, err = bmffHashDigest(context.Background(), alg, asset); err != nil {
+			t.Fatalf("bmff hash: %v", err)
+		}
+	} else {
+		h, _ := hashByName(alg)
+		hashWithExclusions(asset, h, excl)
+		digest = h.Sum(nil)
+	}
+	final, _ := assemble(excl, digest)
 	return final
 }

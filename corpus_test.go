@@ -39,7 +39,7 @@ func TestCorpusPositiveMatrix(t *testing.T) {
 	containers := []struct {
 		name string
 		c    Container
-	}{{"jpeg", JPEG}, {"png", PNG}, {"pdf", PDF}, {"riff", RIFF}, {"tiff", TIFF}, {"gif", GIF}, {"mp3", MP3}, {"svg", SVG}}
+	}{{"jpeg", JPEG}, {"png", PNG}, {"pdf", PDF}, {"riff", RIFF}, {"tiff", TIFF}, {"gif", GIF}, {"mp3", MP3}, {"svg", SVG}, {"bmff", BMFF}}
 	algs := []struct {
 		name string
 		alg  cose.Algorithm
@@ -72,7 +72,7 @@ func TestCorpusPositiveMatrix(t *testing.T) {
 						StatusClaimSignatureValidated,
 						StatusSigningCredentialTrusted,
 						StatusAssertionHashedURIMatch,
-						StatusAssertionDataHashMatch,
+						bindingMatch(ct.c),
 					} {
 						if !res.Has(want) {
 							t.Errorf("missing %s; got %v", want, codes(res))

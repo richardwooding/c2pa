@@ -32,6 +32,10 @@ var (
 	// ErrUnsupportedContainer is returned for a container Sign cannot write
 	// into, or an asset with a feature this release does not write into.
 	ErrUnsupportedContainer = errors.New("c2pa: container cannot be signed")
+	// ErrFragmentedBMFF is returned for a fragmented MP4 (a 'moof', 'sidx' or
+	// 'styp' box, or merkle boxes): its binding is a Merkle tree per fragment,
+	// which this release does not author.
+	ErrFragmentedBMFF = errors.New("c2pa: fragmented BMFF is not signable in this release")
 	// ErrMalformedAsset is returned when the input does not parse as the named
 	// container, or carries a manifest store that cannot be chained.
 	ErrMalformedAsset = errors.New("c2pa: asset could not be parsed for embedding")
@@ -264,6 +268,12 @@ func NewSigner(key crypto.Signer, chain []*x509.Certificate, opts ...SignerOptio
 // they are carried into the new store verbatim and the new manifest names the
 // previous active one as its parentOf ingredient, so provenance chains rather
 // than being replaced. The manifest's first action must then be ActionOpened.
+//
+// BMFF assets (MP4, MOV, HEIC, AVIF) are bound with c2pa.hash.bmff.v3 and the
+// C2PA box is inserted after 'ftyp', with every 'stco', 'co64', 'saio' and
+// 'iloc' offset rewritten to follow. Fragmented files are refused with
+// ErrFragmentedBMFF: their binding is a Merkle tree per fragment, which this
+// release does not author.
 //
 // Like Validate, Sign never panics; malformed or oversized input, a manifest it
 // will not write, or a failed self-check is an error. Counterpart: c2pa-rs's
@@ -500,12 +510,26 @@ func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asse
 			priorBoxes = append(priorBoxes, pm.full)
 		}
 	}
+	// BMFF binds with c2pa.hash.bmff.v3 — an offset-marker walk with the
+	// standard exclusions, no byte ranges — so its layout converges on the
+	// output's length rather than on exclusion offsets.
+	bmff := container == BMFF
+	bindingLabel := "c2pa.hash.data"
+	if bmff {
+		bindingLabel = "c2pa.hash.bmff.v3"
+	}
 	build := func(excl []byteRange, digest, envelope []byte) (builtStore, error) {
-		payload, err := dataHashAssertion(alg, excl, digest)
+		var payload []byte
+		var err error
+		if bmff {
+			payload, err = bmffHashAssertion(alg, digest)
+		} else {
+			payload, err = dataHashAssertion(alg, excl, digest)
+		}
 		if err != nil {
 			return builtStore{}, err
 		}
-		boxes := append([]namedBox{{"c2pa.hash.data", assertionBox("c2pa.hash.data", payload)}}, fixed...)
+		boxes := append([]namedBox{{bindingLabel, assertionBox(bindingLabel, payload)}}, fixed...)
 		created := make([]any, 0, len(boxes))
 		children := make([][]byte, 0, len(boxes))
 		for _, nb := range boxes {
@@ -543,7 +567,7 @@ func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asse
 	var layout []byte
 	var placeholder builtStore
 	converged := false
-	for pass := 0; pass < 8 && !converged; pass++ {
+	for pass, prevLen := 0, -1; pass < 8 && !converged; pass++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -555,19 +579,27 @@ func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asse
 		if err != nil {
 			return nil, embedError(err)
 		}
-		if sameRanges(next, excl) {
+		if sameRanges(next, excl) && len(out) == prevLen {
 			layout, converged = out, true
 			break
 		}
-		excl = next
+		excl, prevLen = next, len(out)
 	}
 	if !converged {
 		return nil, fmt.Errorf("%w: exclusion offsets did not converge", ErrMalformedAsset)
 	}
 
-	// (b) the digest, over the converged layout minus the exclusions.
-	hashWithExclusions(layout, h, excl)
-	digest := h.Sum(nil)
+	// (b) the digest over the converged layout: minus the exclusions, or the
+	// BMFF offset-marker walk.
+	var digest []byte
+	if bmff {
+		if digest, err = bmffHashDigest(ctx, alg, layout); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrMalformedAsset, err)
+		}
+	} else {
+		hashWithExclusions(layout, h, excl)
+		digest = h.Sum(nil)
+	}
 
 	// (c) sign once, pad to the reserve, embed, and prove nothing else moved.
 	unsigned, err := build(excl, digest, zeroEnvelope)
@@ -593,7 +625,18 @@ func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asse
 	if err != nil {
 		return nil, embedError(err)
 	}
-	if !sameRanges(finalExcl, excl) || !sameOutsideExclusions(final, layout, excl) {
+	// Outside the store, the signed file must be the placeholder layout to the
+	// byte. For BMFF the store's own box has no byte-range exclusion, so the
+	// ranges the hash excludes — the C2PA box among them — are the comparison's.
+	compare := excl
+	if bmff {
+		seg, err := bmffStandardSegment(ctx, layout)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrMalformedAsset, err)
+		}
+		compare = seg.ranges
+	}
+	if !sameRanges(finalExcl, excl) || !sameOutsideExclusions(final, layout, compare) {
 		return nil, errors.New("c2pa: internal: layout drifted between the placeholder and the signed store")
 	}
 
@@ -601,7 +644,11 @@ func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asse
 	pool.AddCert(s.chain[len(s.chain)-1])
 	res := Validate(ctx, container, bytes.NewReader(final),
 		WithSigningTrust(pool), WithMaxIngredientDepth(0), WithOnlineRevocation(false))
-	if !res.Valid || !res.Has(StatusAssertionDataHashMatch) {
+	match := StatusAssertionDataHashMatch
+	if bmff {
+		match = StatusAssertionBMFFHashMatch
+	}
+	if !res.Valid || !res.Has(match) {
 		reason := "hard binding did not verify"
 		if f := res.FirstFailure(); f != nil {
 			reason = string(f.Code) + ": " + f.Explanation
@@ -628,6 +675,8 @@ func (s *Signer) uniqueLabel(prior *priorStore) (string, error) {
 // embedError maps an embedder's sentinel onto the public error it means.
 func embedError(err error) error {
 	switch {
+	case errors.Is(err, errFragmented):
+		return fmt.Errorf("%w: %v", ErrFragmentedBMFF, err)
 	case errors.Is(err, errCarrierMalformed):
 		return fmt.Errorf("%w: %v", ErrMalformedAsset, err)
 	case errors.Is(err, errCarrierUnsupported):

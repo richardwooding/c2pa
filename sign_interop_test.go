@@ -177,12 +177,21 @@ func TestSignInterop(t *testing.T) {
 		{"tiff big-endian", TIFF, ".tif", unsignedTIFF(true)},
 		{"mp3", MP3, ".mp3", unsignedMP3()},
 		{"svg", SVG, ".svg", unsignedSVG()},
+		{"mp4", BMFF, ".mp4", fixtureBytes(t, "video_no_manifest.mp4")},
+		{"mp4 minimal stco", BMFF, ".mp4", minimalMP4(false)},
+		{"mp4 minimal co64", BMFF, ".mp4", minimalMP4(true)},
+		{"avif extents", BMFF, ".avif", minimalAVIF(false)},
+		{"avif base offset", BMFF, ".avif", minimalAVIF(true)},
 	}
 	for _, tc := range inputs {
 		t.Run(tc.name, func(t *testing.T) {
 			path, out := interopSign(t, s, tc.container, tc.in, tc.ext, createdManifest("interop "+tc.name))
 			rep := runC2patoolJSON(t, path)
-			assertC2patoolValid(t, rep, "assertion.dataHash.match")
+			binding := "assertion.dataHash.match"
+			if tc.container == BMFF {
+				binding = "assertion.bmffHash.match"
+			}
+			assertC2patoolValid(t, rep, binding)
 
 			ours := Validate(context.Background(), tc.container, bytes.NewReader(out), WithSigningTrust(sc.roots), WithOnlineRevocation(false))
 			if rep.ActiveManifest != ours.ActiveManifestLabel {
@@ -235,7 +244,9 @@ func TestSignInteropResign(t *testing.T) {
 		{"tiff", TIFF, ".tif", unsignedTIFF(false), true},
 		{"mp3", MP3, ".mp3", unsignedMP3(), true},
 		{"svg", SVG, ".svg", unsignedSVG(), true},
+		{"mp4", BMFF, ".mp4", fixtureBytes(t, "video_no_manifest.mp4"), true},
 		{"c2pa-rs signed jpeg", JPEG, ".jpg", fixtureBytes(t, "c2pa_signed.jpg"), false},
+		{"c2pa-rs signed mp4", BMFF, ".mp4", fixtureBytes(t, "c2pa_signed_video.mp4"), false},
 		{"c2pa-rs signed png", PNG, ".png", fixtureBytes(t, "c2pa_2x_openai.png"), false},
 	}
 	for _, tc := range inputs {
@@ -245,13 +256,14 @@ func TestSignInteropResign(t *testing.T) {
 				first = signBytes(t, s, tc.container, tc.in, createdManifest("first"))
 			}
 			firstLabel := Validate(context.Background(), tc.container, bytes.NewReader(first), WithOnlineRevocation(false)).ActiveManifestLabel
+			prior := len(parseStore(context.Background(), extractJUMBF(context.Background(), tc.container, first)).manifests)
 			path, _ := interopSign(t, s, tc.container, first, tc.ext, openedManifest("second"))
 			rep := runC2patoolJSON(t, path)
 			if rep.ValidationState != "Valid" {
 				t.Errorf("validation_state = %q; failures %v", rep.ValidationState, rep.ValidationResults.ActiveManifest.Failure)
 			}
-			if len(rep.Manifests) != 2 {
-				t.Errorf("c2patool sees %d manifests, want 2", len(rep.Manifests))
+			if len(rep.Manifests) != prior+1 {
+				t.Errorf("c2patool sees %d manifests, want %d (every prior manifest carried plus ours)", len(rep.Manifests), prior+1)
 			}
 			active := rep.Manifests[rep.ActiveManifest]
 			if len(active.Ingredients) != 1 || active.Ingredients[0].Relationship != "parentOf" || active.Ingredients[0].ActiveManifest != firstLabel {
