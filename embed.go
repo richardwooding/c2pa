@@ -59,6 +59,8 @@ func embedderFor(c Container) (embedder, bool) {
 		return svgEmbedder{}, true
 	case BMFF:
 		return bmffEmbedder{}, true
+	case PDF:
+		return pdfEmbedder{}, true
 	}
 	return nil, false
 }

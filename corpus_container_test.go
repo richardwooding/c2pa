@@ -20,41 +20,17 @@ type assetFraming func(store []byte) (asset []byte, excl []byteRange)
 // assembleAsset is the framing each container's positive cases use: the
 // production embedder writing the store into a minimal unsigned asset, so the
 // corpus exercises insertion into an existing file rather than a synthetic
-// frame. PDF keeps its hand-built frame until it has an embedder. A nil store
-// returns the unsigned asset.
+// frame. A nil store returns the unsigned asset.
 func assembleAsset(container Container, store []byte) (asset []byte, excl []byteRange) {
-	if container != PDF {
-		base := unsignedCorpusAsset(container)
-		if store == nil {
-			return base, nil
-		}
-		out, excl, err := embedStore(context.Background(), container, base, store)
-		if err != nil {
-			panic("assembleAsset: " + err.Error()) // a test builder, not a code path
-		}
-		return out, excl
+	base := unsignedCorpusAsset(container)
+	if store == nil {
+		return base, nil
 	}
-	var exclStart, exclLen int
-	switch container {
-	case PDF:
-		// Catalog /AF → file specification → embedded file stream (spec §A.4).
-		// The exclusion covers exactly the stream payload, as Adobe's reference
-		// PDF does: the stream dictionary and its /Length stay hashed, so the
-		// store cannot be resized after signing.
-		asset = append(asset, "%PDF-1.7\n"...)
-		asset = append(asset, "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /AF [3 0 R] >>\nendobj\n"...)
-		asset = append(asset, "2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n"...)
-		asset = append(asset, "3 0 obj\n<< /Type /Filespec /F (c2pa.c2pa) /UF (c2pa.c2pa)"+
-			" /AFRelationship /C2PA_Manifest /EF << /F 4 0 R >> >>\nendobj\n"...)
-		asset = append(asset, fmt.Sprintf("4 0 obj\n<< /Type /EmbeddedFile"+
-			" /Subtype /application#2Fc2pa /Length %d >>\nstream\n", len(store))...)
-		exclStart = len(asset)
-		asset = append(asset, store...)
-		exclLen = len(asset) - exclStart
-		asset = append(asset, "\nendstream\nendobj\n"...)
-		asset = append(asset, "trailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n"...)
+	out, excl, err := embedStore(context.Background(), container, base, store)
+	if err != nil {
+		panic("assembleAsset: " + err.Error()) // a test builder, not a code path
 	}
-	return asset, []byteRange{{start: exclStart, length: exclLen}}
+	return out, excl
 }
 
 // unsignedCorpusAsset is the smallest asset of each container the embedders
@@ -83,6 +59,8 @@ func unsignedCorpusAsset(container Container) []byte {
 		return []byte(`<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>`)
 	case BMFF:
 		return minimalMP4(false)
+	case PDF:
+		return unsignedPDF(false)
 	}
 	return nil
 }

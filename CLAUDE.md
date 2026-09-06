@@ -19,8 +19,8 @@ AVIF), RIFF (WebP/WAV/AVI), TIFF (and DNG), GIF, MP3, SVG and PDF, with **three 
   Builds a `c2pa.claim.v2` manifest with the container's hard binding, signs it once with COSE_Sign1
   into an envelope of reserved size, embeds it, and validates its own output before writing a byte.
   Every container's output is checked against c2pa-rs's c2patool in CI (`sign_interop_test.go`).
-  JPEG, PNG, GIF, RIFF (WebP/WAV/AVI), TIFF/DNG, MP3, SVG and non-fragmented BMFF (MP4/MOV/HEIC/
-  AVIF) so far; PDF follows in its own PR. Lives in `sign.go`.
+  All nine containers: JPEG, PNG, GIF, RIFF (WebP/WAV/AVI), TIFF/DNG, MP3, SVG, non-fragmented BMFF
+  (MP4/MOV/HEIC/AVIF) and PDF. Lives in `sign.go`.
 
 The package stays one `package c2pa` but is split across topic files — flat *import surface*, not
 one file:
@@ -40,7 +40,8 @@ one file:
   in the PROTECTED header and exact-size `pad`), `embed.go` (the embedder contract, `applyEdits`,
   and the JPEG/PNG embedders; the other containers' embedders live beside their readers in
   `gif.go`, `riff.go`, `tiff.go`, `mp3.go`, `svg.go`), `bmffembed.go` (the C2PA uuid box after
-  `ftyp` and the `stco`/`co64`/`saio`/`iloc` offset rewrite)
+  `ftyp` and the `stco`/`co64`/`saio`/`iloc` offset rewrite), `pdfwrite.go` (the incremental update:
+  embedded file stream, file specification, redefined catalog, cross-reference table or stream)
 
 Don't introduce subpackages; that would force exporting internal helpers.
 
@@ -116,6 +117,35 @@ Public surface:
   binding is a Merkle tree per fragment, which this release does not author. Also refused: trailing
   bytes outside any box, no `ftyp`, nothing after `ftyp`. Every existing C2PA uuid box (any purpose)
   is removed; the core carries the lineage in the new store.
+- **PDF signing** (`pdfwrite.go`) is an INCREMENTAL UPDATE appended after the last `%%EOF` — nothing
+  before it changes, so a previous update section's store stays exactly where it was (§A.4.2.1) and
+  `pdfCatalogStores`/`storeWithPriorSections` still find it; the new store also carries the prior
+  manifests verbatim, because c2pa-rs's PDF reader does no section merge and must resolve the
+  `parentOf` from the active store alone. The catalog is resolved the way the reader resolves it —
+  the newest `startxref` whose `/Prev` chain PLACES `/Root` at a definition that is a catalog
+  (`pdfResolveForWrite` mirrors `pdfXrefRoot`); a document whose catalog is only reachable by
+  lexical guessing is refused rather than built on. The update writes: the embedded file stream
+  (`/Type /EmbeddedFile /Subtype /application#2Fc2pa /Length n`, unfiltered, `stream\n…\nendstream`
+  so `streamPayload` finds it), the file specification (`/Type /Filespec /F /UF /Desc (Content
+  Credentials) /AFRelationship /C2PA_Manifest /EF << /F n 0 R >>`), a NEW definition of the catalog
+  with the SAME object number AND generation as `/Root` (the ChatGPT fixture's producer redefines
+  `12 1 obj`, and the reader's placement check needs the header to match) whose entries are copied
+  verbatim except `/AF` — earlier C2PA file specifications dropped so one section associates one
+  store (§15.5.2.2, `pdfTallyStores.perSection`), ours appended — and `/Names`, which gains
+  `EmbeddedFiles` in place when that is possible (absent, a direct dictionary without it, or a flat
+  direct `/Names` array, rebuilt in byte order minus any C2PA entry); an indirect `/Names` or a
+  `Kids` tree is copied untouched and the association rests on `/AF` alone, the normative one (ISO
+  32000-2 §14.13) and the only one either reader consults. Then a classic `xref` table (20-byte
+  entries, `/Prev` = the resolving section's `startxref`, `/Info` and `/ID` carried) when the
+  document uses tables, or an uncompressed cross-reference stream (`/W [1 4 2] /Index [R 1 S 3]`,
+  exactly what `pdfXrefStream` decodes) when it uses streams; `startxref`; `%%EOF`. New object
+  numbers start at `/Size` (or past the highest object seen). Exclusion = the stream payload only —
+  the dictionary and `/Length` stay hashed, as the corpus and Adobe's reference do. Refused:
+  `/Encrypt` anywhere in the chain, `/Perms` in the catalog (a certifying signature a later update
+  would invalidate), an unresolvable catalog. c2pa-rs has NO PDF writer, so there is no reference
+  layout; its reader wants only the current catalog's `/AF`, and c2patool reads the update section
+  as `Valid`/`Trusted` and chains the ChatGPT fixture's OpenAI manifest as a `parentOf` ingredient.
+  `TestEmbedProperties` exempts PDF from re-embed idempotence: appending is the point.
 - `ReadAll(ctx, container, r)` — one Info per store: asset's own first (AttributionAsset), then
   object-level ones (AttributionEmbedded), then marker-found unplaced ones (AttributionUnknown).
   Only PDF returns >1 today (§A.4.3).
@@ -480,8 +510,9 @@ anything noticing, because `x5chainCandidates` reads both.
 positive matrix and every negative case exercise INSERTION into an existing asset with the same code
 `Sign` uses; `assetFraming` returns `[]byteRange` because TIFF has two exclusions. `buildAsset` sets
 `manifestSpec.bmffBinding` for BMFF, so `buildFramedAsset` writes `c2pa.hash.bmff.v3` and hashes with
-`bmffHashDigest`; the matrix is 9 containers × 4 algorithms × 2 claim versions = 72 rows. PDF keeps
-its hand-built frame until it has an embedder.
+`bmffHashDigest`; the matrix is 9 containers × 4 algorithms × 2 claim versions = 72 rows, every one
+of them through `embedStore` — the hand-built PDF frame is gone (`pdfProducerFraming` and
+`pdfTwoSectionFraming` remain for the reader shapes they exercise).
 
 **Fragmented assets are built in memory too.** `fragmentedFlatAsset` / `fragmentedFiles`
 (`bmffmerkle_test.go`) lay out flat and split fragmented assets with every merkle box padded to one
