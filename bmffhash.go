@@ -91,6 +91,12 @@ func (v *validator) verifyBMFFHash(a *rawAssertion, uri string) {
 		v.add(StatusAssertionBMFFHashMalformed, subj, "asset has no parseable BMFF box structure", nil)
 		return
 	}
+	if v.fragments != nil {
+		// ValidateFragmented: the rest of the asset is in other files, and a
+		// flat hash over this one would be a defect rather than a binding.
+		v.verifyBMFFFragmented(subj, assertion, defaultAlg, seg)
+		return
+	}
 
 	if len(want) > 0 {
 		hashBMFFTopLevel(v.ctx, seg.data, seg.top, seg.ranges, h)
@@ -450,7 +456,8 @@ type merkleBox struct {
 type bmffSegment struct {
 	data   []byte
 	top    []*bmffBox
-	ranges []byteRange
+	excl   []bmffExclusion // as decoded, for another file to resolve again
+	ranges []byteRange     // excl resolved against THIS file's boxes
 }
 
 // newBMFFSegment parses data's top-level boxes and resolves excl against them.
@@ -460,7 +467,7 @@ func newBMFFSegment(ctx context.Context, data []byte, excl []bmffExclusion) (bmf
 	if len(top) == 0 {
 		return bmffSegment{}, false
 	}
-	return bmffSegment{data: data, top: top, ranges: bmffExclusionByteRanges(data, top, excl)}, true
+	return bmffSegment{data: data, top: top, excl: excl, ranges: bmffExclusionByteRanges(data, top, excl)}, true
 }
 
 // verifyBMFFMerkle checks every merkle-map the assertion carries against what
@@ -537,7 +544,7 @@ func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, se
 				// it binds are other files entirely.
 				verified++
 				unverified = fmt.Sprintf("the initialization segment hash matches; "+
-					"the %d fragments it binds are in other files", totalLeaves)
+					"the %d fragments it binds are in other files — pass them to ValidateFragmented", totalLeaves)
 				continue
 			}
 			if !fragmentsCut {

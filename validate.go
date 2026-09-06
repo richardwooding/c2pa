@@ -10,7 +10,8 @@ import (
 	"time"
 )
 
-// ValidateMaxScan caps how many leading bytes Validate consumes. Unlike Read's
+// ValidateMaxScan caps how many leading bytes Validate consumes — and, for
+// ValidateFragmented, how many of each input. Unlike Read's
 // MaxScan (tuned for fast manifest discovery), validation must hash the whole
 // asset for hard-binding checks, so the cap is larger. Assets beyond it cannot
 // have their data hash verified — that is reported as an informational status,
@@ -157,8 +158,8 @@ func WithMaxIngredientDepth(n int) ValidateOption {
 	return func(c *validateConfig) { c.maxIngredientDepth = n }
 }
 
-// WithMaxScan overrides how many leading bytes Validate reads (default
-// ValidateMaxScan).
+// WithMaxScan overrides how many leading bytes Validate reads — per input, for
+// ValidateFragmented (default ValidateMaxScan).
 func WithMaxScan(n int) ValidateOption {
 	return func(c *validateConfig) { c.maxScan = n }
 }
@@ -199,6 +200,11 @@ type validator struct {
 	// Manifest Store"). PDF's update sections and object-level stores, and
 	// BMFF's "original" store beneath an update manifest.
 	priorStores [][]byte
+	// fragments is non-nil only for ValidateFragmented: the media fragments of
+	// a fragmented BMFF asset, read one at a time inside the hard-binding step.
+	// Non-nil but empty still means the caller declared the asset fragmented,
+	// so the split-file rules apply.
+	fragments *fragmentSet
 }
 
 func (v *validator) add(code StatusCode, uri, explain string, err error) {
@@ -234,15 +240,34 @@ func (v *validator) finish() ValidationResult {
 // truncated, or cancelled input is reported via failure statuses with
 // Valid=false. It is the verified counterpart to Read's fast, unverified scan.
 func Validate(ctx context.Context, container Container, r io.Reader, opts ...ValidateOption) ValidationResult {
+	return newValidator(ctx, container, opts).run(r)
+}
+
+// newValidator resolves opts over the defaults into the per-call state that
+// Validate and ValidateFragmented both run.
+func newValidator(ctx context.Context, container Container, opts []ValidateOption) *validator {
 	cfg := defaultConfig()
 	for _, o := range opts {
 		o(&cfg)
 	}
-	v := &validator{
+	return &validator{
 		ctx: ctx, cfg: cfg, container: container,
 		visited: map[string]bool{}, attribution: AttributionAsset,
 	}
+}
 
+// run reads r under the scan cap and runs the whole pipeline over the bytes.
+// It is Validate's body. ValidateFragmented runs the same body over the
+// initialization segment; its fragments are consumed later, inside the
+// hard-binding step, which is the one place the two differ.
+func (v *validator) run(r io.Reader) ValidationResult {
+	ctx, cfg, container := v.ctx, v.cfg, v.container
+	if r == nil {
+		// io.LimitReader(nil, n).Read would panic, and never panicking is the
+		// contract.
+		v.add(StatusGeneralError, "", "no readable input", nil)
+		return v.finish()
+	}
 	if ctx.Err() != nil {
 		v.add(StatusGeneralError, "", "context cancelled before validation", ctx.Err())
 		return v.finish()

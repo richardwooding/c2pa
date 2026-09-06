@@ -127,9 +127,10 @@ What it verifies:
 - **Merkle BMFF** — a `c2pa.hash.bmff.v3` `merkle` array is verified in full wherever the bytes are
   in hand. A non-fragmented asset whose `mdat` is hashed piecewise has its leaves cut from the box and
   the tree rebuilt; a fragmented asset in one flat file has its initialization hash checked and every
-  chunk checked against the Merkle proof in the chunk's own `merkle` box. An initialization segment
-  read on its own proves or disproves its hash, and the fragments it binds — other files — are named
-  rather than folded into a success.
+  chunk checked against the Merkle proof in the chunk's own `merkle` box; an asset split across files
+  (DASH/CMAF) is verified with `ValidateFragmented` — see below. An initialization segment read on its
+  own through `Validate` proves or disproves its hash, and the fragments it binds — other files — are
+  named rather than folded into a success.
 - **RFC 3161 timestamp** — full CMS signature verification, the TSA chain, and that the timestamp
   covers this signature.
 - **Revocation** — OCSP/CRL, opt-in (off by default), soft-fail.
@@ -168,6 +169,31 @@ r := c2pa.Validate(ctx, c2pa.JPEG, f,
 the parsed `SignerChain`. Status codes mirror the [C2PA specification §15](https://spec.c2pa.org)
 (e.g. `claimSignature.validated`, `signingCredential.untrusted`, `assertion.dataHash.mismatch`);
 each `StatusEntry` has a `Severity` (success / informational / failure).
+
+### Fragmented BMFF (DASH / CMAF)
+
+A streaming asset ships as an initialization segment (`init.mp4`: `ftyp` + `moov`, carrying the
+manifest) and media fragments (`.m4s`: `moof` + `mdat`, each carrying the Merkle proof that binds it).
+`ValidateFragmented` runs the whole pipeline over the initialization segment and checks every
+fragment against its proof, reading one fragment at a time. Supplying a subset is a legitimate partial
+check: it is reported as informational, never as a false match, and a fragment that has been tampered
+with fails at its own index.
+
+```go
+init, _ := os.Open("video/init.mp4")
+paths, _ := filepath.Glob("video/*.m4s")
+frags := make([]io.Reader, 0, len(paths))
+for _, p := range paths {
+    f, _ := os.Open(p)
+    defer f.Close()
+    frags = append(frags, f)
+}
+r := c2pa.ValidateFragmented(ctx, init, frags)
+fmt.Println(r.Valid, r.Has(c2pa.StatusAssertionBMFFHashMatch)) // bound only if every fragment was supplied and verified
+for _, s := range r.Statuses {
+    fmt.Println(s.Code, s.URI, s.Explanation) // a fragment failure's URI ends in "#fragment=<i>"
+}
+```
 
 ## PDF
 

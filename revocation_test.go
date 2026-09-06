@@ -69,7 +69,7 @@ func newTestLeaf(t *testing.T, issuer *x509.Certificate, issuerKey *rsa.PrivateK
 	return cert
 }
 
-func newValidator(online bool, client *http.Client) *validator {
+func testValidator(online bool, client *http.Client) *validator {
 	cfg := defaultConfig()
 	cfg.onlineRevocation = online
 	if client != nil {
@@ -103,7 +103,7 @@ func TestRevocation_OCSPRevoked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	v := newValidator(true, srv.Client())
+	v := testValidator(true, srv.Client())
 	v.checkRevocation([]*x509.Certificate{leaf, issuer}, "test")
 	if !v.res.Has(StatusSigningCredentialRevoked) {
 		t.Errorf("expected signingCredential.revoked; got %v", codes(v.res))
@@ -133,7 +133,7 @@ func TestRevocation_OCSPGood(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	v := newValidator(true, srv.Client())
+	v := testValidator(true, srv.Client())
 	v.checkRevocation([]*x509.Certificate{leaf, issuer}, "test")
 	if v.res.Has(StatusSigningCredentialRevoked) {
 		t.Errorf("did not expect revoked for a good response; got %v", codes(v.res))
@@ -148,7 +148,7 @@ func TestRevocation_OCSPGood(t *testing.T) {
 func TestRevocation_OfflineUnknown(t *testing.T) {
 	issuer, issuerKey := newTestCA(t)
 	leaf := newTestLeaf(t, issuer, issuerKey, "http://127.0.0.1:0/never-called")
-	v := newValidator(false, nil)
+	v := testValidator(false, nil)
 	v.checkRevocation([]*x509.Certificate{leaf, issuer}, "test")
 	if !v.res.Has(StatusRevocationUnknown) {
 		t.Errorf("expected revocation.unknown when offline; got %v", codes(v.res))

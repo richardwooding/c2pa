@@ -87,6 +87,14 @@ func (v *validator) verifyHardBinding(m *parsedManifest, uri string) {
 			boxesHash = &m.assertions[i]
 		}
 	}
+	if v.fragments != nil && bmffHash == nil {
+		// Only a BMFF merkle binding reaches bytes in other files; a
+		// c2pa.hash.data over the initialization segment would "match" while
+		// leaving every fragment unbound.
+		v.add(StatusHardBindingMissing, uri,
+			"no c2pa.hash.bmff.v2/.v3 assertion binds the supplied fragments", nil)
+		return
+	}
 	switch {
 	case bmffHash != nil && v.container == BMFF:
 		v.verifyBMFFHash(bmffHash, uri)

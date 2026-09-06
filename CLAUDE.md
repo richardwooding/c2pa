@@ -25,7 +25,9 @@ one file:
 - **validation**: `validate.go`, `cose_verify.go`, `chain.go`, `trust.go`, `revocation.go`,
   `timestamp.go`, `ingredient.go`, `statuscodes.go`
 - **hard bindings**: `hashbinding.go` (dispatch + `c2pa.hash.data`), `bmffhash.go` (BMFF and
-  Merkle), `boxmap.go` + `boxeshash.go` (`c2pa.hash.boxes`)
+  Merkle — everything one file can settle), `fragmented.go` (`ValidateFragmented` — Merkle across an
+  initialization segment and separate fragment files), `boxmap.go` + `boxeshash.go`
+  (`c2pa.hash.boxes`)
 
 Don't introduce subpackages; that would force exporting internal helpers.
 
@@ -38,6 +40,16 @@ Public surface:
 - `Validate` / `ValidationResult` / `StatusEntry` / `StatusCode` / `Severity` — the verifier and its
   result. `ValidateOption` (`WithSigningTrust`, `WithTimestampTrust`, `WithOnlineRevocation`,
   `WithClock`, `WithMaxIngredientDepth`, `WithMaxScan`, `WithHTTPClient`).
+- `ValidateFragmented(ctx, init, fragments, opts...)` — `Validate`'s whole pipeline over a
+  fragmented BMFF asset's initialization segment (DASH/CMAF: `ftyp` + `moov` in one file, `.m4s`
+  fragments in others), with the hard binding checked against each fragment's merkle box. Same
+  `ValidateOption`s; the container is BMFF by definition, so there is no parameter for it.
+  Fragments are read one at a time under the scan cap, so memory is init + one fragment. The
+  roll-up is `assertion.bmffHash.match` only on complete §15.12.2 coverage (every `location`
+  `0..count-1` of every merkle-map); otherwise ONE informational `general.unsupported` names the
+  locations not verified. Per-fragment FAILURES carry the URI suffix `#fragment=<i>` (i = the
+  caller's slice index; the location is in the explanation); there are deliberately NO per-fragment
+  match entries, so `Has(StatusAssertionBMFFHashMatch)` keeps meaning "fully bound".
 - `ReadAll(ctx, container, r)` — one Info per store: asset's own first (AttributionAsset), then
   object-level ones (AttributionEmbedded), then marker-found unplaced ones (AttributionUnknown).
   Only PDF returns >1 today (§A.4.3).
@@ -236,10 +248,25 @@ empty for that whole generation of files.
   preceding it (`merkleProve`, c2pa-rs's `check_merkle_tree`). Chunk count, merkle-box count and
   the map's `count` must all agree; boxes pair with chunks **positionally**, as in c2pa-rs; and box
   `k` must say `location` `k` (§15.12.2 — otherwise two chunks could swap places along with their
-  proofs; c2pa-rs does not check this). (c) **Fragmented across files** (.m4s) — read alone, an
-  initialization segment has no `moof`, so `initHash` covers the whole file and IS checked; the
-  chunks are other files, and the informational says how many. A wrong `initHash` is a `mismatch`
-  wherever it is seen: the file in hand disproves it.
+  proofs; c2pa-rs does not check this). (c) **Fragmented across files** (.m4s) —
+  `ValidateFragmented` (`fragmented.go`): `initHash` is checked over the whole initialization
+  segment once per map (c2pa-rs recomputes it per fragment), and each fragment is hashed from ITS
+  OWN offset 0 with the exclusions re-resolved against its own boxes (so `/uuid` removes the
+  fragment's own merkle box), paired to its map by `(uniqueId, localId)` — not position — and folded
+  up its proof from the `location` the box states. `Validate` alone on an initialization segment
+  (no `moof`) still checks `initHash` and reports an informational pointing at `ValidateFragmented`.
+  A wrong `initHash` is a `mismatch` wherever it is seen: the file in hand disproves it.
+  Split-file rules, which `ValidateFragmented(ctx, init, nil)` enforces and `Validate(ctx, BMFF,
+  init)` does not: a flat `hash` is `malformed` (as in c2pa-rs — it says nothing about the
+  fragments); `initHash` is REQUIRED on every map (**deliberate divergence** — c2pa-rs silently
+  accepts a map without one, leaving the segment that carries the manifest bound by nothing);
+  structural defects in a supplied fragment (unparseable, no merkle box, `location >= count`, a box
+  naming a tree the manifest lacks) are FAILURES, not informational — the caller asserted these are
+  this asset's fragments, the same reasoning that makes a BMFF binding on a JPEG
+  `hardBinding.missing`; a `c2pa.hash.data`-only manifest on the init is `hardBinding.missing` and
+  the fragments are never read; a fragment that hits the scan cap is informational and its location
+  shows up as "not verified"; cancellation mid-fragment is `general.error` at that fragment, so an
+  aborted run never comes out `Valid`.
   Things that are easy to get wrong: a Merkle leaf starts **16 bytes** into the `mdat` box
   (`mdatBlockPrefix`) regardless of whether the box uses an 8- or 16-byte header, so it is NOT the
   box's header length; the tree carries an **unpaired last node up UNCHANGED** rather than
@@ -307,8 +334,9 @@ and hand-copied in `README.md`. Change one and change the other; nothing catches
 The `Fuzz*` targets cover the read pipeline, the recursive box walker,
 the ASN.1 timestamp descent, the offset-aware `parseStore`/`parseBoxTree`, the full `Validate`
 pipeline, the CMS timestamp verifier, the exclusion-range hashing, the PDF object scan, and the
-Merkle paths — the leaf cut, the flat fragmented file (`FuzzBMFFFragment`), the merkle box decoder
-and the proof fold; their seed corpora run as normal tests in CI. **`.github/workflows/fuzz.yml`
+Merkle paths — the leaf cut, the flat fragmented file (`FuzzBMFFFragment`), the merkle box decoder,
+the proof fold and the whole split-file pipeline (`FuzzValidateFragmented`); their seed corpora run
+as normal tests in CI. **`.github/workflows/fuzz.yml`
 lists the targets by name**, so a new `Fuzz*` function is silently un-fuzzed nightly until it is
 added there — `FuzzBMFFMerkle` and `FuzzMerkleLeafRanges` shipped a release without being listed.
 
@@ -367,8 +395,20 @@ was added without one and had to be fixed separately. To check, compare the `Sta
 `statuscodes.go` against `v.add(Status…` across the package.
 
 Where the recent ones live: `assertion.boxesHash.*` in `boxeshash_test.go`; `assertion.bmffHash.*`
-including the Merkle paths in `bmffmerkle_test.go`; `manifest.update.invalid` /
+including the Merkle paths in `bmffmerkle_test.go`, and the split-file paths plus
+`ValidateFragmented` in `fragmented_test.go`; `manifest.update.invalid` /
 `manifest.update.wrongParents` / `manifest.multipleParents` in `updatemanifest_test.go`.
+
+**Fragmented assets are built in memory too.** `fragmentedFlatAsset` / `fragmentedFiles`
+(`bmffmerkle_test.go`) lay out flat and split fragmented assets with every merkle box padded to one
+fixed size, so what a box says never moves the chunk after it and no fixpoint is needed;
+`signedFragmentedAsset` (`fragmented_test.go`) wraps the split init in a signed manifest whose
+store box is placed LAST, so `initHash` (`moov` alone) is independent of the store's size — the
+same argument `buildBoxHashAsset` makes. `runFragmented` exercises the binding alone;
+`validateFragmentedCorpus` runs the real entry point. `ExampleValidateFragmented` is the one
+Example WITHOUT an `// Output:` block: no reproducible signed fragmented fixture exists (c2pa-rs's
+DASH set is signed at test time by an ephemeral key) and generated files may not land in
+`testdata/`, so it is compiled, not run.
 
 **Cost tests assert a SCALING RATIO, not a wall-clock ceiling.** `assertScalesLinearly` (in
 `pdf_test.go`) builds a document at n and 4n objects and fails when the larger takes more than 8x —
