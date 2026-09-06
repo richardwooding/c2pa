@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/binary"
+	"fmt"
 	"hash"
 	"strconv"
 	"strings"
@@ -17,9 +18,9 @@ import (
 // absolute file offset as an 8-byte big-endian integer followed by its bytes
 // minus the exclusion ranges.
 //
-// Fragmented/Merkle assets (a `merkle` field, or no flat `hash`) are reported
-// as informational unsupported: ordinary signed HEIC/AVIF/MP4/MOV carry only
-// the flat hash.
+// Merkle assets (a `merkle` array, with or without a flat `hash`) are verified
+// by verifyBMFFMerkle below as far as the bytes in hand can settle them;
+// ordinary signed HEIC/AVIF/MP4/MOV carry only the flat hash.
 
 // bmffExclusion is one decoded exclusions-map entry.
 type bmffExclusion struct {
@@ -80,24 +81,19 @@ func (v *validator) verifyBMFFHash(a *rawAssertion, uri string) {
 		return
 	}
 
-	top := parseBMFFBoxes(v.ctx, v.data)
-	if len(top) == 0 {
-		v.add(StatusAssertionBMFFHashMalformed, subj, "asset has no parseable BMFF box structure", nil)
-		return
-	}
 	excl, ok := decodeBMFFExclusions(assertion["exclusions"])
 	if !ok {
 		v.add(StatusAssertionBMFFHashMalformed, subj, "BMFF-hash exclusions did not decode", nil)
 		return
 	}
-	ranges, ok := bmffExclusionByteRanges(v.data, top, excl)
+	seg, ok := newBMFFSegment(v.ctx, v.data, excl)
 	if !ok {
-		v.add(StatusAssertionBMFFHashMalformed, subj, "BMFF-hash exclusion out of range", nil)
+		v.add(StatusAssertionBMFFHashMalformed, subj, "asset has no parseable BMFF box structure", nil)
 		return
 	}
 
 	if len(want) > 0 {
-		hashBMFFTopLevel(v.ctx, v.data, top, ranges, h)
+		hashBMFFTopLevel(v.ctx, seg.data, seg.top, seg.ranges, h)
 		if subtle.ConstantTimeCompare(h.Sum(nil), want) != 1 {
 			v.add(StatusAssertionBMFFHashMismatch, subj, "asset BMFF hash does not match", nil)
 			return
@@ -107,7 +103,7 @@ func (v *validator) verifyBMFFHash(a *rawAssertion, uri string) {
 			return
 		}
 	}
-	v.verifyBMFFMerkle(subj, rawMerkle, defaultAlg, top, ranges)
+	v.verifyBMFFMerkle(subj, rawMerkle, defaultAlg, seg)
 }
 
 // decodeBMFFExclusions decodes the assertion's exclusions array. A missing or
@@ -289,8 +285,9 @@ func bmffExclusionApplies(data []byte, b *bmffBox, e bmffExclusion) bool {
 
 // bmffExclusionByteRanges resolves exclusions against the box tree into
 // sorted, merged byte ranges. An exclusion that matches no box contributes
-// nothing (allowed); a subset with invalid arithmetic reports not-ok.
-func bmffExclusionByteRanges(data []byte, roots []*bmffBox, excl []bmffExclusion) ([]byteRange, bool) {
+// nothing (allowed), and a subset past the box end is clamped, so nothing here
+// can fail: the exclusions were validated when they were decoded.
+func bmffExclusionByteRanges(data []byte, roots []*bmffBox, excl []bmffExclusion) []byteRange {
 	var out []byteRange
 	for _, e := range excl {
 		for _, b := range matchBMFFXPath(roots, e.xpath) {
@@ -314,7 +311,7 @@ func bmffExclusionByteRanges(data []byte, roots []*bmffBox, excl []bmffExclusion
 			}
 		}
 	}
-	return mergeRanges(out), true
+	return mergeRanges(out)
 }
 
 // hashBMFFTopLevel computes the v2/v3 BMFF hash: for each top-level box, in
@@ -383,28 +380,33 @@ func writeGaps(data []byte, start, end int, ranges []byteRange, h hash.Hash) {
 // assertion may carry a `merkle` array instead of — or as well as — a flat
 // hash, one merkle-map per 'mdat' box or per track.
 //
-// What a single reader can settle, and what it cannot, is the whole shape of
-// this code. Three arrangements exist:
+// Three arrangements exist, and each is verified as far as the bytes in hand
+// can settle it:
 //
 //   - A NON-FRAGMENTED asset whose 'mdat' is hashed piecewise. The blocks are
 //     in this file, so the tree is rebuilt from them and checked in full.
 //   - A FRAGMENTED asset stored as ONE flat file. `initHash` covers everything
-//     before the first 'moof' and is checked here; each chunk's own hash lives
-//     in that chunk's C2PA 'merkle' box, which this reader does not yet parse.
-//   - A FRAGMENTED asset SPLIT ACROSS FILES (DASH/CMAF .m4s). The chunks are
-//     other files entirely and no amount of care with this one will produce
-//     them.
+//     before the first 'moof'; each chunk — a 'moof' and the boxes up to the
+//     next one — is hashed and checked against the Merkle proof carried by the
+//     C2PA 'merkle' box that precedes it. Both are checked in full.
+//   - A FRAGMENTED asset SPLIT ACROSS FILES (DASH/CMAF .m4s). Read on its own,
+//     the initialization segment proves or disproves `initHash`; the chunks
+//     are other files, and are named as such rather than rolled into a match.
 //
-// So a mismatch is reported whenever this file disproves the assertion, and
-// what could not be checked is named precisely rather than rolled into a
-// success. Verifying a chunk against its Merkle proof needs the chunk, which
-// means an API that takes more than one reader.
+// A mismatch is reported whenever the bytes in hand disprove the assertion,
+// and whatever could not be checked is named precisely.
 
 // maxMerkleLeaves caps how many leaf hashes a merkle-map may induce. A
 // `fixedBlockSize` of 2 over a large 'mdat' would otherwise ask for hundreds of
 // millions of leaves and the tree above them — the assertion is attacker
 // controlled, and the block size is what turns its size into our allocation.
 const maxMerkleLeaves = 1 << 20
+
+// maxMerkleProof caps the proof a merkle box may carry. A proof holds one hash
+// per row climbed, so ⌈log2(maxMerkleLeaves)⌉ = 20 is the most any tree under
+// the leaf cap can need; 64 leaves generous room without letting a box hand the
+// verifier an unbounded list.
+const maxMerkleProof = 64
 
 // mdatBlockPrefix is the number of bytes at the start of an 'mdat' box that a
 // Merkle leaf never covers. Per the spec's exclusion-list requirements this is
@@ -414,10 +416,14 @@ const mdatBlockPrefix = 16
 
 // merkleMap is one decoded entry of the assertion's merkle array.
 type merkleMap struct {
-	count    int
-	alg      string
-	initHash []byte
-	hashes   [][]byte
+	// uniqueID and localID name the tree. The merkle box in each fragment
+	// carries the same pair, which is how a fragment finds its map; -1 when the
+	// assertion omits them.
+	uniqueID, localID int
+	count             int
+	alg               string
+	initHash          []byte
+	hashes            [][]byte
 	// fixedBlockSize / variableBlockSizes describe how a non-fragmented asset's
 	// 'mdat' payload is cut into leaves. At most one may be present.
 	fixedBlockSize     int
@@ -426,10 +432,40 @@ type merkleMap struct {
 	hasVariable        bool
 }
 
+// merkleBox is one decoded C2PA merkle-purpose uuid box (spec §A.5.4.1.3): the
+// bmff-merkle-map naming the tree the fragment belongs to, the fragment's leaf
+// position in it and — unless the assertion already stores the leaf row — the
+// proof from that leaf up to the stored row.
+type merkleBox struct {
+	uniqueID, localID, location int
+	hashes                      [][]byte // the proof; nil when absent
+	box                         *bmffBox
+}
+
+// bmffSegment is one BMFF file — the asset, an initialization segment or a
+// fragment — with its top-level boxes parsed and the assertion's exclusions
+// resolved against THAT file's box tree. Exclusions name boxes by path, not by
+// byte range, so a fragment re-resolves them against its own tree, and the
+// mandatory "/uuid" exclusion then removes the fragment's own merkle box.
+type bmffSegment struct {
+	data   []byte
+	top    []*bmffBox
+	ranges []byteRange
+}
+
+// newBMFFSegment parses data's top-level boxes and resolves excl against them.
+// ok is false when data has no parseable box structure.
+func newBMFFSegment(ctx context.Context, data []byte, excl []bmffExclusion) (bmffSegment, bool) {
+	top := parseBMFFBoxes(ctx, data)
+	if len(top) == 0 {
+		return bmffSegment{}, false
+	}
+	return bmffSegment{data: data, top: top, ranges: bmffExclusionByteRanges(data, top, excl)}, true
+}
+
 // verifyBMFFMerkle checks every merkle-map the assertion carries against what
-// this file actually holds. ranges are the assertion's exclusions already
-// resolved against the box tree.
-func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, top []*bmffBox, ranges []byteRange) {
+// this file actually holds.
+func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, seg bmffSegment) {
 	maps, ok := decodeBMFFMerkle(raw)
 	if !ok {
 		v.add(StatusAssertionBMFFHashMalformed, subj, "BMFF-hash merkle array did not decode", nil)
@@ -444,7 +480,8 @@ func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, to
 	// segment ends.
 	firstMoof := -1
 	var mdats []*bmffBox
-	for _, b := range top {
+	totalLeaves := 0
+	for _, b := range seg.top {
 		if b.typ == "moof" && firstMoof < 0 {
 			firstMoof = b.start
 		}
@@ -452,6 +489,15 @@ func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, to
 			mdats = append(mdats, b)
 		}
 	}
+	for _, m := range maps {
+		totalLeaves += m.count
+	}
+
+	// A flat fragmented file's chunks and merkle boxes are cut once, when the
+	// first map carrying an initHash asks for them.
+	var chunks [][]*bmffBox
+	var boxes []merkleBox
+	fragmentsCut := false
 
 	verified, unverified := 0, ""
 	for i, m := range maps {
@@ -470,29 +516,43 @@ func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, to
 		}
 
 		if len(m.initHash) > 0 {
-			if firstMoof < 0 {
-				// initHash is required absent for non-fragmented media, so this
-				// is most likely a fragmented asset's initialization segment
-				// being read on its own — in which case the hash covers this
-				// whole file and the chunks it binds are elsewhere.
-				unverified = "asset carries a fragmented-BMFF initialization hash but no 'moof' box; " +
-					"the chunks it binds are in other files"
-				continue
+			// The init hash covers everything before the first 'moof' — or, for
+			// an initialization segment read on its own, this whole file.
+			initEnd := len(seg.data)
+			if firstMoof >= 0 {
+				initEnd = firstMoof
 			}
-			// The init hash covers everything before the first 'moof': the
-			// assertion's own exclusions, plus the whole fragmented remainder.
-			initRanges := mergeRanges(append(append([]byteRange(nil), ranges...),
-				byteRange{start: firstMoof, length: len(v.data) - firstMoof}))
-			h, _ := hashByName(algName)
-			hashBMFFTopLevel(v.ctx, v.data, top, initRanges, h)
-			if subtle.ConstantTimeCompare(h.Sum(nil), m.initHash) != 1 {
+			if !initHashMatches(v.ctx, seg, m, algName, initEnd) {
+				if v.merkleCancelled(subj) {
+					return
+				}
 				v.add(StatusAssertionBMFFHashMismatch, subj,
 					"fragmented BMFF initialization segment hash does not match", nil)
 				return
 			}
+			if firstMoof < 0 {
+				// initHash is required absent for non-fragmented media, so a
+				// file with no 'moof' is a fragmented asset's initialization
+				// segment on its own: this file proves the hash, and the chunks
+				// it binds are other files entirely.
+				verified++
+				unverified = fmt.Sprintf("the initialization segment hash matches; "+
+					"the %d fragments it binds are in other files", totalLeaves)
+				continue
+			}
+			if !fragmentsCut {
+				chunks = bmffChunks(seg.top)
+				if boxes, ok = bmffMerkleBoxes(seg.data, seg.top); !ok {
+					v.add(StatusAssertionBMFFHashMalformed, subj,
+						"fragmented BMFF merkle box did not decode", nil)
+					return
+				}
+				fragmentsCut = true
+			}
+			if !v.verifyMerkleChunks(subj, algName, m, seg, chunks, boxes) {
+				return
+			}
 			verified++
-			unverified = "fragmented BMFF chunk hashes need each chunk's own merkle box; " +
-				"only the initialization segment was verified"
 			continue
 		}
 
@@ -510,7 +570,7 @@ func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, to
 			v.add(status, subj, "merkle-map leaf blocks do not describe this 'mdat' box", nil)
 			return
 		}
-		if !v.checkMerkleTree(subj, algName, m, leaves) {
+		if !v.checkMerkleTree(subj, algName, m, leaves, seg.data) {
 			return
 		}
 		verified++
@@ -527,6 +587,124 @@ func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, to
 	default:
 		v.add(StatusAssertionBMFFHashMatch, subj, "asset BMFF merkle hashes match", nil)
 	}
+}
+
+// merkleCancelled reports a cancelled context as the informational it is, so a
+// hash cut short by cancellation is never mistaken for a mismatch. It reports
+// whether it added a status.
+func (v *validator) merkleCancelled(subj string) bool {
+	if v.ctx.Err() == nil {
+		return false
+	}
+	v.add(StatusUnsupported, subj, "merkle BMFF hashing cancelled", nil)
+	return true
+}
+
+// initHashMatches checks a merkle-map's initHash against the initialization
+// segment: the same offset-marker walk as the flat hash (c2pa-rs reaches both
+// through hash_stream_by_alg), over the assertion's exclusions plus everything
+// from fragmentedFrom to the end of the file. In a flat fragmented file that is
+// the first 'moof', so the walk covers 'ftyp' and 'moov' alone; an
+// initialization segment that is a file of its own has nothing to cut off and
+// passes len(seg.data).
+func initHashMatches(ctx context.Context, seg bmffSegment, m merkleMap, algName string, fragmentedFrom int) bool {
+	h, ok := hashByName(algName)
+	if !ok {
+		return false
+	}
+	ranges := seg.ranges
+	if fragmentedFrom < len(seg.data) {
+		ranges = mergeRanges(append(append([]byteRange(nil), seg.ranges...),
+			byteRange{start: fragmentedFrom, length: len(seg.data) - fragmentedFrom}))
+	}
+	hashBMFFTopLevel(ctx, seg.data, seg.top, ranges, h)
+	return subtle.ConstantTimeCompare(h.Sum(nil), m.initHash) == 1
+}
+
+// bmffChunks splits a flat fragmented file into its chunks: each begins at a
+// 'moof' and runs to the box before the next one, or to the end of the file.
+// Everything before the first 'moof' is the initialization segment and belongs
+// to no chunk. nil when there is no 'moof' — or when the file BEGINS with one,
+// which is a bare fragment rather than fragmented content (c2pa-rs
+// split_fragment_boxes draws the same line).
+func bmffChunks(top []*bmffBox) [][]*bmffBox {
+	first := -1
+	for i, b := range top {
+		if b.typ == "moof" {
+			first = i
+			break
+		}
+	}
+	if first <= 0 {
+		return nil
+	}
+	var chunks [][]*bmffBox
+	start := first
+	for i := first + 1; i <= len(top); i++ {
+		if i == len(top) || top[i].typ == "moof" {
+			chunks = append(chunks, top[start:i])
+			start = i
+		}
+	}
+	return chunks
+}
+
+// verifyMerkleChunks checks a flat fragmented file's chunks against one
+// merkle-map. The pairing is positional — the k-th merkle box describes the
+// k-th chunk, as in c2pa-rs — so both counts must equal the map's. A chunk's
+// hash is the same offset-marker walk as the flat hash over just that chunk's
+// boxes, the assertion's exclusions still applied; the merkle box before a
+// 'moof' lies outside the chunk in any case, and under the mandatory "/uuid"
+// exclusion besides. It reports whether to carry on, adding a status itself
+// when it does not.
+func (v *validator) verifyMerkleChunks(subj, algName string, m merkleMap, seg bmffSegment, chunks [][]*bmffBox, boxes []merkleBox) bool {
+	if len(chunks) != m.count {
+		v.add(StatusAssertionBMFFHashMismatch, subj,
+			fmt.Sprintf("asset holds %d fragment chunks but the merkle map binds %d", len(chunks), m.count), nil)
+		return false
+	}
+	if len(boxes) != m.count {
+		v.add(StatusAssertionBMFFHashMismatch, subj,
+			fmt.Sprintf("asset carries %d merkle boxes but the merkle map binds %d chunks", len(boxes), m.count), nil)
+		return false
+	}
+	for k, chunk := range chunks {
+		if v.merkleCancelled(subj) {
+			return false
+		}
+		mb := boxes[k]
+		if m.uniqueID >= 0 && (mb.uniqueID != m.uniqueID || mb.localID != m.localID) {
+			v.add(StatusAssertionBMFFHashMismatch, subj,
+				fmt.Sprintf("fragmented BMFF chunk %d carries a merkle box for uniqueId %d, localId %d, not this map's %d, %d",
+					k, mb.uniqueID, mb.localID, m.uniqueID, m.localID), nil)
+			return false
+		}
+		// §15.12.2: locations run 0, 1, 2… in rendered order, and a flat file
+		// renders in file order. Left unchecked, two chunks could swap places
+		// along with their proofs and still verify.
+		if mb.location != k {
+			v.add(StatusAssertionBMFFHashMismatch, subj,
+				fmt.Sprintf("fragmented BMFF chunk %d carries merkle location %d", k, mb.location), nil)
+			return false
+		}
+		h, _ := hashByName(algName)
+		hashBMFFTopLevel(v.ctx, seg.data, chunk, seg.ranges, h)
+		ok, malformed := merkleProve(algName, m, h.Sum(nil), k, mb.hashes)
+		if malformed {
+			v.add(StatusAssertionBMFFHashMalformed, subj,
+				fmt.Sprintf("fragmented BMFF chunk %d carries a merkle proof that does not fit the tree", k), nil)
+			return false
+		}
+		if !ok {
+			if v.merkleCancelled(subj) {
+				return false
+			}
+			v.add(StatusAssertionBMFFHashMismatch, subj,
+				fmt.Sprintf("fragmented BMFF chunk %d hash does not match its merkle proof", k), nil)
+			return false
+		}
+	}
+	return true
 }
 
 // merkleLeafRanges cuts an 'mdat' box into the leaf blocks a merkle-map
@@ -582,10 +760,10 @@ func merkleLeafRanges(mdat *bmffBox, m merkleMap) ([]byteRange, StatusCode) {
 	return []byteRange{{start: start, length: length}}, ""
 }
 
-// checkMerkleTree hashes each leaf block, rebuilds the tree above them and
-// compares it with the row the assertion stored. It reports whether to carry
-// on, adding a status itself when it does not.
-func (v *validator) checkMerkleTree(subj, algName string, m merkleMap, leaves []byteRange) bool {
+// checkMerkleTree hashes each leaf block of data, rebuilds the tree above them
+// and compares it with the row the assertion stored. It reports whether to
+// carry on, adding a status itself when it does not.
+func (v *validator) checkMerkleTree(subj, algName string, m merkleMap, leaves []byteRange, data []byte) bool {
 	if len(leaves) != m.count {
 		v.add(StatusAssertionBMFFHashMalformed, subj,
 			"merkle-map count does not match the leaf blocks it declares", nil)
@@ -593,12 +771,11 @@ func (v *validator) checkMerkleTree(subj, algName string, m merkleMap, leaves []
 	}
 	digests := make([][]byte, 0, len(leaves))
 	for _, r := range leaves {
-		if v.ctx.Err() != nil {
-			v.add(StatusUnsupported, subj, "merkle BMFF hashing cancelled", nil)
+		if v.merkleCancelled(subj) {
 			return false
 		}
 		h, _ := hashByName(algName)
-		h.Write(v.data[r.start : r.start+r.length])
+		h.Write(data[r.start : r.start+r.length])
 		digests = append(digests, h.Sum(nil))
 	}
 	// hashes is one row of the tree — leaf-most, root, or between — and which
@@ -646,6 +823,129 @@ func merkleLayers(algName string, leaves [][]byte) [][][]byte {
 	return layers
 }
 
+// merkleLayout returns the width of every row of a C2PA Merkle tree over count
+// leaves, leaf-most first — the shape merkleLayers builds, without the hashes.
+// Each row pairs the one below and carries an unpaired last node up as one, so
+// a row of n has ⌈n/2⌉ above it. nil for a count below one.
+func merkleLayout(count int) []int {
+	if count < 1 {
+		return nil
+	}
+	widths := []int{count}
+	for n := count; n > 1; {
+		n -= n / 2 // ⌈n/2⌉ without the overflow n+1 could bring
+		widths = append(widths, n)
+	}
+	return widths
+}
+
+// merkleProve checks one leaf against the row the assertion stores, using the
+// proof the leaf's merkle box carries: the sibling hash at each row from the
+// leaf up to the stored one. This is c2pa-rs's check_merkle_tree. Climbing
+// from location, a node at an odd index is a right child, so its sibling is
+// hashed first; at an even index it is a left child; the last node of an odd
+// row has no sibling and is carried up unchanged, consuming no proof element —
+// the same shape merkleLayers builds. ok reports whether the stored row is
+// reached with the right hash; a location outside the tree is simply not ok.
+// malformed reports a proof that cannot fit the tree at all — too short to
+// climb to the stored row, too long once it is reached, or a stored row that no
+// tree over count leaves has — which is a defect in the assertion or the box
+// rather than evidence about the bytes. An algorithm hashByName refuses is the
+// caller's to report; it is refused here as malformed only so that nothing can
+// panic.
+func merkleProve(algName string, m merkleMap, leaf []byte, location int, proof [][]byte) (ok, malformed bool) {
+	if location < 0 || location >= m.count {
+		return false, false
+	}
+	if _, ok := hashByName(algName); !ok {
+		return false, true
+	}
+	index, node, used := location, leaf, 0
+	for _, width := range merkleLayout(m.count) {
+		if width == len(m.hashes) {
+			if used != len(proof) {
+				return false, true // the proof goes on past the stored row
+			}
+			return subtle.ConstantTimeCompare(m.hashes[index], node) == 1, false
+		}
+		if sibling := index ^ 1; sibling < width {
+			if used == len(proof) {
+				return false, true // needs a sibling the proof does not carry
+			}
+			h, _ := hashByName(algName)
+			if index&1 == 1 {
+				h.Write(proof[used])
+				h.Write(node)
+			} else {
+				h.Write(node)
+				h.Write(proof[used])
+			}
+			node = h.Sum(nil)
+			used++
+		}
+		index /= 2
+	}
+	return false, true // no row of this tree has len(m.hashes) nodes
+}
+
+// bmffMerkleBoxes decodes every top-level C2PA merkle box in file order. ok is
+// false when one of them does not decode or there are more than the leaf cap
+// allows: the file then says something the verifier cannot read, which is
+// malformed rather than a mismatch.
+func bmffMerkleBoxes(data []byte, top []*bmffBox) ([]merkleBox, bool) {
+	var out []merkleBox
+	for _, b := range top {
+		payload := c2paMerklePayload(data, b)
+		if payload == nil {
+			continue
+		}
+		mb, ok := decodeMerkleBox(payload)
+		if !ok || len(out) >= maxMerkleLeaves {
+			return nil, false
+		}
+		mb.box = b
+		out = append(out, mb)
+	}
+	return out, true
+}
+
+// decodeMerkleBox decodes a merkle box's CBOR. The box is padded to a fixed
+// size with zeros (§A.5.4.1.3), so only the first CBOR item is read and what
+// follows it is ignored. uniqueId, localId and location are required and
+// non-negative; hashes is optional but, when present, holds 1..maxMerkleProof
+// non-empty byte strings.
+func decodeMerkleBox(payload []byte) (merkleBox, bool) {
+	var em map[string]any
+	if _, err := decMode.UnmarshalFirst(payload, &em); err != nil {
+		return merkleBox{}, false
+	}
+	var mb merkleBox
+	var ok bool
+	if mb.uniqueID, ok = toInt(em["uniqueId"]); !ok || mb.uniqueID < 0 {
+		return merkleBox{}, false
+	}
+	if mb.localID, ok = toInt(em["localId"]); !ok || mb.localID < 0 {
+		return merkleBox{}, false
+	}
+	if mb.location, ok = toInt(em["location"]); !ok || mb.location < 0 {
+		return merkleBox{}, false
+	}
+	if raw, present := em["hashes"]; present && raw != nil {
+		list, ok := raw.([]any)
+		if !ok || len(list) == 0 || len(list) > maxMerkleProof {
+			return merkleBox{}, false
+		}
+		for _, hv := range list {
+			b, ok := hv.([]byte)
+			if !ok || len(b) == 0 {
+				return merkleBox{}, false
+			}
+			mb.hashes = append(mb.hashes, b)
+		}
+	}
+	return mb, true
+}
+
 // decodeBMFFMerkle decodes the assertion's merkle array. Structural problems
 // return ok=false; the caller reports them as malformed, since nothing was
 // compared.
@@ -660,9 +960,19 @@ func decodeBMFFMerkle(raw any) ([]merkleMap, bool) {
 		if !ok {
 			return nil, false
 		}
-		var m merkleMap
+		m := merkleMap{uniqueID: -1, localID: -1}
 		if m.count, ok = toInt(em["count"]); !ok || m.count < 1 {
 			return nil, false
+		}
+		if raw, present := em["uniqueId"]; present && raw != nil {
+			if m.uniqueID, ok = toInt(raw); !ok || m.uniqueID < 0 {
+				return nil, false
+			}
+		}
+		if raw, present := em["localId"]; present && raw != nil {
+			if m.localID, ok = toInt(raw); !ok || m.localID < 0 {
+				return nil, false
+			}
 		}
 		hashes, ok := em["hashes"].([]any)
 		if !ok || len(hashes) == 0 {

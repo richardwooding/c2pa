@@ -33,6 +33,11 @@ jobs:
           - FuzzVerifyTimestamp
           - FuzzBMFFParse
           - FuzzBMFFHash
+          - FuzzBMFFMerkle
+          - FuzzMerkleLeafRanges
+          - FuzzBMFFFragment
+          - FuzzMerkleBoxDecode
+          - FuzzMerkleProve
           - FuzzPDFParse
           - FuzzRIFFParse
           - FuzzTIFFParse

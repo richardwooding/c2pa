@@ -124,12 +124,12 @@ What it verifies:
   verified for JPEG segments, PNG chunks and GIF blocks — the containers whose box naming C2PA
   defines. A box hash may only exclude the manifest store and asset metadata; an exclusion reaching
   anywhere else is a mismatch, not a permitted edit.
-- **Merkle BMFF** — a `c2pa.hash.bmff.v3` `merkle` array is verified as far as a single reader can
-  settle it. A non-fragmented asset whose `mdat` is hashed piecewise is checked in full: the leaves
-  are cut from the box, the tree rebuilt, and the row the assertion stores compared against it. For a
-  fragmented asset the initialization hash is checked, and what needs the other chunk files is named
-  rather than folded into a success — a wrong initialization hash is still a mismatch, since this
-  file disproves it.
+- **Merkle BMFF** — a `c2pa.hash.bmff.v3` `merkle` array is verified in full wherever the bytes are
+  in hand. A non-fragmented asset whose `mdat` is hashed piecewise has its leaves cut from the box and
+  the tree rebuilt; a fragmented asset in one flat file has its initialization hash checked and every
+  chunk checked against the Merkle proof in the chunk's own `merkle` box. An initialization segment
+  read on its own proves or disproves its hash, and the fragments it binds — other files — are named
+  rather than folded into a success.
 - **RFC 3161 timestamp** — full CMS signature verification, the TSA chain, and that the timestamp
   covers this signature.
 - **Revocation** — OCSP/CRL, opt-in (off by default), soft-fail.
