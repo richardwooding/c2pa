@@ -325,8 +325,7 @@ func (s *Signer) Sign(ctx context.Context, container Container, in io.Reader, ou
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	emb, ok := embedderFor(container)
-	if !ok {
+	if _, ok := embedderFor(container); !ok {
 		return fmt.Errorf("%w: %s", ErrUnsupportedContainer, string(container))
 	}
 	if err := validateManifest(m); err != nil {
@@ -342,7 +341,11 @@ func (s *Signer) Sign(ctx context.Context, container Container, in io.Reader, ou
 	if len(asset) == 0 {
 		return fmt.Errorf("%w: empty input", ErrMalformedAsset)
 	}
-	final, err := s.sign(ctx, container, emb, asset, m)
+	var hb hardBinding = dataHashBinding{container: container, alg: s.cfg.hashAlg}
+	if container == BMFF {
+		hb = bmffFlatBinding{alg: s.cfg.hashAlg}
+	}
+	final, err := s.sign(ctx, container, asset, m, hb)
 	if err != nil {
 		return err
 	}
@@ -350,6 +353,80 @@ func (s *Signer) Sign(ctx context.Context, container Container, in io.Reader, ou
 		return fmt.Errorf("c2pa: writing signed asset: %w", err)
 	}
 	return nil
+}
+
+// hardBinding is what differs between hard bindings inside the one signing
+// pipeline: the assertion written into the store, the digest over the
+// converged layout, the ranges the drift check ignores, and how the asset as
+// found (for the parentOf ingredient) and the output (the self-check) are
+// validated. Everything else in sign — labels, the layout fixpoint, the single
+// signature, the padded envelope, prior-manifest chaining — is the same for
+// every binding, which is why it is one function.
+type hardBinding interface {
+	label() string
+	matchCode() StatusCode
+	payload(excl []byteRange, digest []byte) ([]byte, error)
+	digest(ctx context.Context, layout []byte, excl []byteRange) ([]byte, error)
+	compareRanges(ctx context.Context, layout []byte, excl []byteRange) ([]byteRange, error)
+	validatePrior(ctx context.Context, asset []byte) ValidationResult
+	validateOutput(ctx context.Context, final []byte, opts []ValidateOption) ValidationResult
+}
+
+// dataHashBinding is c2pa.hash.data: the file minus the store's byte ranges.
+type dataHashBinding struct {
+	container Container
+	alg       string
+}
+
+func (dataHashBinding) label() string         { return "c2pa.hash.data" }
+func (dataHashBinding) matchCode() StatusCode { return StatusAssertionDataHashMatch }
+func (b dataHashBinding) payload(excl []byteRange, digest []byte) ([]byte, error) {
+	return dataHashAssertion(b.alg, excl, digest)
+}
+func (b dataHashBinding) digest(_ context.Context, layout []byte, excl []byteRange) ([]byte, error) {
+	h, ok := hashByName(b.alg)
+	if !ok {
+		return nil, fmt.Errorf("unsupported hash algorithm %q", b.alg)
+	}
+	hashWithExclusions(layout, h, excl)
+	return h.Sum(nil), nil
+}
+func (dataHashBinding) compareRanges(_ context.Context, _ []byte, excl []byteRange) ([]byteRange, error) {
+	return excl, nil
+}
+func (b dataHashBinding) validatePrior(ctx context.Context, asset []byte) ValidationResult {
+	return Validate(ctx, b.container, bytes.NewReader(asset), WithOnlineRevocation(false))
+}
+func (b dataHashBinding) validateOutput(ctx context.Context, final []byte, opts []ValidateOption) ValidationResult {
+	return Validate(ctx, b.container, bytes.NewReader(final), opts...)
+}
+
+// bmffFlatBinding is c2pa.hash.bmff.v3 over one whole file: the offset-marker
+// walk with the standard exclusions. It has no byte ranges, so the layout
+// converges on the output's length, and the store's own box is excluded by the
+// walk rather than by a range — which is what the drift check must ignore too.
+type bmffFlatBinding struct{ alg string }
+
+func (bmffFlatBinding) label() string         { return "c2pa.hash.bmff.v3" }
+func (bmffFlatBinding) matchCode() StatusCode { return StatusAssertionBMFFHashMatch }
+func (b bmffFlatBinding) payload(_ []byteRange, digest []byte) ([]byte, error) {
+	return bmffHashAssertion(b.alg, digest)
+}
+func (b bmffFlatBinding) digest(ctx context.Context, layout []byte, _ []byteRange) ([]byte, error) {
+	return bmffHashDigest(ctx, b.alg, layout)
+}
+func (bmffFlatBinding) compareRanges(ctx context.Context, layout []byte, _ []byteRange) ([]byteRange, error) {
+	seg, err := bmffStandardSegment(ctx, layout)
+	if err != nil {
+		return nil, err
+	}
+	return seg.ranges, nil
+}
+func (bmffFlatBinding) validatePrior(ctx context.Context, asset []byte) ValidationResult {
+	return Validate(ctx, BMFF, bytes.NewReader(asset), WithOnlineRevocation(false))
+}
+func (bmffFlatBinding) validateOutput(ctx context.Context, final []byte, opts []ValidateOption) ValidationResult {
+	return Validate(ctx, BMFF, bytes.NewReader(final), opts...)
 }
 
 // validateManifest is what Sign refuses before it reads a byte of the asset.
@@ -399,7 +476,7 @@ type priorManifest struct {
 type priorStore struct {
 	manifests []*priorManifest
 	active    *priorManifest
-	result    ValidationResult // Validate's verdict on the asset as found
+	result    ValidationResult // the verdict on the asset as found, set by sign through the binding
 }
 
 func (p *priorStore) has(label string) bool {
@@ -456,11 +533,7 @@ func (s *Signer) priorManifests(ctx context.Context, container Container, asset 
 		}
 		labels[m.label] = true
 	}
-	return &priorStore{
-		manifests: found,
-		active:    found[len(found)-1],
-		result:    Validate(ctx, container, bytes.NewReader(asset), WithOnlineRevocation(false)),
-	}, nil
+	return &priorStore{manifests: found, active: found[len(found)-1]}, nil
 }
 
 // namedBox is an assertion superbox and the label its claim entry uses.
@@ -484,10 +557,16 @@ type builtStore struct {
 // function of the asset and the store's length alone — then (c) sign once, pad
 // the envelope to the reserved size, embed, and check byte-for-byte that
 // nothing outside the exclusions moved before validating the result.
-func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asset []byte, m Manifest) ([]byte, error) {
+func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m Manifest, hb hardBinding) ([]byte, error) {
 	prior, err := s.priorManifests(ctx, container, asset)
 	if err != nil {
 		return nil, err
+	}
+	if prior != nil {
+		// The ingredient's validationResults are the verdict on the asset as
+		// found — through the binding, since a fragmented initialization
+		// segment is judged by ValidateFragmented, not Validate.
+		prior.result = hb.validatePrior(ctx, asset)
 	}
 	if prior != nil && m.Actions[0].Action == ActionCreated {
 		return nil, fmt.Errorf("%w: asset already carries a manifest store; the first action must be %s", ErrManifestInvalid, ActionOpened)
@@ -550,22 +629,11 @@ func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asse
 			priorBoxes = append(priorBoxes, pm.full)
 		}
 	}
-	// BMFF binds with c2pa.hash.bmff.v3 — an offset-marker walk with the
-	// standard exclusions, no byte ranges — so its layout converges on the
-	// output's length rather than on exclusion offsets.
-	bmff := container == BMFF
-	bindingLabel := "c2pa.hash.data"
-	if bmff {
-		bindingLabel = "c2pa.hash.bmff.v3"
-	}
+	// The binding decides the assertion; a BMFF binding has no byte ranges, so
+	// its layout converges on the output's length rather than on offsets.
+	bindingLabel := hb.label()
 	build := func(excl []byteRange, digest, envelope []byte) (builtStore, error) {
-		var payload []byte
-		var err error
-		if bmff {
-			payload, err = bmffHashAssertion(alg, digest)
-		} else {
-			payload, err = dataHashAssertion(alg, excl, digest)
-		}
+		payload, err := hb.payload(excl, digest)
 		if err != nil {
 			return builtStore{}, err
 		}
@@ -630,16 +698,10 @@ func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asse
 		return nil, fmt.Errorf("%w: exclusion offsets did not converge", ErrMalformedAsset)
 	}
 
-	// (b) the digest over the converged layout: minus the exclusions, or the
-	// BMFF offset-marker walk.
-	var digest []byte
-	if bmff {
-		if digest, err = bmffHashDigest(ctx, alg, layout); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrMalformedAsset, err)
-		}
-	} else {
-		hashWithExclusions(layout, h, excl)
-		digest = h.Sum(nil)
+	// (b) the digest over the converged layout.
+	digest, err := hb.digest(ctx, layout, excl)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformedAsset, err)
 	}
 
 	// (c) sign once, pad to the reserve, embed, and prove nothing else moved.
@@ -684,15 +746,10 @@ func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asse
 		return nil, embedError(err)
 	}
 	// Outside the store, the signed file must be the placeholder layout to the
-	// byte. For BMFF the store's own box has no byte-range exclusion, so the
-	// ranges the hash excludes — the C2PA box among them — are the comparison's.
-	compare := excl
-	if bmff {
-		seg, err := bmffStandardSegment(ctx, layout)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrMalformedAsset, err)
-		}
-		compare = seg.ranges
+	// byte; the binding says which ranges the comparison ignores.
+	compare, err := hb.compareRanges(ctx, layout, excl)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformedAsset, err)
 	}
 	if !sameRanges(finalExcl, excl) || !sameOutsideExclusions(final, layout, compare) {
 		return nil, errors.New("c2pa: internal: layout drifted between the placeholder and the signed store")
@@ -710,11 +767,8 @@ func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asse
 		}
 		checkOpts = append(checkOpts, WithTimestampTrust(tsaPool))
 	}
-	res := Validate(ctx, container, bytes.NewReader(final), checkOpts...)
-	match := StatusAssertionDataHashMatch
-	if bmff {
-		match = StatusAssertionBMFFHashMatch
-	}
+	res := hb.validateOutput(ctx, final, checkOpts)
+	match := hb.matchCode()
 	if !res.Valid || !res.Has(match) || (timestamped && !res.Has(StatusTimeStampValidated)) {
 		reason := "hard binding did not verify"
 		if f := res.FirstFailure(); f != nil {
