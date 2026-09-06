@@ -18,7 +18,7 @@ import (
 
 // errFragmented marks a BMFF asset whose binding would be a Merkle tree rather
 // than a flat hash: a fragmented file, or one already carrying merkle boxes.
-var errFragmented = errors.New("fragmented BMFF is not signable in this release")
+var errFragmented = errors.New("the asset is fragmented; an initialization segment and its fragments are signed with SignFragmented")
 
 // bmffEmbedder writes the C2PA uuid box for a non-fragmented BMFF asset.
 type bmffEmbedder struct{}

@@ -45,6 +45,7 @@ jobs:
           - FuzzEmbedStore
           - FuzzBMFFEmbed
           - FuzzTSAResponse
+          - FuzzSignFragmented
           - FuzzPDFParse
           - FuzzRIFFParse
           - FuzzTIFFParse

@@ -298,38 +298,21 @@ func TestBMFFMerkleLeafCountIsCapped(t *testing.T) {
 
 // --- fragmented builders ------------------------------------------------------
 
-// merkleBoxSpec is what a test wants written into one C2PA merkle box.
-type merkleBoxSpec struct {
-	uniqueID, localID, location int
-	hashes                      [][]byte // the proof; nil when the leaf row is stored
-}
-
 // testMerkleBoxPayload is the fixed payload size every merkle box a test writes
 // is padded to, as §A.5.4.1.3 pads real ones. Fixing it keeps box offsets — and
 // so every chunk hash — the same whatever a test writes into a box: a mutated
 // box changes only what it says, never where the chunk after it lies.
 const testMerkleBoxPayload = 256
 
-// merkleBoxBytes encodes spec as a merkle-purpose C2PA uuid box padded to
-// testMerkleBoxPayload.
-func merkleBoxBytes(t testing.TB, spec merkleBoxSpec) []byte {
+// testMerkleBox is the production merkle box writer padded to
+// testMerkleBoxPayload — the corpus writes real boxes, as it writes real JUMBF.
+func testMerkleBox(t testing.TB, spec merkleBoxSpec) []byte {
 	t.Helper()
-	m := map[string]any{"uniqueId": spec.uniqueID, "localId": spec.localID, "location": spec.location}
-	if spec.hashes != nil {
-		list := make([]any, len(spec.hashes))
-		for i, h := range spec.hashes {
-			list[i] = h
-		}
-		m["hashes"] = list
-	}
-	raw, err := cbor.Marshal(m)
+	box, err := merkleBoxBytes(spec, merkleBoxHeader+testMerkleBoxPayload)
 	if err != nil {
-		t.Fatalf("marshal merkle box: %v", err)
+		t.Fatalf("merkle box: %v", err)
 	}
-	if len(raw) > testMerkleBoxPayload {
-		t.Fatalf("merkle box CBOR is %d bytes, over the %d the test layout allows", len(raw), testMerkleBoxPayload)
-	}
-	return synthC2PABox("merkle", raw, testMerkleBoxPayload-len(raw))
+	return box
 }
 
 // standardBMFFExclusions are the exclusions a real fragmented assertion
@@ -360,22 +343,16 @@ func merkleRow(t testing.TB, leaves [][]byte, n int) [][]byte {
 }
 
 // merkleProofFor returns the proof for the leaf at location up to the row of
-// storedRowLen nodes: the sibling at each row below it, or nothing where the
-// node is an unpaired last one. It is derived from merkleLayers, so the tests'
-// proofs and the verifier's tree share one definition of the shape. nil when
-// the leaf row itself is stored.
+// storedRowLen nodes, through the production merkleProof, so the tests' proofs
+// and the verifier's tree share one definition of the shape. nil when the leaf
+// row itself is stored.
 func merkleProofFor(t testing.TB, leaves [][]byte, location, storedRowLen int) [][]byte {
 	t.Helper()
-	var proof [][]byte
-	index := location
-	for _, layer := range merkleLayers("sha256", leaves) {
+	layers := merkleLayers("sha256", leaves)
+	for row, layer := range layers {
 		if len(layer) == storedRowLen {
-			return proof
+			return merkleProof(layers, location, row)
 		}
-		if sib := index ^ 1; sib < len(layer) {
-			proof = append(proof, layer[sib])
-		}
-		index /= 2
 	}
 	t.Fatalf("a %d-leaf tree has no row of %d nodes", len(leaves), storedRowLen)
 	return nil
@@ -440,7 +417,7 @@ func fragmentedFlatAsset(t testing.TB, n, storedRowLen, uniqueID, localID int, m
 	// Lay the file out with placeholder boxes to learn where every chunk lies.
 	placeholder := make([][]byte, n)
 	for k := range placeholder {
-		placeholder[k] = merkleBoxBytes(t, merkleBoxSpec{uniqueID: uniqueID, localID: localID, location: k})
+		placeholder[k] = testMerkleBox(t, merkleBoxSpec{uniqueID: uniqueID, localID: localID, location: k})
 	}
 	layout := assemble(placeholder)
 	top := parseBMFFBoxes(ctx, layout)
@@ -469,7 +446,7 @@ func fragmentedFlatAsset(t testing.TB, n, storedRowLen, uniqueID, localID int, m
 		if mutate != nil {
 			mutate(k, &spec)
 		}
-		boxes[k] = merkleBoxBytes(t, spec)
+		boxes[k] = testMerkleBox(t, spec)
 	}
 	ff.asset = assemble(boxes)
 	if len(ff.asset) != len(layout) {
@@ -534,7 +511,7 @@ func fragmentedFiles(t testing.TB, n, storedRowLen, uniqueID, localID int, o spl
 		return h.Sum(nil)
 	}
 	for k := range sf.leaves {
-		sf.leaves[k] = hashFragment(fragment(k, merkleBoxBytes(t, merkleBoxSpec{uniqueID: uniqueID, localID: localID, location: k})))
+		sf.leaves[k] = hashFragment(fragment(k, testMerkleBox(t, merkleBoxSpec{uniqueID: uniqueID, localID: localID, location: k})))
 	}
 	for k := range sf.frags {
 		spec := merkleBoxSpec{uniqueID: uniqueID, localID: localID, location: k,
@@ -542,7 +519,7 @@ func fragmentedFiles(t testing.TB, n, storedRowLen, uniqueID, localID int, o spl
 		if o.mutate != nil {
 			o.mutate(k, &spec)
 		}
-		sf.frags[k] = fragment(k, merkleBoxBytes(t, spec))
+		sf.frags[k] = fragment(k, testMerkleBox(t, spec))
 		if got := hashFragment(sf.frags[k]); !bytes.Equal(got, sf.leaves[k]) {
 			t.Fatalf("fragment %d hash moved when its merkle box was filled in", k)
 		}
@@ -640,7 +617,7 @@ func TestBMFFMerkleFragmentedFlatCardinality(t *testing.T) {
 		// Appended after the last 'mdat' it lies inside the last chunk, where
 		// the /uuid exclusion keeps it out of the hash — only the count changes.
 		asset := append(append([]byte(nil), ff.asset...),
-			merkleBoxBytes(t, merkleBoxSpec{uniqueID: 1, localID: 1, location: 3})...)
+			testMerkleBox(t, merkleBoxSpec{uniqueID: 1, localID: 1, location: 3})...)
 		expectMismatchSaying(t, runMerkle(t, asset, ff.assertion), "4 merkle boxes")
 	})
 }

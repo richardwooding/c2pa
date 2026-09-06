@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -387,5 +388,227 @@ func TestSignInteropMessageSigner(t *testing.T) {
 	assertC2patoolValid(t, runC2patoolJSON(t, path), "assertion.dataHash.match")
 	if trusted := runC2patoolJSON(t, path, "trust", "--trust_anchors", writeRootPEM(t, sc)); trusted.ValidationState != "Trusted" {
 		t.Errorf("with our root as an anchor: %q, want Trusted", trusted.ValidationState)
+	}
+}
+
+// --- fragmented BMFF ---------------------------------------------------------
+
+// runC2patoolFragment runs `c2patool [extra…] <init> fragment --fragments_glob
+// <glob>` and parses the report. c2patool prints a "Verifying manifest:" line
+// before the JSON, and on ANY failing status — a tampered fragment, an
+// untrusted signer — prints no JSON at all and exits 0 with the status on
+// stderr; so a nil report plus stderr is the failure shape, not an error.
+func runC2patoolFragment(t *testing.T, initPath, glob string, extra ...string) (*c2patoolReport, string) {
+	t.Helper()
+	args := append(append([]string{}, extra...), initPath, "fragment", "--fragments_glob", glob)
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command("c2patool", args...)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	_ = cmd.Run()
+	out := stdout.String()
+	i := strings.Index(out, "{")
+	if i < 0 {
+		return nil, stderr.String() + out
+	}
+	var rep c2patoolReport
+	if err := json.Unmarshal([]byte(out[i:]), &rep); err != nil {
+		t.Fatalf("c2patool fragment output did not parse: %v\nstdout: %s\nstderr: %s", err, out, stderr.String())
+	}
+	return &rep, stderr.String()
+}
+
+// writeFragmentedSet writes init + frags under dir/bunny with the fixture's
+// names, as c2patool's basename glob expects, and returns the init path.
+func writeFragmentedSet(t *testing.T, dir string, init []byte, frags [][]byte, names []string) string {
+	t.Helper()
+	sub := filepath.Join(dir, "bunny")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initPath := filepath.Join(sub, "BigBuckBunny_2s_init.mp4")
+	if err := os.WriteFile(initPath, init, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i, f := range frags {
+		if err := os.WriteFile(filepath.Join(sub, names[i]), f, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return initPath
+}
+
+// trustSettings writes the c2patool settings TOML that anchors our test root.
+func trustSettings(t *testing.T, sc signingChain) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "settings.toml")
+	if err := os.WriteFile(p, []byte("[trust]\ntrust_anchors = \"\"\"\n"+string(sc.rootPEM)+"\"\"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// readFragmentedSet reads a signed set back from dir/bunny.
+func readFragmentedSet(t *testing.T, dir string, names []string) ([]byte, [][]byte) {
+	t.Helper()
+	init, err := os.ReadFile(filepath.Join(dir, "bunny", "BigBuckBunny_2s_init.mp4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frags := make([][]byte, len(names))
+	for i, n := range names {
+		if frags[i], err = os.ReadFile(filepath.Join(dir, "bunny", n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return init, frags
+}
+
+// TestSignInteropFragmented: our fragmented set is what c2patool's fragment
+// verifier accepts — Trusted with our root anchored, assertion.bmffHash.match
+// — and a tampered fragment is what it refuses.
+func TestSignInteropFragmented(t *testing.T) {
+	requireC2patool(t)
+	sc := newSigningChain(t)
+	s, err := NewSigner(sc.key, sc.chain, WithClaimGenerator("c2pa-go-interop", "0.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	init, frags, names := bunnySet(t)
+	sInit, sFrags := signFragmentedSet(t, s, init, frags, createdManifest("Big Buck Bunny"))
+	dir := t.TempDir()
+	initPath := writeFragmentedSet(t, dir, sInit, sFrags, names)
+	settings := trustSettings(t, sc)
+
+	rep, stderr := runC2patoolFragment(t, initPath, "BigBuckBunny_2s*.m4s", "--settings", settings)
+	if rep == nil {
+		t.Fatalf("c2patool refused our fragmented set:\n%s", stderr)
+	}
+	if rep.ValidationState != "Trusted" {
+		t.Errorf("validation_state = %q, want Trusted; failures %v", rep.ValidationState, rep.ValidationResults.ActiveManifest.Failure)
+	}
+	am := rep.ValidationResults.ActiveManifest
+	if am == nil || !am.codes(am.Success)["assertion.bmffHash.match"] || !am.codes(am.Success)["claimSignature.validated"] {
+		t.Errorf("success codes: %v", am)
+	}
+	if rep.Manifests[rep.ActiveManifest].Title != "Big Buck Bunny" {
+		t.Errorf("title: %q", rep.Manifests[rep.ActiveManifest].Title)
+	}
+	// One fragment only: a one-leaf tree stores its leaf and the box has no proof.
+	one := t.TempDir()
+	oInit, oFrags := signFragmentedSet(t, s, init, frags[:1], createdManifest("one"))
+	rep, stderr = runC2patoolFragment(t, writeFragmentedSet(t, one, oInit, oFrags, names[:1]), names[0], "--settings", settings)
+	if rep == nil || rep.ValidationState != "Trusted" {
+		t.Errorf("single-fragment set: %v\n%s", rep, stderr)
+	}
+	// Tamper one fragment on disk: no JSON, the status on stderr.
+	bad := append([]byte(nil), sFrags[3]...)
+	bad[len(bad)-1] ^= 0xFF
+	if err := os.WriteFile(filepath.Join(dir, "bunny", names[3]), bad, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, stderr = runC2patoolFragment(t, initPath, "BigBuckBunny_2s*.m4s", "--settings", settings)
+	if rep != nil || !strings.Contains(stderr, "Error validating segments") || !strings.Contains(stderr, "bmffHash") {
+		t.Errorf("tampered fragment: report %v\nstderr: %s", rep, stderr)
+	}
+}
+
+// c2patoolSignFragmented has c2patool sign the bunny set with our test chain
+// and returns the signed set. c2patool writes to OUT/<init's dir name>/ and
+// refuses to overwrite, so the output dir is fresh.
+func c2patoolSignFragmented(t *testing.T, sc signingChain, init []byte, frags [][]byte, names []string, title string) ([]byte, [][]byte) {
+	t.Helper()
+	work := t.TempDir()
+	initPath := writeFragmentedSet(t, work, init, frags, names)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(sc.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certs := string(pemCert(t, sc.chain[0])) + string(pemCert(t, sc.chain[1]))
+	if err := os.WriteFile(filepath.Join(work, "es256_private.key"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "es256_certs.pem"), []byte(certs), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"alg":"es256","private_key":"es256_private.key","sign_cert":"es256_certs.pem",` +
+		`"claim_generator_info":[{"name":"c2patool-interop","version":"0.1"}],"title":` + strconv.Quote(title) + `,` +
+		`"assertions":[{"label":"c2pa.actions","data":{"actions":[{"action":"c2pa.created","digitalSourceType":"` + DigitalSourceTypeDigitalCapture + `"}]}}]}`
+	manifestPath := filepath.Join(work, "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "signed")
+	cmd := exec.Command("c2patool", "--settings", trustSettings(t, sc), "-m", manifestPath, "-o", out, initPath, "fragment", "--fragments_glob", "BigBuckBunny_2s*.m4s")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("c2patool fragment signing: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	return readFragmentedSet(t, out, names)
+}
+
+// TestSignInteropFragmentedReverse: what c2patool signs, ValidateFragmented
+// accepts in full — and Validate on the init alone points at ValidateFragmented.
+func TestSignInteropFragmentedReverse(t *testing.T) {
+	requireC2patool(t)
+	sc := newSigningChain(t)
+	init, frags, names := bunnySet(t)
+	cInit, cFrags := c2patoolSignFragmented(t, sc, init, frags, names, "signed by c2patool")
+	res := ValidateFragmented(context.Background(), bytes.NewReader(cInit), readersOf(cFrags...), WithSigningTrust(sc.roots), WithOnlineRevocation(false))
+	expectFragmentedMatch(t, res, 11)
+	if res.Info.Title != "signed by c2patool" || res.VerifiedSigner() == "" {
+		t.Errorf("title %q signer %q", res.Info.Title, res.VerifiedSigner())
+	}
+	alone := Validate(context.Background(), BMFF, bytes.NewReader(cInit), WithSigningTrust(sc.roots), WithOnlineRevocation(false))
+	if alone.Has(StatusAssertionBMFFHashMatch) || !strings.Contains(statusExplanation(alone, StatusUnsupported), "ValidateFragmented") {
+		t.Errorf("the init alone: %v", codes(alone))
+	}
+	// c2pa-rs leaves sidx.first_offset stale, pointing at its merkle box.
+	f := cFrags[0]
+	first, end := sidxFirstOffset(f, topBox(f, "sidx"))
+	if uuid := topBox(f, "uuid"); end+int(first) != uuid.start {
+		t.Logf("c2patool output: sidx points at %d, merkle box at %d, moof at %d", end+int(first), uuid.start, topBox(f, "moof").start)
+	}
+}
+
+// TestSignInteropFragmentedResign: a c2patool-signed set re-signed here chains
+// c2patool's manifest as the parentOf ingredient, replaces its merkle boxes,
+// repairs its stale sidx, and is accepted by both verifiers.
+func TestSignInteropFragmentedResign(t *testing.T) {
+	requireC2patool(t)
+	sc := newSigningChain(t)
+	s, err := NewSigner(sc.key, sc.chain, WithClaimGenerator("c2pa-go-interop", "0.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	init, frags, names := bunnySet(t)
+	cInit, cFrags := c2patoolSignFragmented(t, sc, init, frags, names, "first, by c2patool")
+	rInit, rFrags := signFragmentedSet(t, s, cInit, cFrags, openedManifest("second, by c2pa"))
+
+	res := ValidateFragmented(context.Background(), bytes.NewReader(rInit), readersOf(rFrags...), WithSigningTrust(sc.roots), WithOnlineRevocation(false))
+	expectFragmentedMatch(t, res, 11)
+	if !res.Has(StatusIngredientManifestValidated) {
+		t.Errorf("prior manifest not chained: %v", codes(res))
+	}
+	for i, f := range rFrags {
+		if c2paBoxCount(f) != 1 {
+			t.Errorf("fragment %d: %d C2PA boxes, want 1", i, c2paBoxCount(f))
+		}
+		first, end := sidxFirstOffset(f, topBox(f, "sidx"))
+		if moof := topBox(f, "moof"); end+int(first) != moof.start {
+			t.Errorf("fragment %d: sidx still stale (points at %d, moof at %d)", i, end+int(first), moof.start)
+		}
+	}
+	dir := t.TempDir()
+	rep, stderr := runC2patoolFragment(t, writeFragmentedSet(t, dir, rInit, rFrags, names), "BigBuckBunny_2s*.m4s", "--settings", trustSettings(t, sc))
+	if rep == nil {
+		t.Fatalf("c2patool refused the re-signed set:\n%s", stderr)
+	}
+	if rep.ValidationState != "Trusted" || len(rep.Manifests) != 2 {
+		t.Errorf("state %q, %d manifests", rep.ValidationState, len(rep.Manifests))
+	}
+	active := rep.Manifests[rep.ActiveManifest]
+	if active.Title != "second, by c2pa" || len(active.Ingredients) != 1 || active.Ingredients[0].Relationship != "parentOf" {
+		t.Errorf("active manifest: %+v", active)
 	}
 }

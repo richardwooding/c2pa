@@ -286,12 +286,45 @@ it with `ActionOpened`; `ActionCreated` on such an asset is `ErrManifestInvalid`
 manifest proves something preceded it. `ExampleSigner_Sign_resign` in
 [`example_test.go`](example_test.go) does this to the ChatGPT PDF and verifies both signers.
 
-**Limits.** Fragmented BMFF (`moof`/`sidx`) is refused with `ErrFragmentedBMFF` (authoring Merkle
-trees per fragment is a separate project); encrypted (`/Encrypt`) or certified (`/Perms`) PDFs and
-ID3v2.2 MP3 tags are refused; only standard `c2pa.claim.v2` manifests are written (no update
-manifests); the store must fit in 64 MiB and the asset under `ValidateMaxScan`. Every existing
-store is removed and the new one written at the container's canonical position — deterministic, and
-a deliberate difference from c2pa-rs's replace-in-place.
+**Fragmented BMFF (DASH/CMAF).** A streaming asset ships as an initialization segment plus `.m4s`
+fragments, bound by a Merkle tree over the fragments (§A.5.4). `SignFragmented` writes that: a C2PA
+merkle box into every fragment (before its `moof`, padded to one size) and the manifest — with the
+tree's row and the segment's own hash — into the initialization segment. Fragments are `io.ReadSeeker`s
+because each is visited three times (hashed, verified, written), one in memory at a time however long
+the stream is; nothing is written until the whole set has passed `ValidateFragmented`.
+
+```go
+init, _ := os.Open("video/init.mp4")
+paths, _ := filepath.Glob("video/*.m4s")
+frags := make([]io.ReadSeeker, len(paths))
+outs := make([]io.Writer, len(paths))
+for i, p := range paths {
+    f, _ := os.Open(p)
+    defer f.Close()
+    frags[i] = f
+    o, _ := os.Create(filepath.Join("signed", filepath.Base(p)))
+    defer o.Close()
+    outs[i] = o
+}
+outInit, _ := os.Create("signed/init.mp4")
+err = signer.SignFragmented(ctx, init, frags, outInit, outs, c2pa.Manifest{
+    Title:   "clip.mp4",
+    Actions: []c2pa.Action{{Action: c2pa.ActionCreated, DigitalSourceType: c2pa.DigitalSourceTypeDigitalCapture}},
+})
+```
+
+One tree per call, so sign each rendition separately. The `sidx` and `tfhd` offsets the inserted box
+moves are re-anchored (c2pa-rs leaves them stale), and a set c2pa-rs signed can be re-signed here. What
+c2patool says: `c2patool init.mp4 fragment --fragments_glob "*.m4s"` reports `Trusted` with
+`assertion.bmffHash.match` when the root is anchored via `--settings`; its fragment mode prints no
+JSON at all on any failure, an untrusted signer included. Both directions are asserted in CI.
+
+**Limits.** A flat single-file fragmented MP4 (`moof`/`mdat` pairs in one file) is refused with
+`ErrFragmentedBMFF` — sign it as an initialization segment plus fragments; encrypted (`/Encrypt`) or
+certified (`/Perms`) PDFs and ID3v2.2 MP3 tags are refused; only standard `c2pa.claim.v2` manifests
+are written (no update manifests); the store must fit in 64 MiB and the asset under `ValidateMaxScan`.
+Every existing store is removed and the new one written at the container's canonical position —
+deterministic, and a deliberate difference from c2pa-rs's replace-in-place.
 
 | Key | COSE algorithm |
 | --- | --- |
