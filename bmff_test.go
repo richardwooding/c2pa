@@ -322,10 +322,7 @@ func TestHashBMFFTopLevel(t *testing.T) {
 		{xpath: "/uuid", length: -1, version: -1, exact: true,
 			data: []bmffDataMatch{{offset: 8, value: c2paBoxUUID[:]}}},
 	}
-	ranges, ok := bmffExclusionByteRanges(file, top, excl)
-	if !ok {
-		t.Fatal("exclusion resolution failed")
-	}
+	ranges := bmffExclusionByteRanges(file, top, excl)
 
 	h := sha256.New()
 	hashBMFFTopLevel(context.Background(), file, top, ranges, h)
@@ -354,10 +351,7 @@ func TestHashBMFFTopLevel_Subset(t *testing.T) {
 		{xpath: "/mdat", length: -1, version: -1, exact: true,
 			subset: []bmffSubsetRange{{offset: 16, length: 0}}},
 	}
-	ranges, ok := bmffExclusionByteRanges(file, top, excl)
-	if !ok {
-		t.Fatal("exclusion resolution failed")
-	}
+	ranges := bmffExclusionByteRanges(file, top, excl)
 	h := sha256.New()
 	hashBMFFTopLevel(context.Background(), file, top, ranges, h)
 

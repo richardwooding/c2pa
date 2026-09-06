@@ -9,6 +9,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/fxamacker/cbor/v2"
 	cose "github.com/veraison/go-cose"
 )
 
@@ -277,10 +278,7 @@ func FuzzBMFFHash(f *testing.F) {
 			return
 		}
 		top := parseBMFFBoxes(ctx, asset)
-		ranges, ok := bmffExclusionByteRanges(asset, top, excl)
-		if !ok {
-			return
-		}
+		ranges := bmffExclusionByteRanges(asset, top, excl)
 		h := sha256.New()
 		hashBMFFTopLevel(ctx, asset, top, ranges, h)
 		_ = h.Sum(nil)
@@ -423,6 +421,93 @@ func FuzzBMFFMerkle(f *testing.F) {
 			if s.Code == StatusAssertionBMFFHashMatch && len(asset) == 0 {
 				t.Fatalf("reported a match over no asset bytes")
 			}
+		}
+	})
+}
+
+// FuzzBMFFFragment targets the flat fragmented path — chunk cutting, merkle
+// box decoding and proof folding — seeded with a valid fragmented file, so the
+// mutations land in code the non-fragmented seeds never reach.
+//
+// Contract: never panic, and never report a match over no asset bytes.
+func FuzzBMFFFragment(f *testing.F) {
+	ff := fragmentedFlatAsset(f, 3, 1, 1, 1, nil)
+	raw, err := cbor.Marshal(ff.assertion)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(ff.asset, raw)
+	f.Add([]byte{}, raw)
+	f.Add(ff.asset, []byte{})
+	f.Fuzz(func(t *testing.T, asset, assertionCBOR []byte) {
+		v := &validator{
+			ctx:       context.Background(),
+			cfg:       validateConfig{maxScan: ValidateMaxScan},
+			container: BMFF,
+			data:      asset,
+		}
+		v.verifyBMFFHash(&rawAssertion{label: "c2pa.hash.bmff.v3", data: assertionCBOR},
+			"self#jumbf=/c2pa/urn:test")
+		for _, s := range v.res.Statuses {
+			if s.Code == StatusAssertionBMFFHashMatch && len(asset) == 0 {
+				t.Fatalf("reported a match over no asset bytes")
+			}
+		}
+	})
+}
+
+// FuzzMerkleBoxDecode targets the merkle box decoder alone: its CBOR is
+// attacker-controlled, and what comes out must sit within the caps the verifier
+// relies on.
+func FuzzMerkleBoxDecode(f *testing.F) {
+	f.Add([]byte{})
+	// {"uniqueId":1,"localId":1,"location":0,"hashes":[h'00']} then padding
+	f.Add([]byte{0xA4, 0x68, 'u', 'n', 'i', 'q', 'u', 'e', 'I', 'd', 0x01,
+		0x67, 'l', 'o', 'c', 'a', 'l', 'I', 'd', 0x01,
+		0x68, 'l', 'o', 'c', 'a', 't', 'i', 'o', 'n', 0x00,
+		0x66, 'h', 'a', 's', 'h', 'e', 's', 0x81, 0x41, 0x00,
+		0, 0, 0, 0, 0, 0, 0, 0})
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		mb, ok := decodeMerkleBox(payload)
+		if !ok {
+			return
+		}
+		if mb.uniqueID < 0 || mb.localID < 0 || mb.location < 0 {
+			t.Fatalf("negative identity decoded: %+v", mb)
+		}
+		if len(mb.hashes) > maxMerkleProof {
+			t.Fatalf("proof of %d hashes decoded, past the cap of %d", len(mb.hashes), maxMerkleProof)
+		}
+		for _, h := range mb.hashes {
+			if len(h) == 0 {
+				t.Fatalf("empty proof hash decoded")
+			}
+		}
+	})
+}
+
+// FuzzMerkleProve targets the proof fold: any count, location, stored-row
+// length and proof length must be walked without panicking, and a proof the
+// fold accepts must never also be called malformed.
+func FuzzMerkleProve(f *testing.F) {
+	f.Add(4, 2, 1, 2, []byte{1})
+	f.Add(1, 0, 1, 0, []byte{})
+	f.Add(5, 4, 2, 0, []byte{2})
+	f.Fuzz(func(t *testing.T, count, location, storedRow, proofLen int, leaf []byte) {
+		if count < 1 || count > 1<<16 || storedRow < 0 || storedRow > 1<<16 || proofLen < 0 || proofLen > maxMerkleProof {
+			return
+		}
+		m := merkleMap{count: count, hashes: make([][]byte, storedRow)}
+		for i := range m.hashes {
+			m.hashes[i] = leaf
+		}
+		proof := make([][]byte, proofLen)
+		for i := range proof {
+			proof[i] = leaf
+		}
+		ok, malformed := merkleProve("sha256", m, leaf, location, proof)
+		if ok && malformed {
+			t.Fatalf("count %d location %d: both ok and malformed", count, location)
 		}
 	})
 }

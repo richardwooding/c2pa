@@ -170,6 +170,37 @@ func bmffStores(ctx context.Context, data []byte) map[string][]byte {
 	return out
 }
 
+// c2paBoxPurpose reads the head of a C2PA uuid box — FullBox version/flags
+// then the NUL-terminated purpose string — and returns the purpose and the
+// offset of the first byte after it, where the purpose-specific payload
+// starts. ok is false when the box is too short to carry a purpose.
+func c2paBoxPurpose(data []byte, b *bmffBox) (purpose string, dataStart int, ok bool) {
+	p := b.start + b.headerLen + 4 // skip FullBox version(1)+flags(3)
+	if p >= b.end {
+		return "", 0, false
+	}
+	nul := bytes.IndexByte(data[p:b.end], 0)
+	if nul < 0 {
+		return "", 0, false
+	}
+	return string(data[p : p+nul]), p + nul + 1, true
+}
+
+// c2paMerklePayload returns the CBOR payload of a merkle-purpose C2PA uuid
+// box — the bmff-merkle-map plus whatever zero padding pads the box to its
+// fixed size (spec §A.5.4.1.3) — or nil when b is not such a box. There is no
+// merkle-offset field to skip: only the store-carrying purposes have one.
+func c2paMerklePayload(data []byte, b *bmffBox) []byte {
+	if b.typ != "uuid" || b.usertype != c2paBoxUUID {
+		return nil
+	}
+	purpose, p, ok := c2paBoxPurpose(data, b)
+	if !ok || purpose != "merkle" || p >= b.end {
+		return nil
+	}
+	return data[p:b.end]
+}
+
 // c2paBoxPayload decodes a C2PA uuid box: FullBox version/flags, the
 // NUL-terminated purpose string, the 8-byte merkle offset (non-merkle
 // purposes), then the JUMBF store trimmed to its own superbox length (the box
@@ -178,18 +209,12 @@ func bmffStores(ctx context.Context, data []byte) map[string][]byte {
 // about the field's presence then self-corrects instead of shifting the whole
 // parse by 8 bytes.
 func c2paBoxPayload(data []byte, b *bmffBox) (purpose string, jumbf []byte) {
-	p := b.start + b.headerLen + 4 // skip FullBox version(1)+flags(3)
-	if p >= b.end {
+	purpose, p, ok := c2paBoxPurpose(data, b)
+	if !ok {
 		return "", nil
 	}
-	nul := bytes.IndexByte(data[p:b.end], 0)
-	if nul < 0 {
-		return "", nil
-	}
-	purpose = string(data[p : p+nul])
-	p += nul + 1
 	if purpose == "merkle" {
-		return purpose, nil // CBOR merkle payload, not JUMBF
+		return purpose, nil // CBOR merkle payload, not JUMBF; see c2paMerklePayload
 	}
 	withSkip := p + 8
 	switch {

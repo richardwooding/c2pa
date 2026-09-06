@@ -227,25 +227,40 @@ empty for that whole generation of files.
   nulls — every optional-field decode must be nil-tolerant. The standard `/uuid` exclusion relies on
   its `data` predicate (offset 8 == the C2PA usertype) to exclude only the C2PA box. Exclusion `flags`
   with `exact=false` use spec bits-set semantics — deliberately NOT c2pa-rs's inverted subset test.
-- **Merkle BMFF (`merkle` array) is verified as far as ONE reader can settle it.** Three arrangements
-  exist and the code is shaped by which of them a single file can prove. (a) A **non-fragmented**
-  asset whose `mdat` is hashed piecewise — leaves are cut from the box, the tree is rebuilt, and it
-  is checked in FULL. (b) A **fragmented asset in one flat file** — `initHash` covers everything
-  before the first `moof` and IS checked; each chunk's hash lives in that chunk's own C2PA `merkle`
-  box, which is not parsed, so this reports match-less `general.unsupported` naming what was left.
-  (c) **Fragmented across files** (.m4s) — the chunks are other files and no care with this one
-  produces them. A wrong `initHash` is still a `mismatch`: this file disproves it.
-  Four things that are easy to get wrong: a Merkle leaf starts **16 bytes** into the `mdat` box
+- **Merkle BMFF (`merkle` array) is verified in full wherever the bytes are in hand.** Three
+  arrangements exist. (a) A **non-fragmented** asset whose `mdat` is hashed piecewise — leaves are
+  cut from the box, the tree is rebuilt (`merkleLayers`), and it is checked in FULL. (b) A
+  **fragmented asset in one flat file** — `initHash` covers everything before the first `moof`;
+  each chunk (a `moof` and the boxes up to the next one, `bmffChunks`) is hashed with the same
+  offset-marker walk over just its boxes and checked against the proof in the C2PA `merkle` box
+  preceding it (`merkleProve`, c2pa-rs's `check_merkle_tree`). Chunk count, merkle-box count and
+  the map's `count` must all agree; boxes pair with chunks **positionally**, as in c2pa-rs; and box
+  `k` must say `location` `k` (§15.12.2 — otherwise two chunks could swap places along with their
+  proofs; c2pa-rs does not check this). (c) **Fragmented across files** (.m4s) — read alone, an
+  initialization segment has no `moof`, so `initHash` covers the whole file and IS checked; the
+  chunks are other files, and the informational says how many. A wrong `initHash` is a `mismatch`
+  wherever it is seen: the file in hand disproves it.
+  Things that are easy to get wrong: a Merkle leaf starts **16 bytes** into the `mdat` box
   (`mdatBlockPrefix`) regardless of whether the box uses an 8- or 16-byte header, so it is NOT the
   box's header length; the tree carries an **unpaired last node up UNCHANGED** rather than
-  duplicating and re-hashing it, which is what makes it C2PA's tree and not the Bitcoin-style one;
-  `hashes` is **any one row** — leaf-most, root, or intermediate — and its LENGTH is what says which,
-  so verification rebuilds every row and matches on length; and `initHash` uses the same offset-marker
-  walk as the flat hash (`hashBMFFTopLevel`), not a plain byte hash — c2pa-rs reaches it through the
-  same `hash_stream_by_alg` path as the flat hash, with `[first moof, EOF)` added to the exclusions.
-  `maxMerkleLeaves` caps the leaf count because `fixedBlockSize` is attacker-controlled and is what
-  turns an assertion's size into our allocation. Merkle maps pair with `mdat` boxes **positionally**,
-  so a count mismatch is reported rather than guessed around.
+  duplicating and re-hashing it, which is what makes it C2PA's tree and not the Bitcoin-style one
+  (`merkleLayout` and `merkleLayers` describe the same shape, and `TestMerkleLayout` pins that);
+  `hashes` is **any one row** — leaf-most, root, or intermediate — and its LENGTH is what says
+  which, so a rebuilt tree is matched on length and a proof is folded until it reaches that length;
+  `initHash` uses the same offset-marker walk as the flat hash (`hashBMFFTopLevel`), not a plain
+  byte hash — c2pa-rs reaches it through the same `hash_stream_by_alg` path, with `[first moof,
+  EOF)` added to the exclusions; a merkle box's CBOR is followed by **zero padding** to a fixed box
+  size (§A.5.4.1.3), so it is decoded with `UnmarshalFirst`, never `Unmarshal`; a merkle box has NO
+  8-byte merkle-offset field — only the store-carrying purposes do (`c2paMerklePayload`); the proof
+  in a box is **optional** (absent when the leaf row is stored) and its LENGTH must fit the climb
+  exactly — too short, too long, or a stored row no tree of that `count` has, is `malformed`
+  rather than a mismatch, because nothing was compared; and a chunk's hash is anchored at
+  **file-absolute** offsets, which is exactly why concatenating `.m4s` files is NOT a flat
+  fragmented file (§A.5.4.1.2) — the test that pins it uses fragments without `styp`, so anchoring
+  is the ONLY thing that differs. `maxMerkleLeaves` caps the leaf count because `fixedBlockSize`
+  is attacker-controlled and is what turns an assertion's size into our allocation;
+  `maxMerkleProof` caps a box's proof for the same reason. Merkle maps pair with `mdat` boxes
+  **positionally**, so a count mismatch is reported rather than guessed around.
 - **`c2pa.hash.boxes` binds structurally, not by byte range** (`boxeshash.go` over `boxmap.go`). The
   assertion is an ordered list of entries, each naming one or more CONSECUTIVE boxes and hashing the
   span they cover; verification re-derives the asset's own box map and walks the two lists in
@@ -291,8 +306,11 @@ and hand-copied in `README.md`. Change one and change the other; nothing catches
 
 The `Fuzz*` targets cover the read pipeline, the recursive box walker,
 the ASN.1 timestamp descent, the offset-aware `parseStore`/`parseBoxTree`, the full `Validate`
-pipeline, the CMS timestamp verifier, the exclusion-range hashing, and the PDF object scan; their
-seed corpora run as normal tests in CI.
+pipeline, the CMS timestamp verifier, the exclusion-range hashing, the PDF object scan, and the
+Merkle paths — the leaf cut, the flat fragmented file (`FuzzBMFFFragment`), the merkle box decoder
+and the proof fold; their seed corpora run as normal tests in CI. **`.github/workflows/fuzz.yml`
+lists the targets by name**, so a new `Fuzz*` function is silently un-fuzzed nightly until it is
+added there — `FuzzBMFFMerkle` and `FuzzMerkleLeafRanges` shipped a release without being listed.
 
 **PDF has a real fixture AND synthetic documents.** `testdata/c2pa_chatgpt.pdf` is a genuine
 ChatGPT-pipeline document contributed under this repository's MIT licence (see
