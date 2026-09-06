@@ -61,8 +61,11 @@ Public surface:
   `ValidateOption`s; the container is BMFF by definition, so there is no parameter for it.
   Fragments are read one at a time under the scan cap, so memory is init + one fragment. The
   roll-up is `assertion.bmffHash.match` only on complete §15.12.2 coverage (every `location`
-  `0..count-1` of every merkle-map); otherwise ONE informational `general.unsupported` names the
-  locations not verified. Per-fragment FAILURES carry the URI suffix `#fragment=<i>` (i = the
+  `0..count-1` of every merkle-map THAT BINDS THIS INITIALIZATION SEGMENT); otherwise ONE informational
+  `general.unsupported` names the locations not verified. A map whose `initHash` is another init's is
+  another rendition's — c2pa-rs signs several renditions into one manifest, one map each, the same
+  store in every init — and is named as not evaluated (informational), while a supplied fragment that
+  claims such a map is a mismatch; an init that matches NO map is tampered (mismatch per map). Per-fragment FAILURES carry the URI suffix `#fragment=<i>` (i = the
   caller's slice index; the location is in the explanation); there are deliberately NO per-fragment
   match entries, so `Has(StatusAssertionBMFFHashMatch)` keeps meaning "fully bound".
 - `Signer` / `NewSigner(key crypto.Signer, chain []*x509.Certificate, opts...)` /
@@ -574,10 +577,12 @@ fixed size, so what a box says never moves the chunk after it and no fixpoint is
 `signedFragmentedAsset` (`fragmented_test.go`) wraps the split init in a signed manifest whose
 store box is placed LAST, so `initHash` (`moov` alone) is independent of the store's size — the
 same argument `buildBoxHashAsset` makes. `runFragmented` exercises the binding alone;
-`validateFragmentedCorpus` runs the real entry point. `ExampleValidateFragmented` is the one
-Example WITHOUT an `// Output:` block: no reproducible signed fragmented fixture exists (c2pa-rs's
-DASH set is signed at test time by an ephemeral key) and generated files may not land in
-`testdata/`, so it is compiled, not run.
+`validateFragmentedCorpus` runs the real entry point. `ExampleValidateFragmented` runs over
+`testdata/dash/dashinit.mp4` + `dash1.m4s`, a third-party PRE-SIGNED pair from c2pa-rs's fixtures
+(1.x claim, `c2pa.hash.bmff.v2`, one fragment of eleven, canonical CBOR key order in the merkle box),
+anchoring the chain it presents; its `// Output:` is the honest partial verdict — valid, not bound,
+"1 of 11 fragments verified". `testdata/dash/bunny/` is c2pa-rs's UNSIGNED Big Buck Bunny rendition
+(init + 11 `.m4s`), the input the fragmented signer's tests and the c2patool interop rows sign.
 
 **Cost tests assert a SCALING RATIO, not a wall-clock ceiling.** `assertScalesLinearly` (in
 `pdf_test.go`) builds a document at n and 4n objects and fails when the larger takes more than 8x —

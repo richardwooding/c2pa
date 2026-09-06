@@ -12,7 +12,6 @@ import (
 	"io"
 	"math/big"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/richardwooding/c2pa"
@@ -153,45 +152,47 @@ func ExampleReadAll_pdf() {
 // segment and media fragments are separate files. The initialization segment
 // carries the manifest; each fragment carries the Merkle proof that binds it.
 // The binding is a match only when every fragment the manifest binds was
-// supplied and verified; a partial set is an informational status naming what
-// was not covered, never a false match.
+// supplied and verified; a partial set — here one fragment of eleven — is an
+// informational status naming what was not covered, never a false match.
 //
-// No signed fragmented fixture ships with the package — the c2pa-rs DASH set
-// is signed at test time by an ephemeral key — so this example is compiled but
-// not run.
+// The fixture is a third-party signed set from c2pa-rs's test assets; its
+// signer is not on the embedded trust list, so the chain it presents is
+// anchored explicitly (a claim about identity, not proof of it).
 func ExampleValidateFragmented() {
-	init, err := os.Open("video/init.mp4")
+	init, err := os.Open("testdata/dash/dashinit.mp4")
 	if err != nil {
 		panic(err)
 	}
 	defer func() { _ = init.Close() }()
+	frag, err := os.Open("testdata/dash/dash1.m4s")
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = frag.Close() }()
 
-	paths, _ := filepath.Glob("video/*.m4s")
-	var files []*os.File
-	defer func() {
-		for _, f := range files {
-			_ = f.Close()
-		}
-	}()
-	frags := make([]io.Reader, 0, len(paths))
-	for _, p := range paths {
-		f, err := os.Open(p)
-		if err != nil {
-			panic(err)
-		}
-		files = append(files, f)
-		frags = append(frags, f)
+	ctx := context.Background()
+	presented := c2pa.Validate(ctx, c2pa.BMFF, init)
+	pool := x509.NewCertPool()
+	pool.AddCert(presented.SignerChain[len(presented.SignerChain)-1])
+	if _, err := init.Seek(0, io.SeekStart); err != nil {
+		panic(err)
 	}
 
-	r := c2pa.ValidateFragmented(context.Background(), init, frags)
+	r := c2pa.ValidateFragmented(ctx, init, []io.Reader{frag}, c2pa.WithSigningTrust(pool))
 	fmt.Println("valid:", r.Valid)
 	// Bound only if every fragment was supplied and verified.
 	fmt.Println("bound:", r.Has(c2pa.StatusAssertionBMFFHashMatch))
+	fmt.Println("signer:", r.VerifiedSigner())
 	for _, s := range r.Statuses {
-		// A per-fragment failure's URI ends in "#fragment=<i>", i being the
-		// index into frags.
-		fmt.Println(s.Code, s.URI, s.Explanation)
+		if s.Code == c2pa.StatusUnsupported {
+			fmt.Println(s.Explanation)
+		}
 	}
+	// Output:
+	// valid: true
+	// bound: false
+	// signer: Alice
+	// fragmented BMFF hash only partly verified: initialization segment and 1 of 11 fragments verified; not verified: locations 1..10
 }
 
 // exampleSigner mints a self-signed P-256 certificate that satisfies the C2PA

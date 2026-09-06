@@ -359,6 +359,80 @@ func TestValidateFragmentedMultiTrack(t *testing.T) {
 	}
 }
 
+// TestValidateFragmentedMultiRendition: c2pa-rs signs several renditions into
+// ONE manifest — one merkle map per initialization segment, the identical store
+// in each. Given one init, the maps whose initHash is another init's are named
+// as not evaluated, not failed; a fragment that claims such a map IS a failure,
+// since the caller asserted these are this asset's fragments; and an init that
+// matches no map at all is still tampered.
+func TestValidateFragmentedMultiRendition(t *testing.T) {
+	sb := newCorpusSigner(t, cose.AlgorithmES256)
+	a := fragmentedFiles(t, 3, 1, 1, 1, splitOpts{})
+	b := fragmentedFiles(t, 2, 1, 2, 2, splitOpts{moovFill: 0x66})
+	if bytes.Equal(a.init, b.init) {
+		t.Fatal("the two renditions need different initialization segments")
+	}
+	both := a
+	both.assertion = map[string]any{
+		"alg":        "sha256",
+		"exclusions": a.assertion["exclusions"],
+		"merkle":     []any{firstMerkleMap(a.assertion), firstMerkleMap(b.assertion)},
+	}
+	init := signedFragmentedAsset(t, both, manifestSpec{signer: sb})
+
+	t.Run("own fragments", func(t *testing.T) {
+		res := validateFragmentedCorpus(t, init, readersOf(a.frags...), sb)
+		if !res.Valid || !res.Has(StatusAssertionBMFFHashMatch) {
+			t.Fatalf("got %v: %s", codes(res), firstFailureText(res))
+		}
+		if got := statusExplanation(res, StatusUnsupported); !strings.Contains(got, "uniqueId 2/localId 2") || !strings.Contains(got, "other initialization segments") {
+			t.Errorf("the other rendition's map should be named as not evaluated: %q", got)
+		}
+	})
+	t.Run("other rendition's fragments", func(t *testing.T) {
+		res := validateFragmentedCorpus(t, init, readersOf(b.frags...), sb)
+		if res.Valid || res.Has(StatusAssertionBMFFHashMatch) {
+			t.Fatalf("fragments of another rendition should fail: %v", codes(res))
+		}
+		fails := fragmentFailures(res)
+		if len(fails) != 2 {
+			t.Fatalf("want a failure per fragment, got %v", fails)
+		}
+		for uri, st := range fails {
+			if !strings.Contains(st.Explanation, "does not match this initialization segment") {
+				t.Errorf("%s: %q", uri, st.Explanation)
+			}
+		}
+	})
+	t.Run("subset of own fragments", func(t *testing.T) {
+		res := validateFragmentedCorpus(t, init, readersOf(a.frags[0]), sb)
+		if !res.Valid || res.Has(StatusAssertionBMFFHashMatch) {
+			t.Fatalf("a partial set is a valid partial: %v", codes(res))
+		}
+		if got := merkleExplanation(res); !strings.Contains(got, "1 of 3 fragments") {
+			t.Errorf("coverage should count only this init's tree: %q", got)
+		}
+	})
+	t.Run("tampered init", func(t *testing.T) {
+		bad := append([]byte(nil), init...)
+		moov := bytes.Index(bad, []byte("moov"))
+		bad[moov+8] ^= 0xFF
+		res := validateFragmentedCorpus(t, bad, readersOf(a.frags...), sb)
+		if res.Valid || res.Has(StatusAssertionBMFFHashMatch) {
+			t.Fatalf("a tampered init should fail: %v", codes(res))
+		}
+		n := 0
+		for _, st := range res.Statuses {
+			if st.Code == StatusAssertionBMFFHashMismatch && strings.Contains(st.Explanation, "initialization segment hash does not match merkle map") {
+				n++
+			}
+		}
+		if n != 2 {
+			t.Errorf("both maps should report the init mismatch, got %d", n)
+		}
+	})
+}
+
 // --- the binding-only edge cases ----------------------------------------------
 
 // TestValidateFragmentedMalformedAssertion covers what a split-file assertion

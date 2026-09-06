@@ -44,7 +44,10 @@ type fragmentSet struct {
 // fails is a failure status whose URI ends in "#fragment=<i>", i being its
 // index in fragments. The roll-up is assertion.bmffHash.match only when the
 // initialization segment AND every location the trees bind — 0 through
-// count-1 of each merkle-map, §15.12.2 — were verified. Supplying a subset is
+// count-1 of each merkle-map THAT BINDS THIS INITIALIZATION SEGMENT,
+// §15.12.2 — were verified; a map whose initHash belongs to another rendition
+// (c2pa-rs signs several renditions into one manifest) is named as not
+// evaluated here, and a fragment claiming such a map is a mismatch. Supplying a subset is
 // a legitimate partial check: what was not covered is named in an
 // informational general.unsupported status, and Valid stays true unless
 // something supplied was disproved. No match is ever reported for a partial
@@ -145,22 +148,32 @@ func (v *validator) verifyBMFFFragmented(subj string, assertion map[string]any, 
 		}
 	}
 
-	// The init hash once per map — c2pa-rs recomputes it per fragment — and
-	// on a mismatch carry on: "initialization segment tampered, fragments
-	// intact" is a report worth having.
-	initFailed := false
+	// The init hash once per map — c2pa-rs recomputes it per fragment. A map
+	// whose initHash is not this segment's may be another rendition's: c2pa-rs
+	// signs several renditions into ONE manifest, one merkle map each, and
+	// writes the identical store into every initialization segment. Such a map
+	// is judged only when a supplied fragment claims it — then it is a
+	// mismatch, since the caller asserted these are this asset's fragments —
+	// and is otherwise named as not evaluated here. No map matching at all is
+	// the tampered-init verdict, reported per map and carried on: "segment
+	// tampered, fragments intact" is a report worth having.
+	initOK := make([]bool, len(maps))
+	anyOK := false
 	for i, m := range maps {
-		if initHashMatches(v.ctx, seg, m, algs[i], len(seg.data)) {
-			continue
-		}
+		initOK[i] = initHashMatches(v.ctx, seg, m, algs[i], len(seg.data))
 		if v.ctx.Err() != nil {
 			v.add(StatusGeneralError, subj, "validation cancelled while verifying the initialization segment", v.ctx.Err())
 			return
 		}
-		v.add(StatusAssertionBMFFHashMismatch, subj,
-			fmt.Sprintf("fragmented BMFF initialization segment hash does not match merkle map %d (uniqueId %d, localId %d)",
-				i, m.uniqueID, m.localID), nil)
-		initFailed = true
+		anyOK = anyOK || initOK[i]
+	}
+	initFailed := !anyOK
+	if initFailed {
+		for i, m := range maps {
+			v.add(StatusAssertionBMFFHashMismatch, subj,
+				fmt.Sprintf("fragmented BMFF initialization segment hash does not match merkle map %d (uniqueId %d, localId %d)",
+					i, m.uniqueID, m.localID), nil)
+		}
 	}
 
 	mc := merkleContext{defaultAlg: defaultAlg, excl: seg.excl, maps: maps}
@@ -201,6 +214,15 @@ func (v *validator) verifyBMFFFragmented(subj string, assertion map[string]any, 
 		for _, o := range outcomes {
 			switch o.kind {
 			case fragmentMatch:
+				if anyOK && !initOK[o.mapIndex] {
+					// The proof holds, but against a tree this initialization
+					// segment does not bind: a fragment of another rendition.
+					m := maps[o.mapIndex]
+					v.add(StatusAssertionBMFFHashMismatch, uri,
+						fmt.Sprintf("fragment %d: merkle box names tree uniqueId %d/localId %d, whose initHash does not match this initialization segment",
+							i, m.uniqueID, m.localID), nil)
+					continue
+				}
 				// No per-fragment success entry: a match entry here would make
 				// Has(StatusAssertionBMFFHashMatch) true on a partial set.
 				covered[o.mapIndex][o.location] = true
@@ -215,17 +237,35 @@ func (v *validator) verifyBMFFFragmented(subj string, assertion map[string]any, 
 	if initFailed || v.failureCount() > before {
 		return // the failure is the verdict; coverage would only be noise on top
 	}
-	verified, total, missing := fragmentCoverage(maps, covered)
+	// Coverage is over the maps that bind THIS initialization segment; the
+	// others are another rendition's and are named, not counted.
+	var bound []merkleMap
+	var boundCovered []map[int]bool
+	var foreign []string
+	for i, m := range maps {
+		if initOK[i] {
+			bound = append(bound, m)
+			boundCovered = append(boundCovered, covered[i])
+		} else {
+			foreign = append(foreign, fmt.Sprintf("uniqueId %d/localId %d", m.uniqueID, m.localID))
+		}
+	}
+	verified, total, missing := fragmentCoverage(bound, boundCovered)
 	if missing == "" {
 		v.add(StatusAssertionBMFFHashMatch, subj,
 			fmt.Sprintf("fragmented BMFF hash matches: initialization segment and all %d fragments verified", total), nil)
-		return
+	} else {
+		detail := fmt.Sprintf("initialization segment and %d of %d fragments verified; not verified: %s", verified, total, missing)
+		if len(v.fragments.readers) == 0 {
+			detail += " (no fragments supplied)"
+		}
+		v.add(StatusUnsupported, subj, "fragmented BMFF hash only partly verified: "+detail, nil)
 	}
-	detail := fmt.Sprintf("initialization segment and %d of %d fragments verified; not verified: %s", verified, total, missing)
-	if len(v.fragments.readers) == 0 {
-		detail += " (no fragments supplied)"
+	if len(foreign) > 0 {
+		v.add(StatusUnsupported, subj,
+			fmt.Sprintf("merkle maps %s bind other initialization segments (other renditions of this asset) and were not evaluated here",
+				strings.Join(foreign, ", ")), nil)
 	}
-	v.add(StatusUnsupported, subj, "fragmented BMFF hash only partly verified: "+detail, nil)
 }
 
 // verifyFragmentBuffer checks one fragment file against the assertion. Every
