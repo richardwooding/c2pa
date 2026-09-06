@@ -80,7 +80,7 @@ asks.
 | `Info` field | Meaning |
 |---|---|
 | `Present` | a C2PA manifest was found and parsed |
-| `Attribution` | `AttributionAsset` when the asset's own structure associates the manifest; `AttributionEmbedded` when the asset associates it with a resource it CARRIES rather than with itself (PDF §A.4.3); `AttributionUnknown` when only the C2PA markers identified it and nothing places it. For the last two, **do not report its signer as the asset's** |
+| `Attribution` | who the manifest is a claim **about**. `AttributionAsset` when the asset's own structure associates it; `AttributionEmbedded` when the asset associates it with a resource it CARRIES rather than with itself (PDF §A.4.3); `AttributionUnknown` when only the C2PA markers identified it and nothing places it; `AttributionNone` (the zero value) when there is no manifest. For `Embedded` and `Unknown`, **do not report its signer as the asset's** |
 | `ClaimGenerator` | the tool that created/edited the asset |
 | `Title` | claim `dc:title` |
 | `Format` | claim `dc:format` (declared media type) |
@@ -168,6 +168,71 @@ r := c2pa.Validate(ctx, c2pa.JPEG, f,
 the parsed `SignerChain`. Status codes mirror the [C2PA specification §15](https://spec.c2pa.org)
 (e.g. `claimSignature.validated`, `signingCredential.untrusted`, `assertion.dataHash.mismatch`);
 each `StatusEntry` has a `Severity` (success / informational / failure).
+
+## PDF
+
+PDF is the container with the most to say, so it gets worked examples. All three run as
+[`Example` functions](example_test.go) against `testdata/c2pa_chatgpt.pdf` — a real document from
+ChatGPT's image pipeline whose signer chains to a production trust anchor — so the output below is
+checked by `go test`, not written by hand.
+
+### Read a PDF, and check what the manifest is about
+
+A PDF can carry a manifest describing an image or font *inside* it rather than the document (§A.4.3).
+That manifest's signer is not the document's, so `Attribution` is checked before `SignedBy` is
+reported — skipping that check is how a file gets credited to whoever signed a picture inside it.
+
+```go
+info := c2pa.Read(ctx, c2pa.PDF, f)
+if !info.Present {
+    return // no Content Credentials
+}
+fmt.Println("generator:", info.ClaimGenerator)     // ChatGPT
+fmt.Println("title:", info.Title)                  // image.pdf
+fmt.Println("ai-generated:", info.AIGenerated)     // true
+
+switch info.Attribution {
+case c2pa.AttributionAsset:
+    // The document's own structure associates this manifest.
+    fmt.Println("signed by (claimed):", info.SignedBy)  // OpenAI Media Service
+default:
+    // A claim about something the document carries, or one nothing places.
+    fmt.Println("manifest describes:", info.Attribution)
+}
+```
+
+### Verify it
+
+`VerifiedSigner()` is the proven identity — empty unless the claim signature verified **and** the
+chain reached a trust anchor. `Info.SignedBy` is only what the file claims.
+
+```go
+r := c2pa.Validate(ctx, c2pa.PDF, f)
+fmt.Println("valid:", r.Valid)                                        // true
+fmt.Println("verified signer:", r.VerifiedSigner())                   // OpenAI Media Service
+fmt.Println("content hash bound:", r.Has(c2pa.StatusAssertionDataHashMatch)) // true
+// This document carries no RFC 3161 timestamp, so the signing time is
+// unproven and r.SignedAt stays zero.
+fmt.Println("trusted timestamp:", !r.Has(c2pa.StatusTimeStampMissing)) // false
+```
+
+### Enumerate every store the document carries
+
+Only PDF returns more than one entry today: §A.4.1 embeds the document's own store as an associated
+file, and §A.4.3 lets an object carry a manifest of its own, so a document and the image inside it
+can both bear provenance. The first entry is exactly what `Read` returns.
+
+```go
+for i, info := range c2pa.ReadAll(ctx, c2pa.PDF, f) {
+    fmt.Printf("%d: %s signed by %q (%s)\n",
+        i, info.Attribution, info.SignedBy, info.ClaimGenerator)
+}
+// 0: asset signed by "OpenAI Media Service" (ChatGPT)
+```
+
+A signed attachment inside an unsigned document is the case this exists for: `Read` alone would
+report the document as carrying no provenance, and `ReadAll` shows the attachment's — with
+`AttributionEmbedded`, so it is never mistaken for the document's own.
 
 ## Lower-level
 

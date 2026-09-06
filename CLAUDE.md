@@ -10,17 +10,24 @@ AVIF), RIFF (WebP/WAV/AVI), TIFF (and DNG), GIF, MP3, SVG and PDF, with **two mo
 
 - **`Read(ctx, container, r) Info`** — the fast, *unverified* reader. Surfaces what a file CLAIMS
   (generator, title, signer CN, signing time, AI flag) like EXIF or an unverified `From:` header. It
-  never fails, never does crypto, and is tuned for triage/indexing. Lives in `c2pa.go`, unchanged.
+  never fails, never does crypto, and is tuned for triage/indexing. Lives in `c2pa.go`.
 - **`Validate(ctx, container, r, opts...) ValidationResult`** — the full, opt-in *verifier*. Checks
   the COSE signature, the certificate chain + C2PA cert profile against the trust list, assertion and
   hard-binding hashes, the RFC 3161 timestamp, revocation, and ingredients — reporting C2PA §15 status
   codes. Pure Go, no cgo.
 
-The package stays one `package c2pa` but is split across topic files (`validate.go`, `pdf.go`, `boxes.go`,
-`cose_verify.go`, `chain.go`, `trust.go`, `hashbinding.go`, `bmffhash.go`, `boxmap.go`,
-`boxeshash.go`, `timestamp.go`, `revocation.go`, `ingredient.go`, `statuscodes.go`) — flat
-*import surface*, not one file. Don't introduce subpackages;
-that would force exporting internal helpers.
+The package stays one `package c2pa` but is split across topic files — flat *import surface*, not
+one file:
+
+- **containers** (find and extract the JUMBF store): `c2pa.go` (JPEG + PNG, and the `Read` path),
+  `bmff.go`, `riff.go`, `tiff.go`, `gif.go`, `mp3.go`, `svg.go`, `pdf.go`
+- **JUMBF** (parse the store): `boxes.go`
+- **validation**: `validate.go`, `cose_verify.go`, `chain.go`, `trust.go`, `revocation.go`,
+  `timestamp.go`, `ingredient.go`, `statuscodes.go`
+- **hard bindings**: `hashbinding.go` (dispatch + `c2pa.hash.data`), `bmffhash.go` (BMFF and
+  Merkle), `boxmap.go` + `boxeshash.go` (`c2pa.hash.boxes`)
+
+Don't introduce subpackages; that would force exporting internal helpers.
 
 Public surface:
 
@@ -275,18 +282,32 @@ empty for that whole generation of files.
 
 `testdata/c2pa_signed.jpg` is a real signed JPEG from contentauth/c2pa-rs (see `testdata/README.md`
 for provenance + license). `TestActionsAreAI` synthesises CBOR assertions in-memory because there's
-no public AI-positive fixture. `example_test.go` holds the runnable godoc `Example` — keep it passing,
-it doubles as documentation. The `Fuzz*` targets cover the read pipeline, the recursive box walker,
+no public AI-positive fixture. `example_test.go` holds the runnable godoc examples — the JPEG pair plus
+`ExampleRead_pdf` / `ExampleValidate_pdf` / `ExampleReadAll_pdf` — and they have real `// Output:`
+blocks, so `go test` checks them. **The README's PDF section is the same three examples**, with each
+checked value repeated as an inline `// comment` — so those values are verified in `example_test.go`
+and hand-copied in `README.md`. Change one and change the other; nothing catches the README.
+
+The `Fuzz*` targets cover the read pipeline, the recursive box walker,
 the ASN.1 timestamp descent, the offset-aware `parseStore`/`parseBoxTree`, the full `Validate`
 pipeline, the CMS timestamp verifier, the exclusion-range hashing, and the PDF object scan; their
 seed corpora run as normal tests in CI.
 
-**PDF tests build synthetic documents**, like the BMFF ones (`pdf_test.go`'s `pdfDoc` builder) —
-there is no public C2PA-signed PDF fixture with a redistributable licence. A fully valid PDF asset
-comes from the generated corpus instead (`assembleAsset`'s PDF case, in the positive matrix). Where
-`pdf_test.go` carries the JPEG fixture's own store in a PDF, the fixture's `c2pa.hash.data`
-legitimately mismatches — its exclusions describe the JPEG — so those tests assert on the signature
-step, not on `Valid`.
+**PDF has a real fixture AND synthetic documents.** `testdata/c2pa_chatgpt.pdf` is a genuine
+ChatGPT-pipeline document contributed under this repository's MIT licence (see
+`testdata/README.md`) — the only fixture written by a real producer rather than assembled by a
+test, and the one the PDF godoc examples run against. It validates fully: trusted signer
+`OpenAI Media Service`, `assertion.dataHash.match`, and no timestamp at all (`timeStamp.missing`).
+Reach for it when the question is "what does a real producer write"; its carrier shape — catalog at
+generation 1, `/Type /FileSpec`, a literal-string `/Subtype`, the manifest added by an incremental
+update — is what synthetic builders do not think to produce.
+
+Everything else is synthesised, like the BMFF tests (`pdf_test.go`'s `pdfDoc` builder), because one
+fixture cannot express a broken xref chain or a store in an object stream. A fully valid *generated*
+PDF comes from the corpus (`assembleAsset`'s PDF case, in the positive matrix). Where `pdf_test.go`
+carries the JPEG fixture's own store in a PDF, that fixture's `c2pa.hash.data` legitimately
+mismatches — its exclusions describe the JPEG — so those tests assert on the signature step, not on
+`Valid`.
 
 **Validation tests are self-contained.** The fixture's signer chain (leaf + intermediate) is in its
 own COSE x5chain, so positive tests anchor a test pool at the fixture's own intermediate via
@@ -320,10 +341,23 @@ nothing lands in `testdata/`. Four things to know before extending it:
   treats an unknown code as *informational*, so a typo'd literal degrades silently into a passing
   test instead of failing.
 
-Every declared status code now has an emission site. (`claim.multiple` and
-`timeStamp.outsideValidity` gained theirs in the 2026-09 reliability pass;
-`assertion.boxesHash.match`/`.mismatch`/`.unknownBox`/`.malformed`/`.additionalExclusionsPresent`
-gained theirs when `c2pa.hash.boxes` was implemented, and have corpus cases in `boxeshash_test.go`.)
+**Every declared status code has an emission site**, and that is an invariant worth keeping: a code
+that can never be reported is worse than an absent one, because `StatusCode.Severity()` treats an
+unknown code as *informational* and a caller matching on it waits forever. `manifest.multipleParents`
+was added without one and had to be fixed separately. To check, compare the `Status*` constants in
+`statuscodes.go` against `v.add(Status…` across the package.
+
+Where the recent ones live: `assertion.boxesHash.*` in `boxeshash_test.go`; `assertion.bmffHash.*`
+including the Merkle paths in `bmffmerkle_test.go`; `manifest.update.invalid` /
+`manifest.update.wrongParents` / `manifest.multipleParents` in `updatemanifest_test.go`.
+
+**Cost tests assert a SCALING RATIO, not a wall-clock ceiling.** `assertScalesLinearly` (in
+`pdf_test.go`) builds a document at n and 4n objects and fails when the larger takes more than 8x —
+linear grows 4x, quadratic 16x, and the midpoint separates them. Do not add another
+`time.Since(start) > N*time.Second` guard: an absolute ceiling measures the runner as much as the
+code, and the one that used to guard the payload-extent walk went red on CI at 8.02s for work that
+takes 1.3s locally. The two ceilings still in that file are deliberate smoke guards with ~10x
+headroom that assert no scaling property.
 
 **Box-hash corpus assets are built in two passes** (`buildBoxHashAsset`), not by fixpoint like the
 data-hash ones. The first pass has no hard binding and exists only to lay the container out so its
