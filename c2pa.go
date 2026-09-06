@@ -590,13 +590,16 @@ func pdfAttribution(src pdfStoreSource) Attribution {
 //
 // It is the byte-level counterpart to Read: WalkBoxes over the result reaches
 // boxes and assertions Info does not model, which is what a manifest viewer
-// needs. Reading is capped at MaxScan, as in Read. A nil store is "none found",
-// not a failure — err is non-nil only when r itself errors.
+// needs. Reading is capped at ValidateMaxScan — Validate's cap, not Read's: a
+// store can sit at the very end of a large asset (a PDF's incremental update,
+// a BMFF box after mdat), and a viewer should find whatever Validate
+// validates. Read keeps its 16 MiB triage cap by design. A nil store is "none
+// found", not a failure — err is non-nil only when r itself errors.
 func ExtractStore(ctx context.Context, container Container, r io.Reader) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(io.LimitReader(r, MaxScan))
+	data, err := io.ReadAll(io.LimitReader(r, ValidateMaxScan))
 	if err != nil {
 		return nil, err
 	}

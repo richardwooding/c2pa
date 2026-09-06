@@ -373,7 +373,8 @@ then the object-level manifests an object associates with itself (`AttributionEm
 signed image inside a PDF, then anything the C2PA markers find that nothing places
 (`AttributionUnknown`). `Read` is the first entry's view.
 
-`c2pa.ExtractStore(ctx, container, r)` returns the raw JUMBF manifest store exactly as it appears in
+`c2pa.ExtractStore(ctx, container, r)` reads as far as `Validate` does (not `Read`'s 16 MiB triage
+cap, since a store can sit at the very end of a large file) and returns the raw JUMBF manifest store exactly as it appears in
 the file, and `c2pa.WalkBoxes(ctx, jumbf, fn)` walks its box tree. Together they reach assertions
 `Read` doesn't model — the pair a manifest viewer wants. A nil store means none was found, not an
 error. Box nesting is depth-capped so adversarial input can't exhaust the stack.

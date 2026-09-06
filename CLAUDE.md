@@ -186,7 +186,11 @@ Public surface:
 - `ReadAll(ctx, container, r)` — one Info per store: asset's own first (AttributionAsset), then
   object-level ones (AttributionEmbedded), then marker-found unplaced ones (AttributionUnknown).
   Only PDF returns >1 today (§A.4.3).
-- `ExtractStore(ctx, container, r)` — the raw JUMBF store as embedded; nil means none found.
+- `ExtractStore(ctx, container, r)` — the raw JUMBF store as embedded; nil means none found. It
+  reads up to `ValidateMaxScan`, NOT Read's 16 MiB `MaxScan`: a store can sit at the very end of a
+  large asset (a PDF's incremental update, a BMFF box after `mdat`), and a viewer or a signer
+  deciding created/opened must find whatever `Validate` finds — c2pa-mcp's `sign` misjudged a
+  >16 MiB PDF as unsigned through `Read` before this. `Read` keeps the triage cap by design.
 - `WalkBoxes(ctx, jumbf, fn)` — lower-level JUMBF box-tree walker. Paired with ExtractStore
   this is what a manifest viewer uses to show assertions `Info` doesn't model.
 - `ValidationResult.VerifiedSigner()` — the signer's CN/Organization, but only when the ACTIVE
