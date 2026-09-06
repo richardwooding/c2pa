@@ -147,40 +147,46 @@ func (v *validator) verifyChain(certs []*x509.Certificate, roots *x509.CertPool,
 }
 
 // checkCertProfile applies the manual C2PA certificate-profile constraints to a
-// built path: leaf keyUsage digitalSignature, a present+constrained EKU (no
-// anyExtendedKeyUsage), leaf-is-not-CA, and no weak signature algorithms / short
-// RSA keys anywhere in the path. Records a failure status for each violation.
+// built path and records a failure status for each violation. The rules
+// themselves live in certProfileViolations, which NewSigner applies to its own
+// chain — the signer refuses exactly what the validator would fail.
 func (v *validator) checkCertProfile(path []*x509.Certificate, leaf *x509.Certificate, ekuOK func(*x509.Certificate) bool, uri string) bool {
-	ok := true
+	violations := certProfileViolations(path, leaf, ekuOK)
+	for _, msg := range violations {
+		v.add(StatusSigningCredentialInvalid, uri, msg, nil)
+	}
+	return len(violations) == 0
+}
+
+// certProfileViolations lists the C2PA certificate-profile constraints (§14.5.2)
+// a built path breaks: leaf keyUsage digitalSignature, a present+constrained
+// EKU (no anyExtendedKeyUsage), leaf-is-not-CA, and no weak signature
+// algorithms / short RSA keys anywhere in the path. Empty means it conforms.
+func certProfileViolations(path []*x509.Certificate, leaf *x509.Certificate, ekuOK func(*x509.Certificate) bool) []string {
+	var out []string
 	if leaf.KeyUsage != 0 && leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
-		v.add(StatusSigningCredentialInvalid, uri, "leaf keyUsage lacks digitalSignature", nil)
-		ok = false
+		out = append(out, "leaf keyUsage lacks digitalSignature")
 	}
 	if leafHasAnyEKU(leaf) {
-		v.add(StatusSigningCredentialInvalid, uri, "leaf EKU includes anyExtendedKeyUsage", nil)
-		ok = false
+		out = append(out, "leaf EKU includes anyExtendedKeyUsage")
 	}
 	if !ekuOK(leaf) {
-		v.add(StatusSigningCredentialInvalid, uri, "leaf EKU missing or not acceptable for its role", nil)
-		ok = false
+		out = append(out, "leaf EKU missing or not acceptable for its role")
 	}
 	if leaf.IsCA {
-		v.add(StatusSigningCredentialInvalid, uri, "leaf certificate is a CA", nil)
-		ok = false
+		out = append(out, "leaf certificate is a CA")
 	}
 	for _, c := range path {
 		if weakSigAlg(c.SignatureAlgorithm) {
-			v.add(StatusSigningCredentialInvalid, uri, "weak signature algorithm in chain", nil)
-			ok = false
+			out = append(out, "weak signature algorithm in chain")
 			break
 		}
 		if pk, isRSA := c.PublicKey.(*rsa.PublicKey); isRSA && pk.N.BitLen() < 2048 {
-			v.add(StatusSigningCredentialInvalid, uri, "RSA key shorter than 2048 bits in chain", nil)
-			ok = false
+			out = append(out, "RSA key shorter than 2048 bits in chain")
 			break
 		}
 	}
-	return ok
+	return out
 }
 
 func leafHasAnyEKU(leaf *x509.Certificate) bool {

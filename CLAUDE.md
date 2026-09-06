@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `github.com/richardwooding/c2pa` is a flat (single Go package, no subpackages) **pure-Go** library
 for C2PA / Content Credentials provenance manifests in JPEG, PNG, BMFF (MP4/MOV/HEIC/HEIF/
-AVIF), RIFF (WebP/WAV/AVI), TIFF (and DNG), GIF, MP3, SVG and PDF, with **two modes**:
+AVIF), RIFF (WebP/WAV/AVI), TIFF (and DNG), GIF, MP3, SVG and PDF, with **three modes**:
 
 - **`Read(ctx, container, r) Info`** — the fast, *unverified* reader. Surfaces what a file CLAIMS
   (generator, title, signer CN, signing time, AI flag) like EXIF or an unverified `From:` header. It
@@ -15,6 +15,11 @@ AVIF), RIFF (WebP/WAV/AVI), TIFF (and DNG), GIF, MP3, SVG and PDF, with **two mo
   the COSE signature, the certificate chain + C2PA cert profile against the trust list, assertion and
   hard-binding hashes, the RFC 3161 timestamp, revocation, and ingredients — reporting C2PA §15 status
   codes. Pure Go, no cgo.
+- **`NewSigner(key, chain, opts...)` / `(*Signer).Sign(ctx, container, in, out, m)`** — the *writer*.
+  Builds a `c2pa.claim.v2` manifest with the container's hard binding, signs it once with COSE_Sign1
+  into an envelope of reserved size, embeds it, and validates its own output before writing a byte.
+  Every container's output is checked against c2pa-rs's c2patool in CI (`sign_interop_test.go`).
+  JPEG and PNG so far; the other containers follow in their own PRs. Lives in `sign.go`.
 
 The package stays one `package c2pa` but is split across topic files — flat *import surface*, not
 one file:
@@ -28,6 +33,11 @@ one file:
   Merkle — everything one file can settle), `fragmented.go` (`ValidateFragmented` — Merkle across an
   initialization segment and separate fragment files), `boxmap.go` + `boxeshash.go`
   (`c2pa.hash.boxes`)
+- **signing**: `sign.go` (`Signer`, `Sign`, the size-stabilising pipeline), `jumbfwrite.go` (JUMBF
+  box writers — promoted from the test corpus, which still uses them), `claimwrite.go`
+  (deterministic CBOR `encMode`, claim/assertion builders), `cosesign.go` (COSE_Sign1 with x5chain
+  in the PROTECTED header and exact-size `pad`), `embed.go` (the embedder contract and the JPEG/PNG
+  embedders)
 
 Don't introduce subpackages; that would force exporting internal helpers.
 
@@ -50,6 +60,19 @@ Public surface:
   locations not verified. Per-fragment FAILURES carry the URI suffix `#fragment=<i>` (i = the
   caller's slice index; the location is in the explanation); there are deliberately NO per-fragment
   match entries, so `Has(StatusAssertionBMFFHashMatch)` keeps meaning "fully bound".
+- `Signer` / `NewSigner(key crypto.Signer, chain []*x509.Certificate, opts...)` /
+  `(*Signer).Sign(ctx, container, in io.Reader, out io.Writer, m Manifest) error` — the writer.
+  `Manifest{Title, Actions, Assertions}`, `Action`, `GeneratorInfo`, `Assertion`; `ActionCreated` /
+  `ActionOpened` and the `DigitalSourceType*` constants; `SignerOption` (`WithClaimGenerator`,
+  `WithVendor`, `WithHashAlgorithm` — NOT `WithHTTPClient`/`WithClock`, which are `ValidateOption`s);
+  the `Err*` sentinels (`errors.Is`). The COSE algorithm is inferred from the key (P-256/384/521 →
+  ES256/384/512, RSA ≥ 2048 → PS256, Ed25519 → EdDSA). A manifest must open with `ActionCreated`
+  or `ActionOpened` (c2pa-rs rejects the output otherwise — our validator does not check this, which
+  is why the corpus never noticed); `ActionCreated` on an already-signed asset is refused, since a
+  prior manifest proves something preceded it. Re-signing carries every prior manifest verbatim and
+  names the previous active one as a `parentOf` ingredient with `activeManifest`, `claimSignature`
+  and the `validationResults` c2pa-rs requires. Nothing is written unless the output passes
+  `Validate` (`WithMaxIngredientDepth(0)` so a foreign prior signer cannot fail our own output).
 - `ReadAll(ctx, container, r)` — one Info per store: asset's own first (AttributionAsset), then
   object-level ones (AttributionEmbedded), then marker-found unplaced ones (AttributionUnknown).
   Only PDF returns >1 today (§A.4.3).
@@ -398,6 +421,16 @@ Where the recent ones live: `assertion.boxesHash.*` in `boxeshash_test.go`; `ass
 including the Merkle paths in `bmffmerkle_test.go`, and the split-file paths plus
 `ValidateFragmented` in `fragmented_test.go`; `manifest.update.invalid` /
 `manifest.update.wrongParents` / `manifest.multipleParents` in `updatemanifest_test.go`.
+
+**The signer's acceptance test is c2patool.** `sign_interop_test.go` signs each supported container
+and runs c2pa-rs's `c2patool` over the file: `Valid` with only `signingCredential.untrusted` in
+`failure` for a private chain, `Trusted` with `trust --trust_anchors root.pem`, the right hash-match
+code in `success`, and — for a re-sign — the prior manifest listed as a `parentOf` ingredient with no
+failure deltas. It skips when the binary is absent unless `C2PA_REQUIRE_C2PATOOL` is set, which the
+`interop` job in `ci.yml` sets so it can never pass by skipping. The pin (`v0.27.16`) moves in lockstep
+with `corpus.yml`. Before this gate existed, generated assets had never been run through c2patool at
+all — and the corpus's COSE put x5chain in the unprotected header under a text key for years without
+anything noticing, because `x5chainCandidates` reads both.
 
 **Fragmented assets are built in memory too.** `fragmentedFlatAsset` / `fragmentedFiles`
 (`bmffmerkle_test.go`) lay out flat and split fragmented assets with every merkle box padded to one
