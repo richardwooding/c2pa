@@ -1336,8 +1336,9 @@ func TestValidatePDF_AttachmentIsNotASecondStore(t *testing.T) {
 // earlier is that base section's store; it is passed in so a caller can put a
 // real manifest there and reference it across sections.
 func pdfTwoSectionFraming(earlier []byte) assetFraming {
-	return func(store []byte) (asset []byte, exclStart, exclLen int) {
-		return pdfTwoSections(earlier, store)
+	return func(store []byte) (asset []byte, excl []byteRange) {
+		asset, exclStart, exclLen := pdfTwoSections(earlier, store)
+		return asset, []byteRange{{start: exclStart, length: exclLen}}
 	}
 }
 
@@ -1519,10 +1520,10 @@ func TestValidatePDF_ComponentOfResolvesToObjectLevelManifest(t *testing.T) {
 		noHardBinding: true,
 		assertions:    []assertionSpec{markerAssertion()},
 	}))
-	framing := func(store []byte) (asset []byte, exclStart, exclLen int) {
+	framing := func(store []byte) (asset []byte, excl []byteRange) {
 		asset = pdfObjectLevelDoc(store, objStore, true)
-		exclStart = bytes.Index(asset, store)
-		return asset, exclStart, len(store)
+		exclStart := bytes.Index(asset, store)
+		return asset, []byteRange{{start: exclStart, length: len(store)}}
 	}
 	asset := buildFramedAsset(t, framing, manifestSpec{
 		signer: sb,

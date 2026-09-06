@@ -19,7 +19,8 @@ AVIF), RIFF (WebP/WAV/AVI), TIFF (and DNG), GIF, MP3, SVG and PDF, with **three 
   Builds a `c2pa.claim.v2` manifest with the container's hard binding, signs it once with COSE_Sign1
   into an envelope of reserved size, embeds it, and validates its own output before writing a byte.
   Every container's output is checked against c2pa-rs's c2patool in CI (`sign_interop_test.go`).
-  JPEG and PNG so far; the other containers follow in their own PRs. Lives in `sign.go`.
+  JPEG, PNG, GIF, RIFF (WebP/WAV/AVI), TIFF/DNG, MP3 and SVG so far; BMFF and PDF follow in their
+  own PRs. Lives in `sign.go`.
 
 The package stays one `package c2pa` but is split across topic files — flat *import surface*, not
 one file:
@@ -36,8 +37,9 @@ one file:
 - **signing**: `sign.go` (`Signer`, `Sign`, the size-stabilising pipeline), `jumbfwrite.go` (JUMBF
   box writers — promoted from the test corpus, which still uses them), `claimwrite.go`
   (deterministic CBOR `encMode`, claim/assertion builders), `cosesign.go` (COSE_Sign1 with x5chain
-  in the PROTECTED header and exact-size `pad`), `embed.go` (the embedder contract and the JPEG/PNG
-  embedders)
+  in the PROTECTED header and exact-size `pad`), `embed.go` (the embedder contract, `applyEdits`,
+  and the JPEG/PNG embedders; the other containers' embedders live beside their readers in
+  `gif.go`, `riff.go`, `tiff.go`, `mp3.go`, `svg.go`)
 
 Don't introduce subpackages; that would force exporting internal helpers.
 
@@ -73,6 +75,26 @@ Public surface:
   names the previous active one as a `parentOf` ingredient with `activeManifest`, `claimSignature`
   and the `validationResults` c2pa-rs requires. Nothing is written unless the output passes
   `Validate` (`WithMaxIngredientDepth(0)` so a foreign prior signer cannot fail our own output).
+- **Embedders** (`embed.go` + the container files) are pure functions of `(asset, store)`: every
+  existing store removed, the new one at Annex A's canonical position — deterministic, not c2pa-rs's
+  replace-in-place — and `out` depends on the store only through its LENGTH and the bytes inside the
+  returned exclusions, which is what lets the pipeline converge a layout with a placeholder store.
+  `embedStore` checks the store reads back through `extractJUMBF` before returning. Per container:
+  JPEG APP11 run after the last APP0 (64000-byte segments, `En 0x0211`, the layout the signed
+  fixture has — re-embedding the fixtures' own stores reproduces them byte for byte); PNG one `caBX`
+  after `IHDR`; GIF the application extension after the colour table, version forced to `89a`;
+  RIFF the `C2PA` chunk LAST, RIFF size rewritten, a simple-format WebP gains a synthesised `VP8X`
+  (with the VP8L alpha bit — c2pa-rs drops it), pad byte outside the exclusion; TIFF a NEW last IFD
+  holding only the `0xCD41` entry (§A.3.5), relinked from the previous last IFD, an existing entry
+  unlinked (its own IFD) or removed in place (shared IFD), and TWO exclusions — the entry's count
+  field and the store (c2pa-rs parity); MP3 a `GEOB` frame last in a rebuilt tag whose other frames
+  are copied verbatim and whose major version is PRESERVED (c2pa-rs always emits v2.4 only because
+  its `id3` crate re-models v2.3 frames on read; copying v2.3 bytes under a v2.4 header would
+  mis-declare every frame size), exclusion = the object bytes only; SVG byte-exact splicing at the
+  strict tokenizer's offsets — `xmlns:c2pa` on the root when absent, the element first inside an
+  existing direct-child `<metadata>` or a new one first under `<svg>`, exclusion = the base64 text.
+  Refused: ID3v2.2, a c2pa prefix bound elsewhere, a RIFF whose size does not fit the file, a GIF
+  without a trailer, a JPEG without SOS.
 - `ReadAll(ctx, container, r)` — one Info per store: asset's own first (AttributionAsset), then
   object-level ones (AttributionEmbedded), then marker-found unplaced ones (AttributionUnknown).
   Only PDF returns >1 today (§A.4.3).
@@ -431,6 +453,12 @@ failure deltas. It skips when the binary is absent unless `C2PA_REQUIRE_C2PATOOL
 with `corpus.yml`. Before this gate existed, generated assets had never been run through c2patool at
 all — and the corpus's COSE put x5chain in the unprotected header under a text key for years without
 anything noticing, because `x5chainCandidates` reads both.
+
+**The corpus frames through the production embedders.** `assembleAsset(container, store)` is
+`embedStore(container, unsignedCorpusAsset(container), store)` for every container but PDF, so the
+positive matrix and every negative case exercise INSERTION into an existing asset with the same code
+`Sign` uses; `assetFraming` returns `[]byteRange` because TIFF has two exclusions. PDF keeps its
+hand-built frame until it has an embedder.
 
 **Fragmented assets are built in memory too.** `fragmentedFlatAsset` / `fragmentedFiles`
 (`bmffmerkle_test.go`) lay out flat and split fragmented assets with every merkle box padded to one

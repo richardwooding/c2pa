@@ -274,7 +274,7 @@ func TestCorpusNegatives(t *testing.T) {
 }
 
 func TestCorpusNoManifest(t *testing.T) {
-	asset, _, _ := assembleAsset(JPEG, nil)
+	asset, _ := assembleAsset(JPEG, nil)
 	res := Validate(context.Background(), JPEG, bytes.NewReader(asset), WithClock(corpusClock()))
 	if !res.Has(StatusClaimMissing) {
 		t.Fatalf("want %s; got %v", StatusClaimMissing, codes(res))

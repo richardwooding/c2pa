@@ -35,7 +35,7 @@ func updatedJPEG(t testing.TB, sb *signerBundle, extra ...assertionSpec) []byte 
 	const parentLabel = "urn:uuid:00000000-0000-4000-8000-0000000000aa"
 	const updateLabel = "urn:uuid:00000000-0000-4000-8000-0000000000bb"
 
-	return buildFramedAsset(t, func(store []byte) ([]byte, int, int) {
+	return buildFramedAsset(t, func(store []byte) ([]byte, []byteRange) {
 		return assembleAsset(JPEG, store)
 	}, manifestSpec{
 		signer:     sb,
@@ -173,7 +173,7 @@ func TestUpdateManifestWrongParents(t *testing.T) {
 	})
 	t.Run("no parent", func(t *testing.T) {
 		sb := newCorpusSigner(t, cose.AlgorithmES256)
-		asset := buildFramedAsset(t, func(store []byte) ([]byte, int, int) {
+		asset := buildFramedAsset(t, func(store []byte) ([]byte, []byteRange) {
 			return assembleAsset(JPEG, store)
 		}, manifestSpec{
 			signer:     sb,

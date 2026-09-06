@@ -77,8 +77,8 @@ func signedFragmentedAsset(t testing.TB, sf splitFragmented, spec manifestSpec) 
 	if len(spec.assertions) == 0 {
 		spec.assertions = []assertionSpec{markerAssertion()}
 	}
-	return buildFramedAsset(t, func(store []byte) ([]byte, int, int) {
-		return append(append([]byte(nil), sf.init...), synthC2PABox("manifest", store, 0)...), 0, 0
+	return buildFramedAsset(t, func(store []byte) ([]byte, []byteRange) {
+		return append(append([]byte(nil), sf.init...), synthC2PABox("manifest", store, 0)...), nil
 	}, spec)
 }
 
@@ -297,9 +297,9 @@ func (m *mustNotRead) Read([]byte) (int, error) {
 func TestValidateFragmentedNeedsBMFFBinding(t *testing.T) {
 	sb := newCorpusSigner(t, cose.AlgorithmES256)
 	sf := fragmentedFiles(t, 2, 1, 1, 1, splitOpts{})
-	init := buildFramedAsset(t, func(store []byte) ([]byte, int, int) {
+	init := buildFramedAsset(t, func(store []byte) ([]byte, []byteRange) {
 		box := synthC2PABox("manifest", store, 0)
-		return append(append([]byte(nil), sf.init...), box...), len(sf.init), len(box)
+		return append(append([]byte(nil), sf.init...), box...), []byteRange{{start: len(sf.init), length: len(box)}}
 	}, manifestSpec{signer: sb, assertions: []assertionSpec{markerAssertion()}})
 	res := validateFragmentedCorpus(t, init, []io.Reader{&mustNotRead{t}}, sb)
 	if !res.Has(StatusHardBindingMissing) {

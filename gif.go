@@ -3,6 +3,7 @@ package c2pa
 import (
 	"bytes"
 	"context"
+	"fmt"
 )
 
 const (
@@ -111,4 +112,103 @@ func gifSubBlocks(data []byte, pos int) (payload []byte, next int) {
 		pos += 1 + n
 	}
 	return nil, -1
+}
+
+// --- writing ------------------------------------------------------------------
+
+// gifEmbedder writes the store as the C2PA application extension (spec
+// §A.3.7) right after the header, logical screen descriptor and global colour
+// table — before the first image descriptor — and forces the version to 89a,
+// which is the first version with application extensions.
+type gifEmbedder struct{}
+
+// gifPlan walks the block stream the way gifJUMBF does and reports where the
+// preamble ends and which blocks are existing C2PA extensions. A stream that
+// cannot be walked to its trailer is not one a store can be written into.
+func gifPlan(ctx context.Context, data []byte) (preambleEnd int, cuts []edit, err error) {
+	if len(data) < 13 || string(data[:3]) != "GIF" || (string(data[3:6]) != "87a" && string(data[3:6]) != "89a") {
+		return 0, nil, fmt.Errorf("%w: not a GIF", errCarrierMalformed)
+	}
+	pos := 13
+	if packed := data[10]; packed&0x80 != 0 {
+		pos += 3 * (1 << ((packed & 0x07) + 1))
+	}
+	if pos > len(data) {
+		return 0, nil, fmt.Errorf("%w: GIF header overruns the file", errCarrierMalformed)
+	}
+	preambleEnd = pos
+	for blocks := 0; pos < len(data) && blocks < maxGIFBlocks; blocks++ {
+		if err := ctx.Err(); err != nil {
+			return 0, nil, err
+		}
+		switch data[pos] {
+		case gifTrailer:
+			return preambleEnd, cuts, nil
+		case gifExtensionIntroducer:
+			if pos+2 > len(data) {
+				return 0, nil, fmt.Errorf("%w: truncated GIF extension", errCarrierMalformed)
+			}
+			start, label := pos, data[pos+1]
+			pos += 2
+			isC2PA := label == gifApplicationLabel && pos+1+len(gifC2PAIdentifier) <= len(data) &&
+				int(data[pos]) == len(gifC2PAIdentifier) &&
+				string(data[pos+1:pos+1+len(gifC2PAIdentifier)]) == gifC2PAIdentifier
+			_, next := gifSubBlocks(data, pos)
+			if next < 0 {
+				return 0, nil, fmt.Errorf("%w: GIF extension sub-blocks run off the end", errCarrierMalformed)
+			}
+			if isC2PA {
+				cuts = append(cuts, edit{at: start, remove: next - start})
+			}
+			pos = next
+		case gifImageDescriptor:
+			if pos+10 > len(data) {
+				return 0, nil, fmt.Errorf("%w: truncated GIF image descriptor", errCarrierMalformed)
+			}
+			packed := data[pos+9]
+			pos += 10
+			if packed&0x80 != 0 {
+				pos += 3 * (1 << ((packed & 0x07) + 1))
+			}
+			pos++ // LZW minimum code size
+			_, next := gifSubBlocks(data, pos)
+			if next < 0 {
+				return 0, nil, fmt.Errorf("%w: GIF image data runs off the end", errCarrierMalformed)
+			}
+			pos = next
+		default:
+			return 0, nil, fmt.Errorf("%w: byte 0x%02X at offset %d is not a GIF block", errCarrierMalformed, data[pos], pos)
+		}
+	}
+	return 0, nil, fmt.Errorf("%w: GIF has no trailer", errCarrierMalformed)
+}
+
+func (gifEmbedder) embed(ctx context.Context, asset, store []byte) ([]byte, []byteRange, error) {
+	preambleEnd, cuts, err := gifPlan(ctx, asset)
+	if err != nil {
+		return nil, nil, err
+	}
+	ext := []byte{gifExtensionIntroducer, gifApplicationLabel, byte(len(gifC2PAIdentifier))}
+	ext = append(ext, gifC2PAIdentifier...)
+	ext = append(ext, gifSubBlockChain(store)...)
+	edits := append(cuts, edit{at: preambleEnd, insert: ext})
+	out, placed, _, err := applyEdits(asset, edits)
+	if err != nil {
+		return nil, nil, err
+	}
+	out[4] = '9' // GIF87a → GIF89a: application extensions need 89a
+	return out, []byteRange{{start: placed[len(edits)-1], length: len(ext)}}, nil
+}
+
+// gifSubBlockChain splits payload into data sub-blocks of at most 255 bytes,
+// each prefixed by its length, and appends the empty terminator block.
+func gifSubBlockChain(payload []byte) []byte {
+	out := make([]byte, 0, len(payload)+len(payload)/255+2)
+	for len(payload) > 0 {
+		n := min(255, len(payload))
+		out = append(out, byte(n))
+		out = append(out, payload[:n]...)
+		payload = payload[n:]
+	}
+	return append(out, 0)
 }

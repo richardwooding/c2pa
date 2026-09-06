@@ -48,7 +48,7 @@ func TestSignRoundTrip(t *testing.T) {
 			}
 			boxes, ok := assetBoxMap(context.Background(), c, out)
 			if !ok {
-				t.Fatalf("no box map for %s", c)
+				return // only JPEG, PNG and GIF have a box map
 			}
 			n := 0
 			for _, name := range boxNames(boxes) {
@@ -123,7 +123,7 @@ func TestSignTamperOutsideStore(t *testing.T) {
 		t.Run(string(c), func(t *testing.T) {
 			out := signBytes(t, s, c, unsignedInput(t, c), createdManifest("tamper"))
 			tampered := append([]byte(nil), out...)
-			tampered[len(tampered)-1] ^= 0xFF // the last byte lies outside every exclusion
+			tampered[tamperOutsideStore(c, tampered)] ^= 0xFF
 			res := Validate(context.Background(), c, bytes.NewReader(tampered), WithSigningTrust(sc.roots), WithOnlineRevocation(false))
 			if !res.Has(StatusAssertionDataHashMismatch) || res.Valid {
 				t.Errorf("edit went unnoticed: %v", codes(res))

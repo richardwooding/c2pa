@@ -14,6 +14,13 @@ func FuzzSign(f *testing.F) {
 	f.Add(unsignedJPEG(f), uint8(0))
 	f.Add(unsignedPNG(f), uint8(1))
 	f.Add(fixtureBytes(f, "c2pa_signed.jpg"), uint8(0))
+	f.Add(unsignedGIF(f), uint8(2))
+	f.Add(unsignedWebP(), uint8(3))
+	f.Add(unsignedWAV(), uint8(3))
+	f.Add(unsignedTIFF(false), uint8(4))
+	f.Add(unsignedTIFF(true), uint8(4))
+	f.Add(unsignedMP3(), uint8(5))
+	f.Add(unsignedSVG(), uint8(6))
 	f.Add([]byte{0xFF, 0xD8, 0xFF, 0xD9}, uint8(0))
 	f.Add([]byte{}, uint8(1))
 	f.Fuzz(func(t *testing.T, data []byte, which uint8) {
@@ -42,6 +49,11 @@ func FuzzEmbedStore(f *testing.F) {
 	f.Add(unsignedJPEG(f), []byte{0xA0}, uint8(0))
 	f.Add(unsignedPNG(f), []byte{0xA0}, uint8(1))
 	f.Add(fixtureBytes(f, "c2pa_signed.jpg"), bytes.Repeat([]byte{7}, 70000), uint8(0))
+	f.Add(unsignedGIF(f), bytes.Repeat([]byte{7}, 600), uint8(2))
+	f.Add(unsignedWebP(), []byte{0xA0}, uint8(3))
+	f.Add(unsignedTIFF(true), []byte{0xA0}, uint8(4))
+	f.Add(unsignedMP3(), []byte{0xA0}, uint8(5))
+	f.Add(unsignedSVG(), []byte{0xA0}, uint8(6))
 	f.Fuzz(func(t *testing.T, asset, payload []byte, which uint8) {
 		if len(asset) > 1<<20 || len(payload) > 1<<17 {
 			return
