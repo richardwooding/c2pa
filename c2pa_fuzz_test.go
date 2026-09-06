@@ -6,7 +6,9 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"encoding/binary"
+	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/fxamacker/cbor/v2"
@@ -508,6 +510,40 @@ func FuzzMerkleProve(f *testing.F) {
 		ok, malformed := merkleProve("sha256", m, leaf, location, proof)
 		if ok && malformed {
 			t.Fatalf("count %d location %d: both ok and malformed", count, location)
+		}
+	})
+}
+
+// FuzzValidateFragmented runs the whole split-file pipeline over arbitrary
+// bytes for the initialization segment and one fragment supplied twice, so the
+// coverage bookkeeping sees a duplicate. Seeded with nothing, with a valid
+// signed fragmented asset, and with a plain signed MP4 as the init.
+//
+// Contract: never panic; an empty fragment never contributes to a match; a
+// match is never reported alongside a fragment failure.
+func FuzzValidateFragmented(f *testing.F) {
+	sb := newCorpusSigner(f, cose.AlgorithmES256)
+	sf := fragmentedFiles(f, 2, 1, 1, 1, splitOpts{})
+	init := signedFragmentedAsset(f, sf, manifestSpec{signer: sb})
+	f.Add([]byte{}, []byte{})
+	f.Add(init, sf.frags[0])
+	if video, err := os.ReadFile("testdata/c2pa_signed_video.mp4"); err == nil {
+		f.Add(video, sf.frags[0])
+	}
+	f.Fuzz(func(t *testing.T, initBytes, frag []byte) {
+		res := ValidateFragmented(context.Background(), bytes.NewReader(initBytes),
+			[]io.Reader{bytes.NewReader(frag), bytes.NewReader(frag)},
+			WithSigningTrust(sb.roots), WithClock(corpusClock()))
+		if !res.Has(StatusAssertionBMFFHashMatch) {
+			return
+		}
+		if len(frag) == 0 {
+			t.Fatalf("reported a match with no fragment bytes")
+		}
+		for _, s := range res.Statuses {
+			if s.Severity == SeverityFailure && strings.Contains(s.URI, "#fragment=") {
+				t.Fatalf("reported a match alongside a fragment failure: %+v", s)
+			}
 		}
 	})
 }

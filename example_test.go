@@ -3,7 +3,9 @@ package c2pa_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/richardwooding/c2pa"
 )
@@ -137,4 +139,49 @@ func ExampleReadAll_pdf() {
 	}
 	// Output:
 	// 0: asset signed by "OpenAI Media Service" (ChatGPT)
+}
+
+// ExampleValidateFragmented verifies a DASH/CMAF asset whose initialization
+// segment and media fragments are separate files. The initialization segment
+// carries the manifest; each fragment carries the Merkle proof that binds it.
+// The binding is a match only when every fragment the manifest binds was
+// supplied and verified; a partial set is an informational status naming what
+// was not covered, never a false match.
+//
+// No signed fragmented fixture ships with the package — the c2pa-rs DASH set
+// is signed at test time by an ephemeral key — so this example is compiled but
+// not run.
+func ExampleValidateFragmented() {
+	init, err := os.Open("video/init.mp4")
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = init.Close() }()
+
+	paths, _ := filepath.Glob("video/*.m4s")
+	var files []*os.File
+	defer func() {
+		for _, f := range files {
+			_ = f.Close()
+		}
+	}()
+	frags := make([]io.Reader, 0, len(paths))
+	for _, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			panic(err)
+		}
+		files = append(files, f)
+		frags = append(frags, f)
+	}
+
+	r := c2pa.ValidateFragmented(context.Background(), init, frags)
+	fmt.Println("valid:", r.Valid)
+	// Bound only if every fragment was supplied and verified.
+	fmt.Println("bound:", r.Has(c2pa.StatusAssertionBMFFHashMatch))
+	for _, s := range r.Statuses {
+		// A per-fragment failure's URI ends in "#fragment=<i>", i being the
+		// index into frags.
+		fmt.Println(s.Code, s.URI, s.Explanation)
+	}
 }

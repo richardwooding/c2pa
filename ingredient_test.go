@@ -33,7 +33,7 @@ func TestValidate_IngredientCycle(t *testing.T) {
 	mB := &parsedManifest{label: "urn:B", assertions: []rawAssertion{ingredientAssertion(t, "urn:A")}}
 	store := &parsedStore{manifests: []*parsedManifest{mA, mB}}
 
-	v := newValidator(false, nil)
+	v := testValidator(false, nil)
 	v.data = []byte("x")
 	v.validateManifest(mA, store, 0) // must terminate
 
@@ -54,7 +54,7 @@ func TestValidate_IngredientDepthCap(t *testing.T) {
 	mC := &parsedManifest{label: "urn:C"}
 	store := &parsedStore{manifests: []*parsedManifest{mA, mB, mC}}
 
-	v := newValidator(false, nil)
+	v := testValidator(false, nil)
 	v.cfg.maxIngredientDepth = 1
 	v.validateManifest(mA, store, 0)
 
@@ -72,7 +72,7 @@ func TestValidate_IngredientMissing(t *testing.T) {
 	mA := &parsedManifest{label: "urn:A", assertions: []rawAssertion{ingredientAssertion(t, "urn:GONE")}}
 	store := &parsedStore{manifests: []*parsedManifest{mA}}
 
-	v := newValidator(false, nil)
+	v := testValidator(false, nil)
 	v.validateIngredients(mA, store, 0)
 	if !v.res.Has(StatusIngredientManifestMismatch) {
 		t.Errorf("expected ingredient.manifest.mismatch; got %v", codes(v.res))

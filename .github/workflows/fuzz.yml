@@ -38,6 +38,7 @@ jobs:
           - FuzzBMFFFragment
           - FuzzMerkleBoxDecode
           - FuzzMerkleProve
+          - FuzzValidateFragmented
           - FuzzPDFParse
           - FuzzRIFFParse
           - FuzzTIFFParse
