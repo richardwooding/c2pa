@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
-	"hash/crc32"
 	"testing"
 )
 
@@ -13,59 +12,6 @@ var (
 		0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x11, 0x22, 0x33, 0x44, 0x55, 0xFF, 0xD9}
 	pngSignature = []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
 )
-
-// jpegAPP11 splits a JUMBF box across APP11 segments. Continuation segments
-// repeat the box's 8-byte LBox+TBox header, which the reader skips — only the
-// Z==1 segment contributes it.
-func jpegAPP11(boxData []byte) []byte {
-	const maxPayload = 65533
-	var out []byte
-	z := uint32(1)
-	for i := 0; i < len(boxData); {
-		var prefix []byte
-		room := maxPayload - 8
-		if z > 1 {
-			prefix = boxData[:8]
-			room -= 8
-		}
-		n := room
-		if i+n > len(boxData) {
-			n = len(boxData) - i
-		}
-		payload := make([]byte, 0, 8+len(prefix)+n)
-		payload = append(payload, 0x4A, 0x50, 0x00, 0x01)
-		var zb [4]byte
-		binary.BigEndian.PutUint32(zb[:], z)
-		payload = append(payload, zb[:]...)
-		payload = append(payload, prefix...)
-		payload = append(payload, boxData[i:i+n]...)
-
-		var ln [2]byte
-		binary.BigEndian.PutUint16(ln[:], uint16(2+len(payload)))
-		out = append(out, 0xFF, 0xEB)
-		out = append(out, ln[:]...)
-		out = append(out, payload...)
-
-		i += n
-		z++
-	}
-	return out
-}
-
-func pngChunk(typ string, data []byte) []byte {
-	var out []byte
-	var ln [4]byte
-	binary.BigEndian.PutUint32(ln[:], uint32(len(data)))
-	out = append(out, ln[:]...)
-	out = append(out, typ...)
-	out = append(out, data...)
-	crc := crc32.NewIEEE()
-	crc.Write([]byte(typ))
-	crc.Write(data)
-	var cb [4]byte
-	binary.BigEndian.PutUint32(cb[:], crc.Sum32())
-	return append(out, cb[:]...)
-}
 
 // pngCaBX splits the store across caBX chunks; the reader concatenates them, so
 // the split point is arbitrary and deliberately uneven here to exercise it.
@@ -89,7 +35,7 @@ func assembleAsset(container Container, store []byte) (asset []byte, exclStart, 
 		asset = append(asset, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00,
 			0x01, 0x02, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00)
 		exclStart = len(asset)
-		asset = append(asset, jpegAPP11(store)...)
+		asset = append(asset, jpegAPP11Run(store)...)
 		exclLen = len(asset) - exclStart
 		asset = append(asset, jpegTrailer...)
 	case PNG:

@@ -9,7 +9,6 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/binary"
 	"math/big"
 	"sync"
 	"testing"
@@ -22,60 +21,6 @@ import (
 // corpusEpoch is the pinned wall clock for every generated case; certificates
 // and clocks are anchored here so results never depend on the run date.
 var corpusEpoch = time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
-
-func jumbfUUID(tag string) [16]byte {
-	var u [16]byte
-	copy(u[:], tag)
-	copy(u[4:], []byte{0x00, 0x11, 0x00, 0x10, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71})
-	return u
-}
-
-var (
-	uuidC2PA = jumbfUUID("c2pa")
-	// uuidC2UM is an Update Manifest's superbox type UUID (spec §11.2.3); it is
-	// the only thing that distinguishes one from a standard manifest.
-	uuidC2UM = jumbfUUID("c2um")
-	uuidCBOR = jumbfUUID("cbor")
-	uuidJSON = jumbfUUID("json")
-)
-
-func boxHeader(size int, tbox string) []byte {
-	h := make([]byte, 8)
-	binary.BigEndian.PutUint32(h[:4], uint32(size))
-	copy(h[4:], tbox)
-	return h
-}
-
-func leafBox(tbox string, payload []byte) []byte {
-	return append(boxHeader(8+len(payload), tbox), payload...)
-}
-
-// jumdBox emits the description box. Toggles bit 1 (0x02) is what makes the
-// parser read the label at all; without it the box is anonymous.
-func jumdBox(typeUUID [16]byte, label string) []byte {
-	payload := make([]byte, 0, 17+len(label)+1)
-	payload = append(payload, typeUUID[:]...)
-	payload = append(payload, 0x03)
-	payload = append(payload, label...)
-	payload = append(payload, 0x00)
-	return leafBox("jumd", payload)
-}
-
-func superBox(typeUUID [16]byte, label string, children ...[]byte) []byte {
-	content := jumdBox(typeUUID, label)
-	for _, c := range children {
-		content = append(content, c...)
-	}
-	return append(boxHeader(8+len(content), "jumb"), content...)
-}
-
-func assertionBox(label string, payload []byte) []byte {
-	return superBox(uuidCBOR, label, leafBox("cbor", payload))
-}
-
-func jsonAssertionBox(label string, payload []byte) []byte {
-	return superBox(uuidJSON, label, leafBox("json", payload))
-}
 
 // corpusKeys are minted once per run: RSA-2048 generation is the single
 // expensive operation in the corpus and must not repeat per case.
@@ -479,8 +424,4 @@ func attachTimestamp(t testing.TB, spec manifestSpec, msg *cose.Sign1Message, ma
 		t.Fatalf("timestamp header did not survive re-marshalling")
 	}
 	return out
-}
-
-func storeBox(manifests ...[]byte) []byte {
-	return superBox(uuidC2PA, "c2pa", manifests...)
 }

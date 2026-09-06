@@ -39,6 +39,10 @@ jobs:
           - FuzzMerkleBoxDecode
           - FuzzMerkleProve
           - FuzzValidateFragmented
+          - FuzzBoxMap
+          - FuzzBoxesHash
+          - FuzzSign
+          - FuzzEmbedStore
           - FuzzPDFParse
           - FuzzRIFFParse
           - FuzzTIFFParse
