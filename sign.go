@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -57,6 +59,11 @@ var (
 	ErrSignerChain = errors.New("c2pa: certificate chain rejected")
 	// ErrSignerOption is returned for an option value that cannot be used.
 	ErrSignerOption = errors.New("c2pa: signer option invalid")
+	// ErrTimestamp is returned when the timestamp authority named by
+	// WithTimestampAuthority could not be reached, rejected the request, or
+	// returned a token that does not verify over this signature or does not
+	// echo the request's nonce. Nothing is written.
+	ErrTimestamp = errors.New("c2pa: timestamp authority")
 	// ErrSelfCheckFailed is returned when the signed output fails this
 	// package's own Validate; nothing is written when it does.
 	ErrSelfCheckFailed = errors.New("c2pa: signed output did not validate")
@@ -129,6 +136,8 @@ type signerConfig struct {
 	generator GeneratorInfo
 	vendor    string
 	hashAlg   string
+	tsaURL    string
+	tsaClient *http.Client
 }
 
 // WithClaimGenerator sets claim_generator_info, the software that produced the
@@ -147,6 +156,24 @@ func WithVendor(vendor string) SignerOption {
 // binding: "sha256" (default), "sha384" or "sha512".
 func WithHashAlgorithm(alg string) SignerOption {
 	return func(c *signerConfig) { c.hashAlg = alg }
+}
+
+// WithTimestampAuthority enables RFC 3161 timestamping (§13.2): every Sign
+// POSTs a TimeStampReq to url and stores the verified TimeStampToken in the
+// signature's sigTst2 header, so validators can pin the signing time without
+// trusting the clock. The reply is checked with the validator's own code
+// before it is embedded; a reply that fails the check, or an authority that
+// cannot be reached, fails the sign with ErrTimestamp. Without this option Sign
+// makes no network requests.
+func WithTimestampAuthority(url string) SignerOption {
+	return func(c *signerConfig) { c.tsaURL = url }
+}
+
+// WithTimestampHTTPClient sets the client used to reach the timestamp
+// authority (default: a client with a 30-second timeout). WithHTTPClient is
+// Validate's option for revocation fetches, hence the distinct name.
+func WithTimestampHTTPClient(client *http.Client) SignerOption {
+	return func(c *signerConfig) { c.tsaClient = client }
 }
 
 func defaultSignerConfig() signerConfig {
@@ -215,6 +242,12 @@ func NewSigner(key crypto.Signer, chain []*x509.Certificate, opts ...SignerOptio
 		cfg.vendor = strings.ToLower(cfg.vendor)
 		if !validVendor(cfg.vendor) {
 			return nil, fmt.Errorf("%w: vendor %q must be 1-32 visible characters without space or colon", ErrSignerOption, cfg.vendor)
+		}
+	}
+	if cfg.tsaURL != "" {
+		u, err := url.Parse(cfg.tsaURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("%w: timestamp authority %q is not an http(s) URL", ErrSignerOption, cfg.tsaURL)
 		}
 	}
 	alg, sigLen, err := coseAlgorithmFor(key.Public())
@@ -561,7 +594,8 @@ func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asse
 	// (a) converge the layout.
 	h, _ := hashByName(alg)
 	zeroDigest := make([]byte, h.Size())
-	reserve := coseReserveSize(s.sigLen, s.chainDER, false)
+	timestamped := s.cfg.tsaURL != ""
+	reserve := coseReserveSize(s.sigLen, s.chainDER, timestamped)
 	zeroEnvelope := make([]byte, reserve)
 	excl := []byteRange{{start: 0, length: 0}}
 	var layout []byte
@@ -610,6 +644,23 @@ func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asse
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSignerKey, err)
 	}
+	var tokenCerts []*x509.Certificate
+	if timestamped {
+		// Sign first, then timestamp the signature (sigTst2, §13.2): the token
+		// goes in the unprotected header, so the signature stays valid.
+		tbs, err := coseTimestampTBS(msg)
+		if err != nil {
+			return nil, fmt.Errorf("c2pa: internal: %w", err)
+		}
+		token, err := s.fetchTimestamp(ctx, tbs)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrTimestamp, err)
+		}
+		attachSigTst2(msg, token)
+		if sd, ok := parseCMSSignedData(token); ok {
+			tokenCerts = sd.certs
+		}
+	}
 	envelope, err := marshalSign1Padded(msg, reserve)
 	if err != nil {
 		return nil, fmt.Errorf("c2pa: internal: %w", err)
@@ -642,13 +693,22 @@ func (s *Signer) sign(ctx context.Context, container Container, _ embedder, asse
 
 	pool := x509.NewCertPool()
 	pool.AddCert(s.chain[len(s.chain)-1])
-	res := Validate(ctx, container, bytes.NewReader(final),
-		WithSigningTrust(pool), WithMaxIngredientDepth(0), WithOnlineRevocation(false))
+	checkOpts := []ValidateOption{WithSigningTrust(pool), WithMaxIngredientDepth(0), WithOnlineRevocation(false)}
+	if len(tokenCerts) > 0 {
+		// The self-check is about the binding, not about whether the caller's
+		// TSA is anchored: the token's own certificates are the pool.
+		tsaPool := x509.NewCertPool()
+		for _, c := range tokenCerts {
+			tsaPool.AddCert(c)
+		}
+		checkOpts = append(checkOpts, WithTimestampTrust(tsaPool))
+	}
+	res := Validate(ctx, container, bytes.NewReader(final), checkOpts...)
 	match := StatusAssertionDataHashMatch
 	if bmff {
 		match = StatusAssertionBMFFHashMatch
 	}
-	if !res.Valid || !res.Has(match) {
+	if !res.Valid || !res.Has(match) || (timestamped && !res.Has(StatusTimeStampValidated)) {
 		reason := "hard binding did not verify"
 		if f := res.FirstFailure(); f != nil {
 			reason = string(f.Code) + ": " + f.Explanation

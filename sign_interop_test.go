@@ -3,12 +3,15 @@ package c2pa
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The interop gate: everything Sign writes is handed to c2pa-rs's c2patool,
@@ -295,4 +298,71 @@ func TestSignInteropResign(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSignInteropTimestamp: c2patool sees the sigTst2 token. Without the TSA
+// anchored it is informational (timeStamp.untrusted), never a malformation or
+// a mismatch; with both anchors supplied through a settings file the file is
+// Trusted with the timestamp validated and trusted, and the time c2patool
+// reports agrees with ours.
+func TestSignInteropTimestamp(t *testing.T) {
+	requireC2patool(t)
+	ta := liveTSA(t)
+	srv := newTSAServer(t, ta, nil)
+	sc := newSigningChain(t)
+	s, err := NewSigner(sc.key, sc.chain, WithClaimGenerator("c2pa-go-interop", "0.1"), WithTimestampAuthority(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, out := interopSign(t, s, JPEG, unsignedJPEG(t), ".jpg", createdManifest("stamped"))
+
+	rep := runC2patoolJSON(t, path)
+	if rep.ValidationState != "Valid" {
+		t.Errorf("validation_state = %q; failures %v", rep.ValidationState, rep.ValidationResults.ActiveManifest.Failure)
+	}
+	am := rep.ValidationResults.ActiveManifest
+	if am == nil {
+		t.Fatal("no activeManifest results")
+	}
+	if !am.codes(am.Informational)["timeStamp.untrusted"] {
+		t.Errorf("without the TSA anchor c2patool should report timeStamp.untrusted as informational: %v", am.Informational)
+	}
+	for _, list := range [][]c2patoolStatus{am.Success, am.Informational, am.Failure} {
+		for _, st := range list {
+			if st.Code == "timeStamp.mismatch" || st.Code == "timeStamp.malformed" || st.Code == "timeStamp.outsideValidity" {
+				t.Errorf("token defect reported: %s: %s", st.Code, st.Explanation)
+			}
+		}
+	}
+
+	// Both anchors through a settings file. c2patool v0.27.16 keeps ONE trust
+	// list — `trust.trust_anchors` anchors manifest signers AND timestamp
+	// authorities — so the two roots are concatenated; there is no TSA-specific
+	// key (probed: a `trust_kind = "tsa"` table is silently ignored).
+	settings := "[verify]\nverify_timestamp_trust = true\n\n[trust]\ntrust_anchors = \"\"\"\n" +
+		string(sc.rootPEM) + string(pemCert(t, ta.root)) + "\"\"\"\n"
+	settingsPath := filepath.Join(t.TempDir(), "settings.toml")
+	if err := os.WriteFile(settingsPath, []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	trusted := runC2patoolJSON(t, "--settings", settingsPath, path)
+	if trusted.ValidationState != "Trusted" {
+		t.Errorf("with both anchors: %q; failures %v informational %v", trusted.ValidationState,
+			trusted.ValidationResults.ActiveManifest.Failure, trusted.ValidationResults.ActiveManifest.Informational)
+	}
+	tam := trusted.ValidationResults.ActiveManifest
+	if tam != nil && (!tam.codes(tam.Success)["timeStamp.validated"] || !tam.codes(tam.Success)["timeStamp.trusted"]) {
+		t.Errorf("timestamp not validated+trusted: %v", tam.Success)
+	}
+	ours := Read(context.Background(), JPEG, bytes.NewReader(out))
+	if theirs := trusted.Manifests[trusted.ActiveManifest].SignatureInfo.Time; theirs != "" {
+		if tt, err := time.Parse(time.RFC3339, theirs); err != nil || tt.Sub(ours.SignedAt).Abs() > time.Minute {
+			t.Errorf("signature_info.time %q vs our SignedAt %v", theirs, ours.SignedAt)
+		}
+	}
+}
+
+func pemCert(t *testing.T, c *x509.Certificate) []byte {
+	t.Helper()
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
 }

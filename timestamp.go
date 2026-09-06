@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/asn1"
+	"errors"
 	"hash"
 	"math/big"
 	"time"
@@ -82,86 +83,126 @@ func (v *validator) verifyTimestamp(m *parsedManifest, uri string) (genTime time
 // signer signature and its messageDigest/contentType signed attributes, and
 // chains the TSA certificate to the trusted timestamp pool. It returns the
 // genTime and the resulting status code (StatusTimeStampValidated on success).
+// The cryptographic half is checkTimestampToken, which Sign's RFC 3161 client
+// runs on a reply before embedding it; only the trust decision lives here.
 func (v *validator) verifyTimestampToken(der, tbs []byte, uri string) (time.Time, StatusCode) {
-	sd, ok := parseCMSSignedData(der)
-	if !ok {
-		v.add(StatusTimeStampMismatch, uri, "malformed timestamp token", nil)
-		return time.Time{}, StatusTimeStampMismatch
+	chk, err := checkTimestampToken(der, tbs)
+	if err != nil {
+		code, explanation, cause := StatusTimeStampMismatch, err.Error(), error(nil)
+		var te *timestampError
+		if errors.As(err, &te) {
+			explanation, cause = te.explanation, te.cause
+			if te.untrusted {
+				code = StatusTimeStampUntrusted
+			}
+		}
+		v.add(code, uri, explanation, cause)
+		return time.Time{}, code
 	}
 
+	// Chain the TSA certificate to the trusted timestamp pool at genTime.
+	// An untrusted chain still returns the genTime: everything cryptographic —
+	// the imprint binding to THIS signature, the signed attributes, the CMS
+	// signature — has passed by here, so the time is attested, just not by an
+	// authority the pool anchors. The caller decides what that is good for.
+	if !v.verifyTSAChain(chk.signer, chk.certs, chk.tstInfo.genTime, uri) {
+		return chk.tstInfo.genTime, StatusTimeStampUntrusted
+	}
+	return chk.tstInfo.genTime, StatusTimeStampValidated
+}
+
+// timestampCheck is what checkTimestampToken establishes about a token before
+// any trust decision: its TSTInfo, the certificate that signed it, and every
+// certificate it carries.
+type timestampCheck struct {
+	tstInfo tstInfoFields
+	signer  *x509.Certificate
+	certs   []*x509.Certificate
+}
+
+// timestampError is a token defect with the explanation the validator reports.
+// untrusted marks the one defect that is a trust question rather than a
+// malformation or mismatch: a signer certificate the token does not carry.
+type timestampError struct {
+	explanation string
+	cause       error
+	untrusted   bool
+}
+
+func (e *timestampError) Error() string {
+	if e.cause != nil {
+		return e.explanation + ": " + e.cause.Error()
+	}
+	return e.explanation
+}
+
+func (e *timestampError) Unwrap() error { return e.cause }
+
+// checkTimestampToken does everything cryptographic about an RFC 3161 token:
+// parses it, checks the messageImprint covers tbs, finds the signer, checks the
+// messageDigest and contentType signed attributes, and verifies the CMS
+// signature over them. It makes no trust decision.
+func checkTimestampToken(der, tbs []byte) (timestampCheck, error) {
+	fail := func(explanation string) (timestampCheck, error) {
+		return timestampCheck{}, &timestampError{explanation: explanation}
+	}
+	sd, ok := parseCMSSignedData(der)
+	if !ok {
+		return fail("malformed timestamp token")
+	}
 	tstInfo, ok := parseTSTInfo(sd.eContent)
 	if !ok {
-		v.add(StatusTimeStampMismatch, uri, "malformed TSTInfo", nil)
-		return time.Time{}, StatusTimeStampMismatch
+		return fail("malformed TSTInfo")
 	}
 
 	// 1. messageImprint must cover tbs.
 	imprintHash, ok := hashByOID(tstInfo.imprintAlg)
 	if !ok {
-		v.add(StatusTimeStampMismatch, uri, "unsupported messageImprint algorithm", nil)
-		return time.Time{}, StatusTimeStampMismatch
+		return fail("unsupported messageImprint algorithm")
 	}
 	imprintHash.Write(tbs)
 	if subtle.ConstantTimeCompare(imprintHash.Sum(nil), tstInfo.imprint) != 1 {
-		v.add(StatusTimeStampMismatch, uri, "timestamp does not cover this signature", nil)
-		return time.Time{}, StatusTimeStampMismatch
+		return fail("timestamp does not cover this signature")
 	}
 
 	// 2. CMS signer info + signature.
 	si, ok := parseSignerInfo(sd.signerInfos)
 	if !ok {
-		v.add(StatusTimeStampMismatch, uri, "malformed or multiple timestamp signers", nil)
-		return time.Time{}, StatusTimeStampMismatch
+		return fail("malformed or multiple timestamp signers")
 	}
 	signer := findSigner(sd.certs, si)
 	if signer == nil {
-		v.add(StatusTimeStampUntrusted, uri, "timestamp signer certificate not found", nil)
-		return time.Time{}, StatusTimeStampUntrusted
+		return timestampCheck{}, &timestampError{explanation: "timestamp signer certificate not found", untrusted: true}
 	}
 	digest, ok := digestCryptoHash(si.digestAlg)
 	if !ok {
-		v.add(StatusTimeStampMismatch, uri, "unsupported timestamp digest algorithm", nil)
-		return time.Time{}, StatusTimeStampMismatch
+		return fail("unsupported timestamp digest algorithm")
 	}
 	// signedAttrs are mandatory for an RFC 3161 token.
 	if len(si.signedAttrs.FullBytes) == 0 {
-		v.add(StatusTimeStampMismatch, uri, "timestamp signer has no signed attributes", nil)
-		return time.Time{}, StatusTimeStampMismatch
+		return fail("timestamp signer has no signed attributes")
 	}
 	// messageDigest signed attr must equal hash(eContent); contentType must be id-ct-TSTInfo.
 	mdOK, ctOK := checkSignedAttrs(si.signedAttrs.Bytes, digest, sd.eContent)
 	if !ctOK || !mdOK {
-		v.add(StatusTimeStampMismatch, uri, "timestamp signed attributes do not match content", nil)
-		return time.Time{}, StatusTimeStampMismatch
+		return fail("timestamp signed attributes do not match content")
 	}
 	// Verify the signature over the DER SET OF signedAttrs: on the wire the
 	// attributes are [0] IMPLICIT (0xA0); the signature covers them as a
 	// universal SET OF (0x31). Re-tag without re-sorting (the TSA emits DER).
 	toVerify := append([]byte(nil), si.signedAttrs.FullBytes...)
 	if toVerify[0] != 0xA0 {
-		v.add(StatusTimeStampMismatch, uri, "unexpected signed-attributes encoding", nil)
-		return time.Time{}, StatusTimeStampMismatch
+		return fail("unexpected signed-attributes encoding")
 	}
 	toVerify[0] = 0x31
 	sigAlg := x509SigAlg(si.sigAlg, si.digestAlg)
 	if sigAlg == x509.UnknownSignatureAlgorithm {
-		v.add(StatusTimeStampMismatch, uri, "unsupported timestamp signature algorithm", nil)
-		return time.Time{}, StatusTimeStampMismatch
+		return fail("unsupported timestamp signature algorithm")
 	}
 	if err := signer.CheckSignature(sigAlg, toVerify, si.signature); err != nil {
-		v.add(StatusTimeStampMismatch, uri, "timestamp signature did not verify", err)
-		return time.Time{}, StatusTimeStampMismatch
+		return timestampCheck{}, &timestampError{explanation: "timestamp signature did not verify", cause: err}
 	}
-
-	// 3. Chain the TSA certificate to the trusted timestamp pool at genTime.
-	// An untrusted chain still returns the genTime: everything cryptographic —
-	// the imprint binding to THIS signature, the signed attributes, the CMS
-	// signature — has passed by here, so the time is attested, just not by an
-	// authority the pool anchors. The caller decides what that is good for.
-	if !v.verifyTSAChain(signer, sd.certs, tstInfo.genTime, uri) {
-		return tstInfo.genTime, StatusTimeStampUntrusted
-	}
-	return tstInfo.genTime, StatusTimeStampValidated
+	return timestampCheck{tstInfo: tstInfo, signer: signer, certs: sd.certs}, nil
 }
 
 // verifyTSAChain builds and validates the TSA certificate chain to the trusted
@@ -271,11 +312,13 @@ func timestampContentInfo(der []byte) []byte {
 	return resp.Token.FullBytes
 }
 
-// tstInfoFields holds the TSTInfo fields the verifier needs.
+// tstInfoFields holds the TSTInfo fields the verifier needs, plus the nonce
+// the RFC 3161 client checks against the one it sent.
 type tstInfoFields struct {
 	imprintAlg asn1.ObjectIdentifier
 	imprint    []byte
 	genTime    time.Time
+	nonce      *big.Int
 }
 
 func parseTSTInfo(eContent []byte) (tstInfoFields, bool) {
@@ -291,15 +334,42 @@ func parseTSTInfo(eContent []byte) (tstInfoFields, bool) {
 			Hashed []byte
 		}
 		SerialNumber *big.Int
-		GenTime      time.Time       `asn1:"generalized"`
-		Rest         []asn1.RawValue `asn1:"optional"`
+		GenTime      time.Time `asn1:"generalized"`
 	}
+	// encoding/asn1 permits elements after the last struct field, which is
+	// what lets the optional tail of a TSTInfo go unmodelled here.
 	if _, err := asn1.Unmarshal(eContent, &tst); err != nil {
 		return out, false
 	}
 	out.imprintAlg = tst.MessageImprint.Alg.Algorithm
 	out.imprint = tst.MessageImprint.Hashed
 	out.genTime = tst.GenTime
+	// After genTime come accuracy (SEQUENCE), ordering (BOOLEAN), nonce
+	// (INTEGER), tsa ([0]) and extensions ([1]); the nonce is the only
+	// universal INTEGER among them. A struct field cannot capture "the rest"
+	// — the decoder matches it against one element — so the SEQUENCE is walked.
+	var seq asn1.RawValue
+	if _, err := asn1.Unmarshal(eContent, &seq); err == nil {
+		rest, seen := seq.Bytes, 0
+		for len(rest) > 0 {
+			var el asn1.RawValue
+			next, err := asn1.Unmarshal(rest, &el)
+			if err != nil {
+				break
+			}
+			rest = next
+			if seen++; seen <= 5 { // the five fixed fields
+				continue
+			}
+			if el.Class == asn1.ClassUniversal && el.Tag == asn1.TagInteger && !el.IsCompound {
+				var n *big.Int
+				if _, err := asn1.Unmarshal(el.FullBytes, &n); err == nil {
+					out.nonce = n
+				}
+				break
+			}
+		}
+	}
 	return out, true
 }
 

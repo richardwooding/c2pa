@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/veraison/go-cose"
 )
 
@@ -72,6 +73,40 @@ func newSign1(rnd io.Reader, key crypto.Signer, alg cose.Algorithm, chainDER [][
 	}
 	msg.Payload = nil
 	return msg, nil
+}
+
+// coseTimestampTBS is what a sigTst2 timestamp covers (§13.2): the COSE
+// Sig_structure with the CounterSignature context over the CBOR-byte-string-
+// encoded signature — the same bytes verifyTimestamp recomputes.
+func coseTimestampTBS(msg *cose.Sign1Message) ([]byte, error) {
+	raw, err := msg.MarshalCBOR()
+	if err != nil {
+		return nil, err
+	}
+	protected, signature, ok := coseParts(raw)
+	if !ok {
+		return nil, fmt.Errorf("could not decode the envelope just marshalled")
+	}
+	sig, err := cbor.Marshal(signature)
+	if err != nil {
+		return nil, err
+	}
+	return coseCountersignData(sig, protected), nil
+}
+
+// sigTstHeader is the unprotected-header value both sigTst and sigTst2 carry:
+// {tstTokens: [{val: <DER token>}]}, the container extractTSToken walks.
+func sigTstHeader(der []byte) map[any]any {
+	return map[any]any{"tstTokens": []any{map[any]any{"val": der}}}
+}
+
+// attachSigTst2 stores a TimeStampToken in the unprotected header. Unprotected
+// headers may be added after signing (the protected bytes and signature are
+// untouched); RawUnprotected must be dropped or go-cose re-emits the stale
+// bytes it cached at signing time.
+func attachSigTst2(msg *cose.Sign1Message, tokenDER []byte) {
+	msg.Headers.Unprotected["sigTst2"] = sigTstHeader(tokenDER)
+	msg.Headers.RawUnprotected = nil
 }
 
 // coseReserveSize is how many bytes the signature box's content is reserved
