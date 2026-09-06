@@ -98,12 +98,23 @@ func buildBoxHashAsset(t testing.TB, container Container, frame assetFraming, sp
 }
 
 func standardFraming(container Container) assetFraming {
-	return func(store []byte) ([]byte, int, int) { return assembleAsset(container, store) }
+	return func(store []byte) ([]byte, []byteRange) { return assembleAsset(container, store) }
 }
 
 // pngTextFraming frames the store in a PNG that also carries a tEXt chunk, so
 // the metadata-exclusion path has something legitimate to exclude.
-func pngTextFraming(store []byte) (asset []byte, exclStart, exclLen int) {
+// pngCaBX splits the store across two caBX chunks; the reader concatenates
+// them, and the box map names each chunk its own C2PA box.
+func pngCaBX(boxData []byte) []byte {
+	if len(boxData) < 64 {
+		return pngChunk("caBX", boxData)
+	}
+	cut := len(boxData) / 3
+	return append(pngChunk("caBX", boxData[:cut]), pngChunk("caBX", boxData[cut:])...)
+}
+
+func pngTextFraming(store []byte) (asset []byte, excl []byteRange) {
+	var exclStart, exclLen int
 	asset = append(asset, pngSignature...)
 	asset = append(asset, pngChunk("IHDR", []byte{
 		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00})...)
@@ -113,7 +124,7 @@ func pngTextFraming(store []byte) (asset []byte, exclStart, exclLen int) {
 	asset = append(asset, pngChunk("tEXt", []byte("Comment\x00a caption"))...)
 	asset = append(asset, pngChunk("IDAT", []byte{0x78, 0x9C, 0x62, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01})...)
 	asset = append(asset, pngChunk("IEND", nil)...)
-	return asset, exclStart, exclLen
+	return asset, []byteRange{{start: exclStart, length: exclLen}}
 }
 
 // indexOfBox finds the entry naming the given box, or fails the test.
@@ -515,7 +526,8 @@ func TestJPEGBoxMapCollapsesC2PARun(t *testing.T) {
 	// A store large enough to need two APP11 segments must collapse into one
 	// C2PA box, or the box map will not match what the signer wrote.
 	store := storeBox(make([]byte, 70000))
-	asset, exclStart, exclLen := assembleAsset(JPEG, store)
+	asset, excl := assembleAsset(JPEG, store)
+	exclStart, exclLen := excl[0].start, excl[0].length
 
 	boxes := jpegBoxMap(context.Background(), asset)
 	i := indexOfBox(t, boxes, c2paBoxName)
@@ -534,7 +546,7 @@ func TestJPEGBoxMapCollapsesC2PARun(t *testing.T) {
 }
 
 func TestPNGBoxMap(t *testing.T) {
-	asset, _, _ := pngTextFraming(storeBox(make([]byte, 200)))
+	asset, _ := pngTextFraming(storeBox(make([]byte, 200)))
 	boxes := pngBoxMap(context.Background(), asset)
 	want := []string{pngHeaderBoxName, "IHDR", c2paBoxName, c2paBoxName, "tEXt", "IDAT", "IEND"}
 	if got := boxNames(boxes); len(got) != len(want) {
@@ -662,9 +674,9 @@ func TestBoxMapUnparseable(t *testing.T) {
 func TestBoxMapCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	jpeg, _, _ := assembleAsset(JPEG, storeBox(make([]byte, 64)))
-	png, _, _ := assembleAsset(PNG, storeBox(make([]byte, 64)))
-	gif, _, _ := assembleAsset(GIF, storeBox(make([]byte, 64)))
+	jpeg, _ := assembleAsset(JPEG, storeBox(make([]byte, 64)))
+	png, _ := assembleAsset(PNG, storeBox(make([]byte, 64)))
+	gif, _ := assembleAsset(GIF, storeBox(make([]byte, 64)))
 	for _, tc := range []struct {
 		container Container
 		data      []byte

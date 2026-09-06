@@ -170,6 +170,13 @@ func TestSignInterop(t *testing.T) {
 	}{
 		{"jpeg", JPEG, ".jpg", unsignedJPEG(t)},
 		{"png", PNG, ".png", unsignedPNG(t)},
+		{"gif", GIF, ".gif", unsignedGIF(t)},
+		{"webp", RIFF, ".webp", unsignedWebP()},
+		{"wav", RIFF, ".wav", unsignedWAV()},
+		{"tiff", TIFF, ".tif", unsignedTIFF(false)},
+		{"tiff big-endian", TIFF, ".tif", unsignedTIFF(true)},
+		{"mp3", MP3, ".mp3", unsignedMP3()},
+		{"svg", SVG, ".svg", unsignedSVG()},
 	}
 	for _, tc := range inputs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -223,6 +230,11 @@ func TestSignInteropResign(t *testing.T) {
 	}{
 		{"jpeg", JPEG, ".jpg", unsignedJPEG(t), true},
 		{"png", PNG, ".png", unsignedPNG(t), true},
+		{"gif", GIF, ".gif", unsignedGIF(t), true},
+		{"webp", RIFF, ".webp", unsignedWebP(), true},
+		{"tiff", TIFF, ".tif", unsignedTIFF(false), true},
+		{"mp3", MP3, ".mp3", unsignedMP3(), true},
+		{"svg", SVG, ".svg", unsignedSVG(), true},
 		{"c2pa-rs signed jpeg", JPEG, ".jpg", fixtureBytes(t, "c2pa_signed.jpg"), false},
 		{"c2pa-rs signed png", PNG, ".png", fixtureBytes(t, "c2pa_2x_openai.png"), false},
 	}

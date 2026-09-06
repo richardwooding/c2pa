@@ -9,9 +9,11 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/pem"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"math/big"
@@ -163,6 +165,87 @@ func unsignedPNG(t testing.TB) []byte {
 	return buf.Bytes()
 }
 
+// unsignedGIF is a GIF89a from the standard library encoder: header, global
+// colour table, one image.
+func unsignedGIF(t testing.TB) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := gif.Encode(&buf, testImage(), nil); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// unsignedWebP is a simple-format WebP: RIFF/WEBP with a lone VP8L chunk whose
+// 5-byte header declares a 1×1 opaque image — no VP8X, so the embedder must
+// synthesise one.
+func unsignedWebP() []byte {
+	return riffFile("WEBP", riffChunk("VP8L", []byte{0x2F, 0x00, 0x00, 0x00, 0x00}))
+}
+
+// unsignedWAV is a RIFF/WAVE with a 16-byte PCM fmt chunk and four bytes of
+// samples.
+func unsignedWAV() []byte {
+	fmtChunk := []byte{1, 0, 1, 0, 0x44, 0xAC, 0, 0, 0x88, 0x58, 0x01, 0, 2, 0, 16, 0}
+	return riffFile("WAVE", riffChunk("fmt ", fmtChunk), riffChunk("data", []byte{0, 0, 1, 0}))
+}
+
+// unsignedTIFF is a classic TIFF with a real IFD0 — width, length, bits per
+// sample, compression, photometric, strip offsets, samples per pixel, rows per
+// strip, strip byte counts — and one pixel byte after it.
+func unsignedTIFF(bigEndian bool) []byte {
+	bo := binary.AppendByteOrder(binary.LittleEndian)
+	order := []byte("II")
+	if bigEndian {
+		bo, order = binary.BigEndian, []byte("MM")
+	}
+	entries := []struct {
+		tag, typ uint16
+		value    uint32
+	}{
+		{256, 3, 1}, {257, 3, 1}, {258, 3, 8}, {259, 3, 1}, {262, 3, 1},
+		{273, 4, 0 /* patched below */}, {277, 3, 1}, {278, 3, 1}, {279, 4, 1},
+	}
+	const ifdAt = 8
+	pixelAt := ifdAt + 2 + len(entries)*12 + 4
+	out := append([]byte{}, order...)
+	out = bo.AppendUint16(out, 42)
+	out = bo.AppendUint32(out, ifdAt)
+	out = bo.AppendUint16(out, uint16(len(entries)))
+	for _, e := range entries {
+		out = bo.AppendUint16(out, e.tag)
+		out = bo.AppendUint16(out, e.typ)
+		out = bo.AppendUint32(out, 1)
+		v := e.value
+		if e.tag == 273 {
+			v = uint32(pixelAt)
+		}
+		if e.typ == 3 { // SHORT values are left-justified in the 4-byte field
+			out = bo.AppendUint16(out, uint16(v))
+			out = append(out, 0, 0)
+		} else {
+			out = bo.AppendUint32(out, v)
+		}
+	}
+	out = bo.AppendUint32(out, 0) // no next IFD
+	return append(out, 0x7F)      // the pixel
+}
+
+// unsignedMP3 is an ID3v2.4 tag with a title frame followed by two MPEG-1
+// Layer III frames of silence (417 bytes each at 128 kbit/s, 44.1 kHz).
+func unsignedMP3() []byte {
+	tag := id3Tag(4, 0, id3Frame(4, "TIT2", []byte{3, 't', 'i', 't', 'l', 'e'}))
+	frame := append([]byte{0xFF, 0xFB, 0x90, 0x00}, make([]byte, 413)...)
+	return append(append(tag, frame...), frame...)
+}
+
+// unsignedSVG has an XML declaration, no <metadata> and no c2pa prefix, so the
+// embedder must create both.
+func unsignedSVG() []byte {
+	return []byte("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"><rect width=\"1\" height=\"1\"/></svg>\n")
+}
+
 // unsignedInput returns an unsigned asset of the container, for the containers
 // Sign supports.
 func unsignedInput(t testing.TB, c Container) []byte {
@@ -172,13 +255,37 @@ func unsignedInput(t testing.TB, c Container) []byte {
 		return unsignedJPEG(t)
 	case PNG:
 		return unsignedPNG(t)
+	case GIF:
+		return unsignedGIF(t)
+	case RIFF:
+		return unsignedWebP()
+	case TIFF:
+		return unsignedTIFF(false)
+	case MP3:
+		return unsignedMP3()
+	case SVG:
+		return unsignedSVG()
 	}
 	t.Fatalf("no unsigned input for %s", c)
 	return nil
 }
 
 // signableContainers are the containers Sign supports so far.
-var signableContainers = []Container{JPEG, PNG}
+var signableContainers = []Container{JPEG, PNG, GIF, RIFF, TIFF, MP3, SVG}
+
+// tamperOutsideStore returns an offset in a signed asset that the hard binding
+// covers but the store does not: the last byte for containers whose store sits
+// in the header, and a byte of the first chunk or IFD entry for the two
+// containers whose store is appended at the end.
+func tamperOutsideStore(c Container, out []byte) int {
+	switch c {
+	case RIFF:
+		return 12 // the first child chunk's FourCC
+	case TIFF:
+		return 8 + 2 // the first IFD entry's tag
+	}
+	return len(out) - 1
+}
 
 // fixtureBytes reads a testdata file.
 func fixtureBytes(t testing.TB, name string) []byte {

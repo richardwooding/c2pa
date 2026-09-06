@@ -47,6 +47,16 @@ func embedderFor(c Container) (embedder, bool) {
 		return jpegEmbedder{}, true
 	case PNG:
 		return pngEmbedder{}, true
+	case GIF:
+		return gifEmbedder{}, true
+	case RIFF:
+		return riffEmbedder{}, true
+	case TIFF:
+		return tiffEmbedder{}, true
+	case MP3:
+		return mp3Embedder{}, true
+	case SVG:
+		return svgEmbedder{}, true
 	}
 	return nil, false
 }

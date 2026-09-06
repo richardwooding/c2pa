@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 )
 
 const (
@@ -75,15 +76,7 @@ func mp3JUMBF(ctx context.Context, data []byte) []byte {
 			return nil
 		}
 		if id == "GEOB" {
-			frame := body[start : start+frameSize]
-			if major == 4 {
-				if frameFlags&0x02 != 0 { // per-frame unsynchronisation
-					frame = id3DeUnsync(frame)
-				}
-				if frameFlags&0x01 != 0 && len(frame) >= 4 { // data-length indicator
-					frame = frame[4:]
-				}
-			}
+			frame := id3GEOBObject(major, frameFlags, body[start:start+frameSize])
 			if store := id3GEOBStore(frame); store != nil {
 				return store
 			}
@@ -166,4 +159,169 @@ func id3Synchsafe(b []byte) int {
 		return 0
 	}
 	return int(b[0]&0x7F)<<21 | int(b[1]&0x7F)<<14 | int(b[2]&0x7F)<<7 | int(b[3]&0x7F)
+}
+
+// --- writing ------------------------------------------------------------------
+
+// mp3Embedder writes the store as a GEOB frame (spec §A.3.4) with MIME type
+// application/c2pa, placed last in a rebuilt ID3v2 tag whose other frames are
+// copied verbatim. The tag's major version is preserved: c2pa-rs always emits
+// v2.4, but only because its id3 crate re-models v2.3 frames on read —
+// copying v2.3 frame bytes under a v2.4 header would mis-declare every frame's
+// size encoding. An asset with no tag gets a fresh v2.4 one.
+type mp3Embedder struct{}
+
+// id3Parsed is an ID3v2 tag taken apart for rewriting: its frames, each as the
+// verbatim 10-byte header plus body, and where the audio begins.
+type id3Parsed struct {
+	major  byte
+	frames [][]byte
+	end    int
+}
+
+// parseID3ForWrite reads the leading ID3v2 tag. The extended header and footer
+// are dropped (their sizes and CRC would go stale), a v2.3 unsynchronised tag
+// is restored so its frame sizes mean what they say, and existing C2PA GEOB
+// frames are left out.
+func parseID3ForWrite(ctx context.Context, data []byte) (id3Parsed, error) {
+	if len(data) < 10 || string(data[:3]) != "ID3" {
+		return id3Parsed{major: 4}, nil
+	}
+	major, flags := data[3], data[5]
+	if major < 3 || major > 4 {
+		return id3Parsed{}, fmt.Errorf("%w: ID3v2.%d tags are not written into", errCarrierUnsupported, major)
+	}
+	size := id3Synchsafe(data[6:10])
+	end := 10 + size
+	if major == 4 && flags&0x10 != 0 {
+		end += 10 // footer
+	}
+	if end > len(data) {
+		return id3Parsed{}, fmt.Errorf("%w: ID3 tag size %d overruns the file", errCarrierMalformed, size)
+	}
+	body := data[10 : 10+size]
+	if major == 3 && flags&0x80 != 0 {
+		body = id3DeUnsync(body)
+	}
+	pos := 0
+	if flags&0x40 != 0 {
+		if pos+4 > len(body) {
+			return id3Parsed{}, fmt.Errorf("%w: truncated ID3 extended header", errCarrierMalformed)
+		}
+		ext := id3Synchsafe(body[pos : pos+4])
+		if major == 3 {
+			ext = int(binary.BigEndian.Uint32(body[pos:pos+4])) + 4
+		}
+		if ext < 0 || pos+ext > len(body) {
+			return id3Parsed{}, fmt.Errorf("%w: ID3 extended header overruns the tag", errCarrierMalformed)
+		}
+		pos += ext
+	}
+	p := id3Parsed{major: major, end: end}
+	for n := 0; n < maxID3Frames && pos+10 <= len(body); n++ {
+		if err := ctx.Err(); err != nil {
+			return id3Parsed{}, err
+		}
+		id := body[pos : pos+4]
+		if string(id) == "\x00\x00\x00\x00" {
+			break // padding
+		}
+		for _, c := range id {
+			if (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+				return id3Parsed{}, fmt.Errorf("%w: ID3 frame id %q", errCarrierMalformed, id)
+			}
+		}
+		frameSize := int(binary.BigEndian.Uint32(body[pos+4 : pos+8]))
+		if major == 4 {
+			frameSize = id3Synchsafe(body[pos+4 : pos+8])
+		}
+		start := pos + 10
+		if frameSize <= 0 || frameSize > len(body)-start {
+			return id3Parsed{}, fmt.Errorf("%w: ID3 frame %q overruns the tag", errCarrierMalformed, id)
+		}
+		frame := body[pos : start+frameSize]
+		if string(id) == "GEOB" && id3GEOBStore(id3GEOBObject(major, body[pos+9], body[start:start+frameSize])) != nil {
+			pos = start + frameSize
+			continue // an existing store; the new tag gets a fresh one
+		}
+		p.frames = append(p.frames, frame)
+		pos = start + frameSize
+	}
+	return p, nil
+}
+
+// id3GEOBObject undoes what a v2.4 frame's format flags did to its body —
+// per-frame unsynchronisation, a data-length indicator — so the GEOB fields can
+// be read; v2.3 bodies are already plain by the time the tag is de-unsynced.
+func id3GEOBObject(major, frameFlags byte, body []byte) []byte {
+	if major != 4 {
+		return body
+	}
+	if frameFlags&0x02 != 0 {
+		body = id3DeUnsync(body)
+	}
+	if frameFlags&0x01 != 0 && len(body) >= 4 {
+		body = body[4:]
+	}
+	return body
+}
+
+// id3C2PAGEOB frames store as the GEOB frame c2pa-rs writes: text encoding
+// (UTF-8 in v2.4, ISO-8859-1 in v2.3 — 0x03 is not valid there), MIME
+// application/c2pa, filename "c2pa", description "c2pa manifest store", then
+// the object. It returns the frame and the object's offset within it.
+func id3C2PAGEOB(major byte, store []byte) (frame []byte, objectAt int) {
+	enc := byte(0x03)
+	if major == 3 {
+		enc = 0x00
+	}
+	body := []byte{enc}
+	body = append(body, id3C2PAMime...)
+	body = append(body, 0)
+	body = append(body, "c2pa"...)
+	body = append(body, 0)
+	body = append(body, "c2pa manifest store"...)
+	body = append(body, 0)
+	objectAt = 10 + len(body)
+	body = append(body, store...)
+	frame = []byte("GEOB")
+	if major == 4 {
+		frame = append(frame, id3AppendSynchsafe(len(body))...)
+	} else {
+		frame = binary.BigEndian.AppendUint32(frame, uint32(len(body)))
+	}
+	frame = append(frame, 0, 0)
+	return append(frame, body...), objectAt
+}
+
+func (mp3Embedder) embed(ctx context.Context, asset, store []byte) ([]byte, []byteRange, error) {
+	tag, err := parseID3ForWrite(ctx, asset)
+	if err != nil {
+		return nil, nil, err
+	}
+	geob, objectAt := id3C2PAGEOB(tag.major, store)
+	bodyLen := len(geob)
+	for _, f := range tag.frames {
+		bodyLen += len(f)
+	}
+	if bodyLen >= 1<<28 {
+		return nil, nil, fmt.Errorf("%w: ID3 tag would exceed the 256 MiB synchsafe limit", errCarrierUnsupported)
+	}
+	out := make([]byte, 0, 10+bodyLen+len(asset)-tag.end)
+	out = append(out, 'I', 'D', '3', tag.major, 0, 0)
+	out = append(out, id3AppendSynchsafe(bodyLen)...)
+	for _, f := range tag.frames {
+		out = append(out, f...)
+	}
+	geobAt := len(out)
+	out = append(out, geob...)
+	out = append(out, asset[tag.end:]...)
+	// The object bytes only (c2pa-rs parity); the tag and frame sizes around
+	// them depend on the store's length alone.
+	return out, []byteRange{{start: geobAt + objectAt, length: len(store)}}, nil
+}
+
+// id3AppendSynchsafe appends n as ID3's 4-byte, 7-bits-per-byte integer.
+func id3AppendSynchsafe(n int) []byte {
+	return []byte{byte(n>>21) & 0x7F, byte(n>>14) & 0x7F, byte(n>>7) & 0x7F, byte(n) & 0x7F}
 }
