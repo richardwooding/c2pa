@@ -490,8 +490,9 @@ type splitFragmented struct {
 
 // splitOpts adjusts fragmentedFiles.
 type splitOpts struct {
-	noStyp bool                             // omit the 'styp' a CMAF fragment starts with
-	mutate func(k int, spec *merkleBoxSpec) // edit a fragment's merkle box before it is written
+	noStyp   bool                             // omit the 'styp' a CMAF fragment starts with
+	mutate   func(k int, spec *merkleBoxSpec) // edit a fragment's merkle box before it is written
+	moovFill byte                             // the 'moov' filler byte; 0 means the default, so two sets can have different inits
 }
 
 // fragmentedFiles builds a fragmented asset the way DASH/CMAF ships it: an
@@ -505,7 +506,11 @@ func fragmentedFiles(t testing.TB, n, storedRowLen, uniqueID, localID int, o spl
 	ctx := context.Background()
 	excl, exclCBOR := standardBMFFExclusions()
 	sf := splitFragmented{leaves: make([][]byte, n), frags: make([][]byte, n)}
-	sf.init = append(synthBox("ftyp", []byte("iso6")), synthBox("moov", bytes.Repeat([]byte{0x55}, 24))...)
+	fill := byte(0x55)
+	if o.moovFill != 0 {
+		fill = o.moovFill
+	}
+	sf.init = append(synthBox("ftyp", []byte("iso6")), synthBox("moov", bytes.Repeat([]byte{fill}, 24))...)
 	initTop := parseBMFFBoxes(ctx, sf.init)
 	h := sha256.New()
 	hashBMFFTopLevel(ctx, sf.init, initTop, bmffExclusionByteRanges(sf.init, initTop, excl), h)

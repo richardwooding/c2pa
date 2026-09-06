@@ -103,3 +103,29 @@ has an untrusted one — so nothing in the manifest can pin the validity window.
 The signing leaf is valid 2026-04-22 to 2027-04-23 and the test pins the clock
 inside that range explicitly; an unpinned test would start failing the day the
 leaf expires.
+
+## dash/ — fragmented BMFF (DASH/CMAF)
+
+`dash/bunny/` is one rendition of the Big Buck Bunny DASH set that
+[contentauth/c2pa-rs](https://github.com/contentauth/c2pa-rs) ships as a test
+fixture (`sdk/tests/fixtures/bunny/bunny_89283bps/`): an **unsigned**
+initialization segment `BigBuckBunny_2s_init.mp4` (`ftyp` `free` `moov`, 879
+bytes) and eleven media fragments `BigBuckBunny_2s*.m4s` (`styp` `sidx` `moof`
+`mdat`; `tfhd` uses default-base-is-moof, so no absolute offsets live in the
+fragments; each `sidx` has `first_offset` 0). Big Buck Bunny is © 2008 Blender
+Foundation, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)
+(www.bigbuckbunny.org); the DASH segmentation is the ITEC/GPAC dataset the
+c2pa-rs fixture was taken from. It is the input the fragmented signer's tests
+sign, and what the c2patool interop rows sign both ways.
+
+`dash/dashinit.mp4` + `dash/dash1.m4s` are c2pa-rs's `sdk/tests/fixtures/
+dashinit.mp4` and `dash1.m4s` (Apache-2.0 / MIT), a **pre-signed** pair written
+by a third-party producer, not by c2pa-rs: a 1.x claim (label
+`contoso:urn:uuid:…`) with a `c2pa.hash.bmff.v2` binding whose merkle map has
+`count` 11 and stores a 3-node row; the one fragment carries `location` 0 with a
+two-element proof, in **canonical** CBOR key order (`hashes, localId, location,
+uniqueId`) — a shape our own writer never produces. Signer leaf CN `Alice`,
+chaining through `Media Publisher Company Intermediate CA` to `Media Provenance
+Root CA`, none of which is on the embedded trust list, and no timestamp. It is
+the only signed fragmented fixture, which is what lets `ExampleValidateFragmented`
+run with a real `// Output:` (valid, not fully bound: 1 of 11 fragments).
