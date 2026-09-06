@@ -1,11 +1,19 @@
 package c2pa_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/richardwooding/c2pa"
 )
@@ -184,4 +192,122 @@ func ExampleValidateFragmented() {
 		// index into frags.
 		fmt.Println(s.Code, s.URI, s.Explanation)
 	}
+}
+
+// exampleSigner mints a self-signed P-256 certificate that satisfies the C2PA
+// certificate profile (digitalSignature key usage, an emailProtection EKU, not
+// a CA) and returns a Signer for it plus a pool that trusts it. A deployment
+// loads a key and a CA-issued chain from PEM instead; the README shows how.
+func exampleSigner() (*c2pa.Signer, *x509.CertPool) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Example Signer", Organization: []string{"Example Org"}},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		panic(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		panic(err)
+	}
+	signer, err := c2pa.NewSigner(key, []*x509.Certificate{cert}, c2pa.WithClaimGenerator("example", "1.0"))
+	if err != nil {
+		panic(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	return signer, pool
+}
+
+// ExampleSigner_Sign signs an MP4 that carries no Content Credentials with a
+// c2pa.created manifest, then verifies the result with the signer's own root
+// as the trust anchor. Nothing is written unless the output already validates,
+// so the verdict here is the same one Sign checked before returning.
+func ExampleSigner_Sign() {
+	signer, pool := exampleSigner()
+	ctx := context.Background()
+
+	in, err := os.Open("testdata/video_no_manifest.mp4")
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = in.Close() }()
+
+	var signed bytes.Buffer
+	m := c2pa.Manifest{
+		Title: "clip.mp4",
+		Actions: []c2pa.Action{{
+			Action:            c2pa.ActionCreated,
+			DigitalSourceType: c2pa.DigitalSourceTypeDigitalCapture,
+		}},
+	}
+	if err := signer.Sign(ctx, c2pa.BMFF, in, &signed, m); err != nil {
+		panic(err)
+	}
+
+	r := c2pa.Validate(ctx, c2pa.BMFF, bytes.NewReader(signed.Bytes()), c2pa.WithSigningTrust(pool))
+	fmt.Println("valid:", r.Valid)
+	fmt.Println("content bound:", r.Has(c2pa.StatusAssertionBMFFHashMatch))
+	fmt.Println("verified signer:", r.VerifiedSigner())
+	fmt.Println("title:", r.Info.Title)
+	// Output:
+	// valid: true
+	// content bound: true
+	// verified signer: Example Signer
+	// title: clip.mp4
+}
+
+// ExampleSigner_Sign_resign signs an asset that already carries Content
+// Credentials — the ChatGPT PDF, signed by OpenAI. The existing manifest is
+// kept and becomes the new manifest's parentOf ingredient — provenance is
+// chained, never replaced — which is why the manifest must open with
+// c2pa.opened rather than c2pa.created. For PDF the new store arrives as an
+// incremental update; nothing before the previous %%EOF changes.
+//
+// WithSigningTrust REPLACES the embedded trust list, so the prior signer's
+// chain (as the file presents it) is added to the pool to let the ingredient
+// validate too. With only the new signer trusted the new manifest still
+// verifies, and the ingredient's untrusted signer is reported, not hidden.
+func ExampleSigner_Sign_resign() {
+	signer, pool := exampleSigner()
+	ctx := context.Background()
+
+	fixture, err := os.ReadFile("testdata/c2pa_chatgpt.pdf")
+	if err != nil {
+		panic(err)
+	}
+	prior := c2pa.Validate(ctx, c2pa.PDF, bytes.NewReader(fixture))
+	pool.AddCert(prior.SignerChain[len(prior.SignerChain)-1])
+
+	var signed bytes.Buffer
+	m := c2pa.Manifest{
+		Title:   "image-edited.pdf",
+		Actions: []c2pa.Action{{Action: c2pa.ActionOpened}},
+	}
+	if err := signer.Sign(ctx, c2pa.PDF, bytes.NewReader(fixture), &signed, m); err != nil {
+		panic(err)
+	}
+
+	r := c2pa.Validate(ctx, c2pa.PDF, bytes.NewReader(signed.Bytes()), c2pa.WithSigningTrust(pool))
+	fmt.Println("valid:", r.Valid)
+	fmt.Println("title:", r.Info.Title)
+	fmt.Println("verified signer:", r.VerifiedSigner())
+	fmt.Println("ingredient validated:", r.Has(c2pa.StatusIngredientManifestValidated))
+	fmt.Println("prior signer:", prior.VerifiedSigner())
+	// Output:
+	// valid: true
+	// title: image-edited.pdf
+	// verified signer: Example Signer
+	// ingredient validated: true
+	// prior signer: OpenAI Media Service
 }
