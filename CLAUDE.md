@@ -64,7 +64,7 @@ go vet ./...
 golangci-lint run
 ```
 
-CI (`.github/workflows/ci.yml`) runs build + vet + race tests on Go `1.25` and `stable` plus
+CI (`.github/workflows/ci.yml`) runs build + vet + race tests on Go `1.26` and `stable` plus
 golangci-lint. `.github/workflows/fuzz.yml` mutates the fuzz targets nightly.
 
 ## Read vs Validate — keep them honest and separate
@@ -89,7 +89,8 @@ empty for that whole generation of files.
 
 ## Things to know before editing
 
-- **Go 1.25 is the floor**, set by `golang.org/x/crypto`'s own `go` directive (pulled in for OCSP).
+- **Go 1.26 is the floor**, set by `golang.org/x/crypto`'s own `go` directive (pulled in for OCSP).
+  It was 1.25 until x/crypto v0.56.0 raised it; that is the second time, so expect a third.
   Use the normal `go mod tidy` workflow; if it raises the floor again, bump the CI matrix's lower
   bound in `.github/workflows/ci.yml` to match `go.mod` in the same change. (The code itself only
   needs Go 1.22+ — `reflect.TypeFor` — so the floor is dependency-driven, not language-driven.)
