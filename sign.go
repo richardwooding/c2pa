@@ -34,10 +34,11 @@ var (
 	// ErrUnsupportedContainer is returned for a container Sign cannot write
 	// into, or an asset with a feature this release does not write into.
 	ErrUnsupportedContainer = errors.New("c2pa: container cannot be signed")
-	// ErrFragmentedBMFF is returned for a fragmented MP4 (a 'moof', 'sidx' or
-	// 'styp' box, or merkle boxes): its binding is a Merkle tree per fragment,
-	// which this release does not author.
-	ErrFragmentedBMFF = errors.New("c2pa: fragmented BMFF is not signable in this release")
+	// ErrFragmentedBMFF is returned by Sign for a fragmented MP4 (a 'moof',
+	// 'sidx' or 'styp' box, or merkle boxes) — a DASH/CMAF asset is signed with
+	// SignFragmented, as an initialization segment plus its fragments — and by
+	// SignFragmented for an initialization segment that is itself fragmented.
+	ErrFragmentedBMFF = errors.New("c2pa: fragmented BMFF")
 	// ErrMalformedAsset is returned when the input does not parse as the named
 	// container, or carries a manifest store that cannot be chained.
 	ErrMalformedAsset = errors.New("c2pa: asset could not be parsed for embedding")
@@ -311,9 +312,9 @@ func NewSigner(key crypto.Signer, chain []*x509.Certificate, opts ...SignerOptio
 //
 // BMFF assets (MP4, MOV, HEIC, AVIF) are bound with c2pa.hash.bmff.v3 and the
 // C2PA box is inserted after 'ftyp', with every 'stco', 'co64', 'saio' and
-// 'iloc' offset rewritten to follow. Fragmented files are refused with
-// ErrFragmentedBMFF: their binding is a Merkle tree per fragment, which this
-// release does not author.
+// 'iloc' offset rewritten to follow. A fragmented file is refused with
+// ErrFragmentedBMFF: a DASH/CMAF asset — an initialization segment and its
+// fragments — is signed with SignFragmented.
 //
 // Like Validate, Sign never panics; malformed or oversized input, a manifest it
 // will not write, or a failed self-check is an error. Counterpart: c2pa-rs's
@@ -331,15 +332,9 @@ func (s *Signer) Sign(ctx context.Context, container Container, in io.Reader, ou
 	if err := validateManifest(m); err != nil {
 		return err
 	}
-	asset, err := io.ReadAll(io.LimitReader(in, int64(ValidateMaxScan)))
+	asset, err := readWholeAsset(in)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrMalformedAsset, err)
-	}
-	if len(asset) >= ValidateMaxScan {
-		return ErrAssetTooLarge
-	}
-	if len(asset) == 0 {
-		return fmt.Errorf("%w: empty input", ErrMalformedAsset)
+		return err
 	}
 	var hb hardBinding = dataHashBinding{container: container, alg: s.cfg.hashAlg}
 	if container == BMFF {
@@ -427,6 +422,22 @@ func (bmffFlatBinding) validatePrior(ctx context.Context, asset []byte) Validati
 }
 func (bmffFlatBinding) validateOutput(ctx context.Context, final []byte, opts []ValidateOption) ValidationResult {
 	return Validate(ctx, BMFF, bytes.NewReader(final), opts...)
+}
+
+// readWholeAsset reads an asset for signing: whole, under ValidateMaxScan, and
+// not empty.
+func readWholeAsset(in io.Reader) ([]byte, error) {
+	asset, err := io.ReadAll(io.LimitReader(in, int64(ValidateMaxScan)))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformedAsset, err)
+	}
+	if len(asset) >= ValidateMaxScan {
+		return nil, ErrAssetTooLarge
+	}
+	if len(asset) == 0 {
+		return nil, fmt.Errorf("%w: empty input", ErrMalformedAsset)
+	}
+	return asset, nil
 }
 
 // validateManifest is what Sign refuses before it reads a byte of the asset.

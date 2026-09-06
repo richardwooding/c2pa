@@ -3,6 +3,7 @@ package c2pa
 import (
 	"bytes"
 	"context"
+	"io"
 	"testing"
 )
 
@@ -162,4 +163,50 @@ func bmffWithinOneTopLevelBox(data []byte) func(start, end int) bool {
 		}
 		return false
 	}
+}
+
+// FuzzSignFragmented: never panics; an error writes nothing; a success is a
+// set ValidateFragmented accepts in full.
+func FuzzSignFragmented(f *testing.F) {
+	s, sc := newTestSigner(f)
+	init, frags := unsignedFragmentedSet(2, fragOpts{sidxVersion: 0, emsg: true})
+	f.Add(init, frags[0], uint8(2))
+	bInit, bFrags, _ := bunnySet(f)
+	f.Add(bInit, bFrags[0], uint8(1))
+	f.Add(fixtureBytes(f, "dash/dashinit.mp4"), fixtureBytes(f, "dash/dash1.m4s"), uint8(1))
+	f.Add(frags[0], init, uint8(1))
+	f.Add([]byte{}, []byte{}, uint8(1))
+	f.Fuzz(func(t *testing.T, init, frag []byte, n uint8) {
+		if len(init) > 1<<20 || len(frag) > 1<<20 {
+			return
+		}
+		count := 1 + int(n)%3
+		seekers := make([]io.ReadSeeker, count)
+		for i := range seekers {
+			seekers[i] = bytes.NewReader(frag)
+		}
+		var outInit bytes.Buffer
+		bufs, ws := fragmentWriters(count)
+		err := s.SignFragmented(context.Background(), bytes.NewReader(init), seekers, &outInit, ws, openedManifest("fuzz"))
+		if err != nil {
+			if outInit.Len() != 0 {
+				t.Fatalf("wrote %d bytes on error %v", outInit.Len(), err)
+			}
+			for _, b := range bufs {
+				if b.Len() != 0 {
+					t.Fatalf("wrote a fragment on error %v", err)
+				}
+			}
+			return
+		}
+		out := make([][]byte, count)
+		for i, b := range bufs {
+			out[i] = b.Bytes()
+		}
+		res := ValidateFragmented(context.Background(), bytes.NewReader(outInit.Bytes()), readersOf(out...),
+			WithSigningTrust(sc.roots), WithOnlineRevocation(false), WithMaxIngredientDepth(0))
+		if !res.Valid || !res.Has(StatusAssertionBMFFHashMatch) {
+			t.Fatalf("signed set does not validate: %v", codes(res))
+		}
+	})
 }

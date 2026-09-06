@@ -41,8 +41,11 @@ one file:
   `WithTimestampAuthority`), `embed.go` (the embedder contract, `applyEdits`,
   and the JPEG/PNG embedders; the other containers' embedders live beside their readers in
   `gif.go`, `riff.go`, `tiff.go`, `mp3.go`, `svg.go`), `bmffembed.go` (the C2PA uuid box after
-  `ftyp` and the `stco`/`co64`/`saio`/`iloc` offset rewrite), `pdfwrite.go` (the incremental update:
-  embedded file stream, file specification, redefined catalog, cross-reference table or stream)
+  `ftyp` and the `stco`/`co64`/`saio`/`iloc` offset rewrite), `bmffmerklewrite.go` (the fragmented
+  binding's writers: merkle box, padding, proofs, the fragment editor), `signfragmented.go`
+  (`SignFragmented`, the one-fragment-at-a-time source, the merkle binding), `pdfwrite.go` (the
+  incremental update: embedded file stream, file specification, redefined catalog, cross-reference
+  table or stream)
 
 Don't introduce subpackages; that would force exporting internal helpers.
 
@@ -73,7 +76,9 @@ Public surface:
   `Manifest{Title, Actions, Assertions}`, `Action`, `GeneratorInfo`, `Assertion`; `ActionCreated` /
   `ActionOpened` and the `DigitalSourceType*` constants; `SignerOption` (`WithClaimGenerator`,
   `WithVendor`, `WithHashAlgorithm`, `WithTimestampAuthority`, `WithTimestampHTTPClient` — NOT
-  `WithHTTPClient`/`WithClock`, which are `ValidateOption`s);
+  `WithHTTPClient`/`WithClock`, which are `ValidateOption`s); `(*Signer).SignFragmented(ctx, init
+  io.Reader, fragments []io.ReadSeeker, outInit io.Writer, outFragments []io.Writer, m Manifest)
+  error` for DASH/CMAF sets (see the fragmented-signing bullet) and `ErrFragmentSet`;
   the `Err*` sentinels (`errors.Is`). The COSE algorithm is inferred from the key (P-256/384/521 →
   ES256/384/512, RSA ≥ 2048 → PS256, Ed25519 → EdDSA). A manifest must open with `ActionCreated`
   or `ActionOpened` (c2pa-rs rejects the output otherwise — our validator does not check this, which
@@ -118,10 +123,55 @@ Public surface:
   addresses the same eight bytes, and `TestEmbedBMFFOracle` reproduces `c2pa_signed_video.mp4`
   byte for byte from `video_no_manifest.mp4` plus its store (the two fixtures differ by exactly one
   30662-byte box and a 30662 shift of every `stco` entry). Refused with `ErrFragmentedBMFF`: any
-  top-level `moof`, `mfra`, `sidx` or `styp`, or a merkle-purpose C2PA box — a fragmented file's
-  binding is a Merkle tree per fragment, which this release does not author. Also refused: trailing
-  bytes outside any box, no `ftyp`, nothing after `ftyp`. Every existing C2PA uuid box (any purpose)
-  is removed; the core carries the lineage in the new store.
+  top-level `moof`, `mfra`, `sidx` or `styp`, or a merkle-purpose C2PA box — a fragmented file is
+  signed with `SignFragmented` as an init plus fragments; the flat single-file arrangement (moof/mdat
+  pairs in one file, which the verifier handles) has no writer yet. Also refused: trailing bytes
+  outside any box, no `ftyp`, nothing after `ftyp`. Every existing C2PA uuid box (any purpose) is
+  removed; the core carries the lineage in the new store.
+- **The signing pipeline is one function with a `hardBinding` strategy** (`sign.go`): `label`,
+  `payload` (the assertion), `digest` (over the converged layout), `compareRanges` (what the drift
+  check ignores), `validatePrior` (the verdict on the asset as found, for the `parentOf` ingredient)
+  and `validateOutput` (the self-check). `dataHashBinding`, `bmffFlatBinding` and
+  `bmffMerkleBinding` are the three; nothing else in `sign()` knows the container.
+- **Fragmented BMFF signing** (`signfragmented.go`, `bmffmerklewrite.go`) — `SignFragmented` takes a
+  DASH/CMAF initialization segment and its `.m4s` fragments as SEPARATE files and writes §A.5.4: a
+  C2PA merkle box in every fragment and a `c2pa.hash.bmff.v3` with a `merkle` array (and NO flat
+  `hash`) in the init. Split files only — c2pa-rs writes only those too. What is easy to get wrong:
+  - **The merkle box goes immediately before `moof`** (c2pa-rs parity; after `styp`/`sidx`/`emsg`),
+    has NO 8-byte merkle-offset field (`merkleBoxBytes`, not `c2paBoxBytes`), and every box of a set
+    is padded to ONE size (`merkleBoxSize`): the box's CONTENT is excluded from every hash, but its
+    LENGTH moves `moof`/`mdat`, whose offsets are hashed as markers, so every fragment's layout must be
+    known before any leaf is hashed. The size is the maximum over locations — the `location` integer
+    widens at 24/256/65536 and an unpaired node needs no sibling — computed arithmetically and checked
+    against one real encoding. `hashes` is OMITTED when the proof is empty (both readers accept that).
+  - **Stored row = c2pa-rs's `layers[min(5, top)]`** (`merkleMaxProofs`): the root under 32 fragments,
+    proofs of at most five. The proof comes from the same `merkleLayers` the verifier folds with.
+  - **Leaf = `bmffHashDigest` of the prepared fragment** — the verifier's own walk over the fragment's
+    own boxes with the standard exclusions; `initHash = bmffHashDigest(layout)` of the init — the SAME
+    function, which is why the init side is just `sign()` with `bmffMerkleBinding`, converging on the
+    init's length as the flat BMFF path does.
+  - **Fragments are `io.ReadSeeker`s and are visited three times** (hash; self-check; write — four on
+    a re-sign, for `validatePrior`), one in memory at a time: `fragmentSource.prepared(i)` regenerates
+    fragment i deterministically (`prepareFragment` is pure in `(frag, box)`) and asserts its leaf
+    equals the pass-1 leaf — a source that changes between passes is `ErrFragmentSet`, never written.
+    The self-check is `ValidateFragmented` over lazy readers (`lazyReader` materialises on first Read,
+    drops at EOF); `Validate` on an init can never reach `assertion.bmffHash.match`. Nothing is written
+    before the self-check passes; then fragments first, init LAST, so a write failing midway leaves an
+    unsigned init beside playable fragments instead of a signed init over unsigned ones.
+  - **Offsets c2pa-rs leaves stale are re-anchored**: a `sidx` before the insertion has its
+    `first_offset` (u32 at payload+16 in v0, u64 at +20 in v1 — the FullBox header counts, which the
+    first draft got wrong) pointed at the moved `moof`; a `tfhd` with base-data-offset-present (flag 1)
+    likewise. A stale pointer INTO a removed C2PA box means "the media after it" (`anchor`), which is
+    what makes c2pa-rs's own output re-signable. `bmffPatchOffsets` is deliberately NOT run on
+    fragments: a `saio` in `traf` is relative to the track fragment's base and shifting it would corrupt
+    CENC content; `trun`, `tfdt`, `senc` are offset-free. Exactly one `moof` and one `mdat` per fragment
+    (c2pa-rs's rule; else `ErrUnsupportedContainer`); `ftyp`/`moov` in a fragment, or
+    `moof`/`sidx`/`styp` in the init, is the wrong file in the wrong slot (`ErrMalformedAsset` /
+    `ErrFragmentedBMFF`). A `sidx` in the INIT is SegmentBase single-file style and refused.
+  - **One tree per call** (`uniqueId = localId = 1`): sign each rendition separately. c2pa-rs puts
+    several renditions in one manifest — see the multi-rendition rule in the Merkle bullet.
+  - **Re-signing replaces the fragments' merkle boxes** and chains the init's prior manifest as
+    `parentOf` with `ValidateFragmented`'s verdict on the ORIGINAL set as its `validationResults`.
 - **Timestamping** (`tsaclient.go`) is opt-in via `WithTimestampAuthority(url)` and is the one thing
   that makes `Sign` touch the network. Sign FIRST, then timestamp the signature (`sigTst2`, §13.2):
   the TBS is `coseCountersignData(cbor.Marshal(signature), protected)` — `coseTimestampTBS`, the
@@ -561,6 +611,19 @@ binary is absent unless `C2PA_REQUIRE_C2PATOOL` is set, which the
 with `corpus.yml`. Before this gate existed, generated assets had never been run through c2patool at
 all — and the corpus's COSE put x5chain in the unprotected header under a text key for years without
 anything noticing, because `x5chainCandidates` reads both.
+
+**c2patool's `fragment` mode is the fragmented interop gate** (`TestSignInteropFragmented*`, in the
+same `interop` CI job): ours signs `testdata/dash/bunny` → `c2patool --settings <anchors> <init>
+fragment --fragments_glob "BigBuckBunny_2s*.m4s"` → `Trusted` + `assertion.bmffHash.match`; c2patool
+signs (manifest JSON with `private_key`/`sign_cert` paths RELATIVE TO THE MANIFEST FILE, `-o` a FRESH
+dir — it refuses to overwrite — output under `OUT/<init's dir name>/`) → our `ValidateFragmented`
+accepts in full; a c2patool set re-signed here is `Trusted` with two manifests. Quirks the helpers
+absorb: the JSON is preceded by a `Verifying manifest:` line; on ANY failing status — a tampered
+fragment, an UNTRUSTED signer — c2patool prints NO JSON, exits 0, and puts the status on stderr, so
+the fragment mode is always run with our root anchored and a nil report is the failure shape;
+`c2patool <init>` without `fragment` is Invalid ("inithash must not be present"). c2pa-rs leaves the
+`sidx` `first_offset` stale in its output (pointing at its merkle box); the resign row asserts we
+repair it.
 
 **The corpus frames through the production embedders.** `assembleAsset(container, store)` is
 `embedStore(container, unsignedCorpusAsset(container), store)` for every container but PDF, so the

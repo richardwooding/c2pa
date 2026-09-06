@@ -183,6 +183,34 @@ func bmffHashAssertion(alg string, digest []byte) ([]byte, error) {
 	})
 }
 
+// merkleMapSpec is one merkle-map of a fragmented c2pa.hash.bmff.v3 (§A.5.4):
+// the tree over one rendition's fragments.
+type merkleMapSpec struct {
+	uniqueID, localID, count int
+	alg                      string
+	initHash                 []byte
+	hashes                   [][]byte // the stored row
+}
+
+// bmffMerkleAssertion encodes the fragmented form of c2pa.hash.bmff.v3: the
+// standard exclusions, the algorithm and a merkle array — and NO flat hash,
+// which verifyBMFFFragmented (and c2pa-rs) calls malformed on a fragmented
+// assertion because it says nothing about the fragments.
+func bmffMerkleAssertion(alg string, maps []merkleMapSpec) ([]byte, error) {
+	list := make([]any, len(maps))
+	for i, m := range maps {
+		list[i] = map[string]any{
+			"uniqueId": m.uniqueID, "localId": m.localID, "count": m.count,
+			"alg": m.alg, "initHash": m.initHash, "hashes": m.hashes,
+		}
+	}
+	return encMode.Marshal(map[string]any{
+		"exclusions": bmffStandardExclusions(),
+		"alg":        alg,
+		"merkle":     list,
+	})
+}
+
 // bmffStandardSegment resolves the standard exclusions against a BMFF file's
 // own boxes — the segment verifyBMFFHash would build for it.
 func bmffStandardSegment(ctx context.Context, data []byte) (bmffSegment, error) {

@@ -16,8 +16,11 @@ import (
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"math/big"
 	"os"
+	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 )
@@ -399,4 +402,221 @@ func fixtureBytes(t testing.TB, name string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+// --- fragmented BMFF (DASH/CMAF) -----------------------------------------------
+
+// fragOpts shapes unsignedFragmentedSet.
+type fragOpts struct {
+	sidxVersion int  // -1: no 'sidx'; 0 or 1 otherwise
+	tfhdBase    bool // 'tfhd' with base-data-offset-present, pointing at its own 'moof'
+	free        bool // a 'free' box between 'ftyp' and 'moov' in the init
+	emsg        bool // an 'emsg' box before 'moof' in every fragment
+	noStyp      bool // omit 'styp'
+}
+
+// emsgPayload is a minimal DASH event message: FullBox, scheme, value, timing.
+var emsgPayload = bmffFullBox([]byte("urn:test\x00"), []byte{0}, make([]byte, 16))
+
+// unsignedFragmentedSet lays out a DASH/CMAF-shaped set: an initialization
+// segment ('ftyp' ['free'] 'moov') and n fragments, each ['styp'] ['sidx']
+// ['emsg'] 'moof'('mfhd', 'traf'('tfhd', 'tfdt', 'trun')) 'mdat'. The 'sidx'
+// first_offset points at the 'moof' (across an 'emsg' when there is one) and
+// its referenced_size is exactly moof+mdat, as real segmenters write; a 'tfhd' with tfhdBase carries
+// an absolute base_data_offset equal to its 'moof”s start.
+func unsignedFragmentedSet(n int, o fragOpts) (init []byte, frags [][]byte) {
+	init = synthBox("ftyp", []byte("iso6"), []byte{0, 0, 0, 0}, []byte("iso6"), []byte("dash"))
+	if o.free {
+		init = append(init, synthBox("free", make([]byte, 16))...)
+	}
+	mvhd := synthBox("mvhd", bmffFullBox(make([]byte, 96)))
+	trak := synthBox("trak", synthBox("tkhd", bmffFullBox(make([]byte, 80))))
+	mvex := synthBox("mvex", synthBox("trex", bmffFullBox(binary.BigEndian.AppendUint32(nil, 1), make([]byte, 16))))
+	init = append(init, synthBox("moov", mvhd, trak, mvex)...)
+
+	frags = make([][]byte, n)
+	for k := range frags {
+		mdat := synthBox("mdat", bytes.Repeat([]byte{byte(0x70 + k%64)}, 40+k%17))
+		var head []byte
+		if !o.noStyp {
+			head = append(head, synthBox("styp", []byte("msdh"), []byte{0, 0, 0, 0}, []byte("msdh"), []byte("msix"))...)
+		}
+		sidxLen := 0
+		if o.sidxVersion >= 0 {
+			sidxLen = 8 + 4 + 8 + 8 + 4 + 12
+			if o.sidxVersion == 1 {
+				sidxLen += 8
+			}
+		}
+		emsgLen := 0
+		if o.emsg {
+			emsgLen = 8 + len(emsgPayload)
+		}
+		moofStart := len(head) + sidxLen + emsgLen
+
+		mfhd := synthBox("mfhd", bmffFullBox(binary.BigEndian.AppendUint32(nil, uint32(k+1))))
+		var tfhdBody []byte
+		if o.tfhdBase {
+			tfhdBody = append([]byte{0, 0x00, 0x00, 0x01}, binary.BigEndian.AppendUint32(nil, 1)...)
+			tfhdBody = binary.BigEndian.AppendUint64(tfhdBody, uint64(moofStart))
+		} else {
+			tfhdBody = append([]byte{0, 0x02, 0x00, 0x00}, binary.BigEndian.AppendUint32(nil, 1)...) // default-base-is-moof
+		}
+		tfhd := synthBox("tfhd", tfhdBody)
+		tfdt := synthBox("tfdt", append([]byte{1, 0, 0, 0}, binary.BigEndian.AppendUint64(nil, uint64(k*2000))...))
+		trunLen := 8 + 16
+		moofLen := 8 + len(mfhd) + 8 + len(tfhd) + len(tfdt) + trunLen
+		trun := synthBox("trun", []byte{0, 0, 0x02, 0x01},
+			binary.BigEndian.AppendUint32(nil, 1),
+			binary.BigEndian.AppendUint32(nil, uint32(moofLen+8)),
+			binary.BigEndian.AppendUint32(nil, uint32(len(mdat)-8)))
+		moof := synthBox("moof", mfhd, synthBox("traf", tfhd, tfdt, trun))
+		if len(moof) != moofLen {
+			panic("unsignedFragmentedSet: moof length arithmetic")
+		}
+
+		var sidx []byte
+		if o.sidxVersion >= 0 {
+			body := []byte{byte(o.sidxVersion), 0, 0, 0}
+			body = binary.BigEndian.AppendUint32(body, 1)    // reference_ID
+			body = binary.BigEndian.AppendUint32(body, 1000) // timescale
+			// first_offset counts from the end of the sidx to the first
+			// subsegment's moof — across an emsg when there is one.
+			if o.sidxVersion == 0 {
+				body = binary.BigEndian.AppendUint32(body, uint32(k*2000))  // earliest_presentation_time
+				body = binary.BigEndian.AppendUint32(body, uint32(emsgLen)) // first_offset
+			} else {
+				body = binary.BigEndian.AppendUint64(body, uint64(k*2000))
+				body = binary.BigEndian.AppendUint64(body, uint64(emsgLen))
+			}
+			body = append(body, 0, 0, 0, 1)                                         // reserved, reference_count
+			body = binary.BigEndian.AppendUint32(body, uint32(len(moof)+len(mdat))) // reference_type 0 | referenced_size
+			body = binary.BigEndian.AppendUint32(body, 2000)                        // subsegment_duration
+			body = binary.BigEndian.AppendUint32(body, 0x90000000)                  // starts_with_SAP, SAP_type 1
+			sidx = synthBox("sidx", body)
+			if len(sidx) != sidxLen {
+				panic("unsignedFragmentedSet: sidx length arithmetic")
+			}
+		}
+		var emsg []byte
+		if o.emsg {
+			emsg = synthBox("emsg", emsgPayload)
+		}
+		frags[k] = bytes.Join([][]byte{head, sidx, emsg, moof, mdat}, nil)
+	}
+	return init, frags
+}
+
+// topBox returns the first top-level box of type typ, or nil.
+func topBox(data []byte, typ string) *bmffBox {
+	for _, b := range parseBMFFBoxes(context.Background(), data) {
+		if b.typ == typ {
+			return b
+		}
+	}
+	return nil
+}
+
+// sidxFirstOffset reads a 'sidx' first_offset and the box's end.
+func sidxFirstOffset(data []byte, b *bmffBox) (first uint64, end int) {
+	payload := b.start + b.headerLen
+	if data[payload] == 0 {
+		return uint64(binary.BigEndian.Uint32(data[payload+16:])), b.end
+	}
+	return binary.BigEndian.Uint64(data[payload+20:]), b.end
+}
+
+// sidxReferencedSize reads the first reference's referenced_size.
+func sidxReferencedSize(data []byte, b *bmffBox) uint32 {
+	payload := b.start + b.headerLen
+	at := payload + 24 // FullBox, reference_ID, timescale, EPT, first_offset, reserved+count
+	if data[payload] != 0 {
+		at = payload + 32
+	}
+	return binary.BigEndian.Uint32(data[at:]) & 0x7FFFFFFF
+}
+
+// tfhdBaseOffset reads the base_data_offset of the first 'tfhd' under moof,
+// when its flag says one is present.
+func tfhdBaseOffset(data []byte, moof *bmffBox) (uint64, bool) {
+	for _, traf := range moof.children {
+		for _, c := range traf.children {
+			if c.typ != "tfhd" {
+				continue
+			}
+			p := c.start + c.headerLen
+			if data[p+3]&1 == 0 {
+				return 0, false
+			}
+			return binary.BigEndian.Uint64(data[p+8:]), true
+		}
+	}
+	return 0, false
+}
+
+// c2paBoxCount counts the top-level C2PA uuid boxes in data.
+func c2paBoxCount(data []byte) int {
+	n := 0
+	for _, b := range parseBMFFBoxes(context.Background(), data) {
+		if b.typ == "uuid" && b.usertype == c2paBoxUUID {
+			n++
+		}
+	}
+	return n
+}
+
+// fragmentSeekers wraps fragment bytes as the ReadSeekers SignFragmented takes.
+func fragmentSeekers(frags [][]byte) []io.ReadSeeker {
+	out := make([]io.ReadSeeker, len(frags))
+	for i, f := range frags {
+		out[i] = bytes.NewReader(f)
+	}
+	return out
+}
+
+// fragmentWriters makes n output buffers and the writers over them.
+func fragmentWriters(n int) ([]*bytes.Buffer, []io.Writer) {
+	bufs := make([]*bytes.Buffer, n)
+	ws := make([]io.Writer, n)
+	for i := range bufs {
+		bufs[i] = &bytes.Buffer{}
+		ws[i] = bufs[i]
+	}
+	return bufs, ws
+}
+
+// signFragmentedSet signs init + frags and returns the signed files.
+func signFragmentedSet(t testing.TB, s *Signer, init []byte, frags [][]byte, m Manifest) ([]byte, [][]byte) {
+	t.Helper()
+	var outInit bytes.Buffer
+	bufs, ws := fragmentWriters(len(frags))
+	if err := s.SignFragmented(context.Background(), bytes.NewReader(init), fragmentSeekers(frags), &outInit, ws, m); err != nil {
+		t.Fatalf("SignFragmented: %v", err)
+	}
+	out := make([][]byte, len(bufs))
+	for i, b := range bufs {
+		out[i] = b.Bytes()
+	}
+	return outInit.Bytes(), out
+}
+
+// bunnySet loads the vendored Big Buck Bunny rendition: init plus its eleven
+// fragments in file-name order.
+func bunnySet(t testing.TB) (init []byte, frags [][]byte, names []string) {
+	t.Helper()
+	init = fixtureBytes(t, "dash/bunny/BigBuckBunny_2s_init.mp4")
+	paths, err := filepath.Glob("testdata/dash/bunny/BigBuckBunny_2s*.m4s")
+	if err != nil || len(paths) != 11 {
+		t.Fatalf("bunny fragments: %v (%d)", err, len(paths))
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		frags = append(frags, data)
+		names = append(names, filepath.Base(p))
+	}
+	return init, frags, names
 }
