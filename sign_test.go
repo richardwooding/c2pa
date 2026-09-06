@@ -11,6 +11,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"testing"
@@ -595,4 +596,55 @@ func mustSignASN1(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return der
+}
+
+// largeUnsignedPDF is a minimal PDF whose one stream is padding bytes long, so
+// a store appended by Sign lands past Read's triage cap.
+func largeUnsignedPDF(padding int) []byte {
+	var b bytes.Buffer
+	offsets := make([]int, 5)
+	b.WriteString("%PDF-1.4\n")
+	obj := func(n int, body string) {
+		offsets[n] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", n, body)
+	}
+	obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+	obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+	obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Contents 4 0 R >>")
+	offsets[4] = b.Len()
+	fmt.Fprintf(&b, "4 0 obj\n<< /Length %d >>\nstream\n", padding)
+	b.Write(bytes.Repeat([]byte{' '}, padding))
+	b.WriteString("\nendstream\nendobj\n")
+	xref := b.Len()
+	b.WriteString("xref\n0 5\n0000000000 65535 f \n")
+	for _, off := range offsets[1:] {
+		fmt.Fprintf(&b, "%010d 00000 n \n", off)
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", xref)
+	return b.Bytes()
+}
+
+// TestExtractStore_PastReadCap: ExtractStore finds a store Validate would
+// find, even past Read's 16 MiB triage cap — the primitive a signer uses to
+// decide created/opened, and a viewer uses to show the manifest.
+func TestExtractStore_PastReadCap(t *testing.T) {
+	s, sc := newTestSigner(t)
+	ctx := context.Background()
+	signed := signBytes(t, s, PDF, largeUnsignedPDF(MaxScan+4096), createdManifest("big"))
+	if Read(ctx, PDF, bytes.NewReader(signed)).Present {
+		t.Fatal("Read saw a store past its cap; the test asset is not large enough")
+	}
+	store, err := ExtractStore(ctx, PDF, bytes.NewReader(signed))
+	if err != nil || len(store) == 0 {
+		t.Fatalf("ExtractStore = %d bytes, %v; want the store past MaxScan", len(store), err)
+	}
+	res := Validate(ctx, PDF, bytes.NewReader(signed), WithSigningTrust(sc.roots), WithOnlineRevocation(false))
+	if !res.Valid {
+		t.Fatalf("Validate: %v", codes(res))
+	}
+	// And Sign chains rather than refusing: it sees the same store.
+	out := signBytes(t, s, PDF, signed, openedManifest("bigger"))
+	if !Validate(ctx, PDF, bytes.NewReader(out), WithSigningTrust(sc.roots), WithOnlineRevocation(false)).Has(StatusIngredientManifestValidated) {
+		t.Fatal("re-sign of the large PDF did not chain the prior manifest")
+	}
 }
