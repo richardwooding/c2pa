@@ -417,7 +417,7 @@ func attachTimestamp(t testing.TB, spec manifestSpec, msg *cose.Sign1Message, ma
 	}
 	der := mintTSToken(t, spec.tsa, coseCountersignData(counterPayload, protected), spec.tsOpts...)
 
-	msg.Headers.Unprotected[label] = tstHeader(der)
+	msg.Headers.Unprotected[label] = sigTstHeader(der)
 	msg.Headers.RawUnprotected = nil
 	out, err := msg.MarshalCBOR()
 	if err != nil {

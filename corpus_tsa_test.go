@@ -42,6 +42,7 @@ type tsTSTInfo struct {
 	MessageImprint tsMessageImprint
 	SerialNumber   *big.Int
 	GenTime        time.Time `asn1:"generalized"`
+	Nonce          *big.Int  `asn1:"optional"`
 }
 
 type tsAttribute struct {
@@ -207,6 +208,8 @@ type tsTokenProfile struct {
 	useSKI           bool
 	omitCerts        bool
 	twoSigners       bool
+	rawImprint       []byte
+	nonce            *big.Int
 }
 
 func tsWrapInResp() tsTokenOpt { return func(p *tsTokenProfile) { p.wrapInResp = true } }
@@ -227,6 +230,13 @@ func tsCorruptSignature() tsTokenOpt { return func(p *tsTokenProfile) { p.corrup
 func tsSubjectKeyID() tsTokenOpt     { return func(p *tsTokenProfile) { p.useSKI = true } }
 func tsOmitCerts() tsTokenOpt        { return func(p *tsTokenProfile) { p.omitCerts = true } }
 func tsTwoSigners() tsTokenOpt       { return func(p *tsTokenProfile) { p.twoSigners = true } }
+
+// tsRawImprint uses h as the messageImprint verbatim — what a TSA does with
+// the digest a request carries.
+func tsRawImprint(h []byte) tsTokenOpt { return func(p *tsTokenProfile) { p.rawImprint = h } }
+
+// tsNonce echoes n in the TSTInfo, as RFC 3161 requires when a request carries one.
+func tsNonce(n *big.Int) tsTokenOpt { return func(p *tsTokenProfile) { p.nonce = n } }
 
 func derSet(valueTLV []byte) asn1.RawValue {
 	return asn1.RawValue{Class: asn1.ClassUniversal, Tag: asn1.TagSet, IsCompound: true, Bytes: valueTLV}
@@ -260,6 +270,9 @@ func mintTSToken(t testing.TB, ta *testTSA, tbs []byte, opts ...tsTokenOpt) []by
 		imprint = hashBytes(crypto.SHA256, p.imprintOverride)
 	}
 
+	if p.rawImprint != nil {
+		imprint = p.rawImprint
+	}
 	eContent := mustDER(t, tsTSTInfo{
 		Version: 1,
 		Policy:  oidTSAPolicy,
@@ -269,6 +282,7 @@ func mintTSToken(t testing.TB, ta *testTSA, tbs []byte, opts ...tsTokenOpt) []by
 		},
 		SerialNumber: big.NewInt(42),
 		GenTime:      p.genTime.UTC().Truncate(time.Second),
+		Nonce:        p.nonce,
 	})
 
 	digestContent := eContent
@@ -352,9 +366,4 @@ func mintTSToken(t testing.TB, ta *testTSA, tbs []byte, opts ...tsTokenOpt) []by
 		Status: tsPKIStatusInfo{Status: 0},
 		Token:  asn1.RawValue{FullBytes: contentInfo},
 	})
-}
-
-// tstHeader is the COSE unprotected-header container extractTSToken walks.
-func tstHeader(der []byte) map[any]any {
-	return map[any]any{"tstTokens": []any{map[any]any{"val": der}}}
 }

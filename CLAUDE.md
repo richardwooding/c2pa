@@ -37,7 +37,8 @@ one file:
 - **signing**: `sign.go` (`Signer`, `Sign`, the size-stabilising pipeline), `jumbfwrite.go` (JUMBF
   box writers — promoted from the test corpus, which still uses them), `claimwrite.go`
   (deterministic CBOR `encMode`, claim/assertion builders), `cosesign.go` (COSE_Sign1 with x5chain
-  in the PROTECTED header and exact-size `pad`), `embed.go` (the embedder contract, `applyEdits`,
+  in the PROTECTED header and exact-size `pad`), `tsaclient.go` (the RFC 3161 client behind
+  `WithTimestampAuthority`), `embed.go` (the embedder contract, `applyEdits`,
   and the JPEG/PNG embedders; the other containers' embedders live beside their readers in
   `gif.go`, `riff.go`, `tiff.go`, `mp3.go`, `svg.go`), `bmffembed.go` (the C2PA uuid box after
   `ftyp` and the `stco`/`co64`/`saio`/`iloc` offset rewrite), `pdfwrite.go` (the incremental update:
@@ -68,7 +69,8 @@ Public surface:
   `(*Signer).Sign(ctx, container, in io.Reader, out io.Writer, m Manifest) error` — the writer.
   `Manifest{Title, Actions, Assertions}`, `Action`, `GeneratorInfo`, `Assertion`; `ActionCreated` /
   `ActionOpened` and the `DigitalSourceType*` constants; `SignerOption` (`WithClaimGenerator`,
-  `WithVendor`, `WithHashAlgorithm` — NOT `WithHTTPClient`/`WithClock`, which are `ValidateOption`s);
+  `WithVendor`, `WithHashAlgorithm`, `WithTimestampAuthority`, `WithTimestampHTTPClient` — NOT
+  `WithHTTPClient`/`WithClock`, which are `ValidateOption`s);
   the `Err*` sentinels (`errors.Is`). The COSE algorithm is inferred from the key (P-256/384/521 →
   ES256/384/512, RSA ≥ 2048 → PS256, Ed25519 → EdDSA). A manifest must open with `ActionCreated`
   or `ActionOpened` (c2pa-rs rejects the output otherwise — our validator does not check this, which
@@ -117,6 +119,29 @@ Public surface:
   binding is a Merkle tree per fragment, which this release does not author. Also refused: trailing
   bytes outside any box, no `ftyp`, nothing after `ftyp`. Every existing C2PA uuid box (any purpose)
   is removed; the core carries the lineage in the new store.
+- **Timestamping** (`tsaclient.go`) is opt-in via `WithTimestampAuthority(url)` and is the one thing
+  that makes `Sign` touch the network. Sign FIRST, then timestamp the signature (`sigTst2`, §13.2):
+  the TBS is `coseCountersignData(cbor.Marshal(signature), protected)` — `coseTimestampTBS`, the
+  same bytes `verifyTimestamp` recomputes — hashed with SHA-256 whatever the signing algorithm (as
+  c2pa-rs does), sent as a `TimeStampReq` with an 8-byte random nonce and `certReq TRUE`, POSTed as
+  `application/timestamp-query`; the reply must be 200 + `application/timestamp-reply`, ≤ 1 MiB, a
+  granted `TimeStampResp`. Its token is verified with the validator's OWN checks before it goes
+  anywhere near the file: `checkTimestampToken` is the cryptographic half of `verifyTimestampToken`
+  (imprint, signer lookup, signed attributes, CMS signature), factored out so the client and the
+  validator cannot disagree; plus `id-kp-timeStamping` and the nonce echo, which ties this reply to
+  this request. What lands in `sigTst2.tstTokens[0].val` is the DER `TimeStampToken`
+  (`ContentInfo`) — NOT the `TimeStampResp` — per §13.2. Trust in the TSA is not judged at sign
+  time (the caller chose it; validators decide), but the self-check anchors the token's own
+  certificates so `timeStamp.validated` is required of the output. Any failure → `ErrTimestamp`,
+  nothing written. **The nonce lives after `genTime` in TSTInfo, among optional fields a struct
+  field cannot capture** — Go's decoder matches a trailing `[]asn1.RawValue` against ONE element
+  (it silently held a real token's `accuracy` children), so `parseTSTInfo` walks the SEQUENCE's
+  elements and takes the first universal INTEGER after the five fixed ones. The envelope reserve
+  grows by 10000 bytes (c2pa-rs's allowance) when a TSA is configured, since the token's size is the
+  one thing not known before signing; a token that would not fit is an error, never a truncation.
+  The test TSA (`newTestTSA`) issues with `tsRawImprint`/`tsNonce` from an `httptest` handler; for
+  c2patool the TSA certificates must be valid around the wall clock (`liveTSA`) because a timestamp
+  makes c2pa-rs check the signing certificate at the token's time.
 - **PDF signing** (`pdfwrite.go`) is an INCREMENTAL UPDATE appended after the last `%%EOF` — nothing
   before it changes, so a previous update section's store stays exactly where it was (§A.4.2.1) and
   `pdfCatalogStores`/`storeWithPriorSections` still find it; the new store also carries the prior
@@ -499,7 +524,12 @@ including the Merkle paths in `bmffmerkle_test.go`, and the split-file paths plu
 and runs c2pa-rs's `c2patool` over the file: `Valid` with only `signingCredential.untrusted` in
 `failure` for a private chain, `Trusted` with `trust --trust_anchors root.pem`, the right hash-match
 code in `success`, and — for a re-sign — the prior manifest listed as a `parentOf` ingredient with no
-failure deltas. It skips when the binary is absent unless `C2PA_REQUIRE_C2PATOOL` is set, which the
+failure deltas. The timestamp row (`TestSignInteropTimestamp`) checks `timeStamp.untrusted` stays
+INFORMATIONAL without the TSA anchor and becomes `timeStamp.trusted` with it — supplied through
+`--settings` TOML, where v0.27.16 has ONE list, `trust.trust_anchors`, for manifest signers and TSAs
+alike (a `trust_kind = "tsa"` table is silently ignored, not rejected: settings tolerate unknown
+keys, so a wrong schema looks like "anchors not applied", never like an error). It skips when the
+binary is absent unless `C2PA_REQUIRE_C2PATOOL` is set, which the
 `interop` job in `ci.yml` sets so it can never pass by skipping. The pin (`v0.27.16`) moves in lockstep
 with `corpus.yml`. Before this gate existed, generated assets had never been run through c2patool at
 all — and the corpus's COSE put x5chain in the unprotected header under a text key for years without
