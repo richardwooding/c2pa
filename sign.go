@@ -224,6 +224,13 @@ type Signer struct {
 // profile (§14.5.2) exactly as Validate enforces it: digitalSignature key
 // usage, a constrained signing EKU, a non-CA leaf, no SHA-1/MD5, RSA of at
 // least 2048 bits. Never panics.
+//
+// A key that can only sign whole messages — WebCrypto's SubtleCrypto.sign,
+// some HSM and KMS APIs — implements the standard crypto.MessageSigner as
+// well. Sign then hands it the COSE Sig_structure instead of a digest, with
+// the opts and signature encoding x509.CreateCertificate uses (the hash for
+// ECDSA, PSS options for RSA, crypto.Hash(0) for Ed25519; DER for ECDSA, raw
+// for the others), and never calls its Sign method.
 func NewSigner(key crypto.Signer, chain []*x509.Certificate, opts ...SignerOption) (*Signer, error) {
 	if key == nil {
 		return nil, fmt.Errorf("%w: nil key", ErrSignerKey)

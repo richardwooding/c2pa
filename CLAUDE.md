@@ -142,6 +142,18 @@ Public surface:
   The test TSA (`newTestTSA`) issues with `tsRawImprint`/`tsNonce` from an `httptest` handler; for
   c2patool the TSA certificates must be valid around the wall clock (`liveTSA`) because a timestamp
   makes c2pa-rs check the signing certificate at the token's time.
+- **Message signers.** A key that can only sign whole messages (WebCrypto's `SubtleCrypto.sign`, some
+  HSM/KMS APIs) implements the standard `crypto.MessageSigner` (Go 1.25+), and `newSign1` then builds
+  its own `cose.Signer` (`messageSigner`) instead of calling `cose.NewSigner`: go-cose only knows
+  `crypto.Signer` — for ECDSA it hashes the Sig_structure and calls `Sign(rand, digest, nil)`, opts
+  literally nil — which such a key cannot serve. The opts and the encoding contract deliberately mirror
+  `x509.CreateCertificate` (which goes through `crypto.SignMessage`): the hash for ES*,
+  `rsa.PSSOptions{SaltLength: PSSSaltLengthEqualsHash}` for PS256, `crypto.Hash(0)` for EdDSA; DER back
+  for ECDSA — converted to COSE's raw r‖s by `ecdsaRawFromDER`, which pads to the curve width and
+  refuses anything else — raw for RSA-PSS and Ed25519. One key type therefore serves both the
+  certificate minting and the COSE signature, which is what lets c2pa-inspector sign with a
+  non-extractable browser key. `Sign` is never called on such a key (`TestSignMessageSigner` counts);
+  no standard-library key implements `SignMessage`, so ordinary keys still go through go-cose.
 - **PDF signing** (`pdfwrite.go`) is an INCREMENTAL UPDATE appended after the last `%%EOF` — nothing
   before it changes, so a previous update section's store stays exactly where it was (§A.4.2.1) and
   `pdfCatalogStores`/`storeWithPriorSections` still find it; the new store also carries the prior

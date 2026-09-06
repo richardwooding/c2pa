@@ -3,6 +3,9 @@ package c2pa
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -365,4 +368,24 @@ func TestSignInteropTimestamp(t *testing.T) {
 func pemCert(t *testing.T, c *x509.Certificate) []byte {
 	t.Helper()
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
+}
+
+// TestSignInteropMessageSigner: a key that signs whole messages (the browser
+// key shape) produces a file c2patool reads exactly like any other.
+func TestSignInteropMessageSigner(t *testing.T) {
+	requireC2patool(t)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := newSigningChainFor(t, key)
+	s, err := NewSigner(&messageOnlySigner{key: key}, sc.chain, WithClaimGenerator("c2pa-go-interop", "0.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, _ := interopSign(t, s, JPEG, unsignedJPEG(t), ".jpg", createdManifest("message signer"))
+	assertC2patoolValid(t, runC2patoolJSON(t, path), "assertion.dataHash.match")
+	if trusted := runC2patoolJSON(t, path, "trust", "--trust_anchors", writeRootPEM(t, sc)); trusted.ValidationState != "Trusted" {
+		t.Errorf("with our root as an anchor: %q, want Trusted", trusted.ValidationState)
+	}
 }
