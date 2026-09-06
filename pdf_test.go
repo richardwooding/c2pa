@@ -996,22 +996,22 @@ func TestPDFJUMBF_PathologicalCost(t *testing.T) {
 	// Every indirect-length stream resolves, so each contributes a payload extent to exclude from the
 	// index. Checking each extent against every object is quadratic, and this document fits well
 	// under Read's 16 MiB cap: 200k of them measured 13.5s that way against 583ms for one merged
-	// walk. The ceiling is calibrated on the merged walk under -race, which is what CI runs.
+	// walk.
+	//
+	// Asserted as a SCALING ratio rather than a wall-clock ceiling. An absolute
+	// ceiling measures the runner as much as the code: this took 1.3s locally
+	// under -race and still tripped an 8s ceiling on a loaded CI runner, which
+	// is a flake rather than a finding. The ratio is what the claim actually is.
 	t.Run("many indirect-length streams", func(t *testing.T) {
-		var b bytes.Buffer
-		b.WriteString("%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n2 0 obj\n0\nendobj\n")
-		for i := 0; i < 200_000; i++ {
-			fmt.Fprintf(&b, "%d 0 obj\n<< /Length 2 0 R >>\nstream\n\nendstream\nendobj\n", 10+i)
-		}
-		b.WriteString("trailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n")
-
-		start := time.Now()
-		if got := pdfJUMBF(ctx, b.Bytes()); got != nil {
-			t.Fatalf("yielded %d bytes", len(got))
-		}
-		if elapsed := time.Since(start); elapsed > 8*time.Second {
-			t.Fatalf("took %v, want the payload-extent walk to stay linear", elapsed)
-		}
+		assertScalesLinearly(t, 50_000, 4, func(n int) []byte {
+			var b bytes.Buffer
+			b.WriteString("%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n2 0 obj\n0\nendobj\n")
+			for i := range n {
+				fmt.Fprintf(&b, "%d 0 obj\n<< /Length 2 0 R >>\nstream\n\nendstream\nendobj\n", 10+i)
+			}
+			b.WriteString("trailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n")
+			return b.Bytes()
+		})
 	})
 
 	// Every stream names the same length object, and every definition of it is a fabrication that
@@ -1644,10 +1644,22 @@ func TestPDFEndObjIsBounded(t *testing.T) {
 // c2pa-inspector validates with context.Background(), so there is no deadline
 // to cut it short — the browser tab simply stops.
 func TestPDFRepairCostStaysLinear(t *testing.T) {
-	const small, factor = 4000, 4
+	assertScalesLinearly(t, 4000, 4, buildUnterminatedStreams)
+}
+
+// assertScalesLinearly builds the document at `small` and at `small*factor`
+// objects and fails when the larger one took disproportionately longer,
+// which is what a pass that has gone quadratic looks like.
+//
+// A ratio rather than a wall-clock ceiling, because a ceiling measures the
+// machine as much as the code: the same document that runs in ~1.3s here has
+// been seen to take 8s on a loaded CI runner, so any absolute bound is either
+// so generous it stops catching regressions or tight enough to flake.
+func assertScalesLinearly(t *testing.T, small, factor int, build func(int) []byte) {
+	t.Helper()
 
 	measure := func(n int) time.Duration {
-		data := buildUnterminatedStreams(n)
+		data := build(n)
 		start := time.Now()
 		pdfJUMBF(context.Background(), data)
 		return time.Since(start)
@@ -1665,9 +1677,9 @@ func TestPDFRepairCostStaysLinear(t *testing.T) {
 
 	// Linear grows by `factor` (4x), quadratic by factor squared (16x). The
 	// midpoint separates them with headroom on both sides.
-	const tolerated = factor * 2
+	tolerated := time.Duration(factor * 2)
 	if scaled > base*tolerated {
-		t.Errorf("scaling %dx the objects took %.1fx the time (%v -> %v); the repair pass looks quadratic again",
+		t.Errorf("scaling %dx the objects took %.1fx the time (%v -> %v); the pass looks quadratic again",
 			factor, float64(scaled)/float64(max(base, time.Microsecond)), base, scaled)
 	}
 	t.Logf("%d objects %v; %d objects %v", small, base.Round(time.Millisecond), small*factor, scaled.Round(time.Millisecond))
