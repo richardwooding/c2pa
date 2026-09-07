@@ -76,10 +76,11 @@ Public surface:
   match entries, so `Has(StatusAssertionBMFFHashMatch)` keeps meaning "fully bound".
 - `Signer` / `NewSigner(key crypto.Signer, chain []*x509.Certificate, opts...)` /
   `(*Signer).Sign(ctx, container, in io.Reader, out io.Writer, m Manifest) error` — the writer.
-  `Manifest{Title, Actions, Assertions}`, `Action`, `GeneratorInfo`, `Assertion`; `ActionCreated` /
+  `Manifest{Title, Actions, Assertions, Identity}`, `Action`, `GeneratorInfo`, `Assertion`,
+  `IdentityInfo{Roles, References}` and the `Role*` constants; `ActionCreated` /
   `ActionOpened` and the `DigitalSourceType*` constants; `SignerOption` (`WithClaimGenerator`,
-  `WithVendor`, `WithHashAlgorithm`, `WithTimestampAuthority`, `WithTimestampHTTPClient` — NOT
-  `WithHTTPClient`/`WithClock`, which are `ValidateOption`s); `(*Signer).SignFragmented(ctx, init
+  `WithVendor`, `WithHashAlgorithm`, `WithTimestampAuthority`, `WithTimestampHTTPClient`,
+  `WithIdentitySigner(key, chain)` — NOT `WithHTTPClient`/`WithClock`, which are `ValidateOption`s); `(*Signer).SignFragmented(ctx, init
   io.Reader, fragments []io.ReadSeeker, outInit io.Writer, outFragments []io.Writer, m Manifest)
   error` for DASH/CMAF sets (see the fragmented-signing bullet) and `ErrFragmentSet`;
   the `Err*` sentinels (`errors.Is`). The COSE algorithm is inferred from the key (P-256/384/521 →
@@ -175,6 +176,39 @@ Public surface:
     several renditions in one manifest — see the multi-rendition rule in the Merkle bullet.
   - **Re-signing replaces the fragments' merkle boxes** and chains the init's prior manifest as
     `parentOf` with `ValidateFragmented`'s verdict on the ORIGINAL set as its `validationResults`.
+- **CAWG identity signing** (`cawgsign.go`; the verifier's half is under "Validation-specific
+  gotchas"). `WithIdentitySigner(key, chain)` makes `sign()` write a `cawg.identity` assertion — the
+  named actor's own detached COSE_Sign1 over a `signer_payload` naming the hard binding (always) and
+  `Manifest.Identity.References`, with `Manifest.Identity.Roles`. What holds it together:
+  - **It is a second reserved-size envelope.** The payload references the hard binding's FINAL
+    hashed_uri, which exists only after phase (b), so the identity is signed between (b) and the
+    claim (phase b'), yet its box moves every offset in (a). So a placeholder box of the FINAL length
+    stands in through the layout passes: `identityReserveSize` encodes the assertion with zero hashes,
+    a `coseReserveSize`-wide zero signature and an empty `pad1` — every field is fixed-width from
+    there — and `marshalIdentityPadded` brings the signed assertion to exactly that length (pad1
+    grows, pad2 steps past the bstr-header widths a lone pad cannot hit; in practice pad1 stays empty,
+    which c2patool accepts). The invariant at the end of (c) — same store length as the placeholder —
+    covers it.
+  - **`assemble` is shared.** `build` and the identity step hash the SAME boxes through the same
+    `hashedURI`, so what the identity references is what the claim lists, byte for byte; the
+    self-check requires `cawg.identity.trusted` with the identity root anchored, so a payload that
+    drifted would fail before anything is written.
+  - **Encoded with `identityEncMode` (declaration order), listed under `gathered_assertions`**, hashed
+    uris without `alg`, references hard binding first — all c2pa-rs parity, and the first is what makes
+    c2patool verify it (see the verifier bullets for why). `TestSignInteropIdentity` proves it.
+  - **c2patool 0.27.16 always says `signingCredential.untrusted` about the identity**, whatever
+    `[cawg_trust]` holds, alongside `cawg.identity.well-formed`; `validation_state` stays `Valid`.
+    `assertC2patoolIdentity` expects exactly that and requires every untrusted entry to be the
+    identity's. In `fragment` mode that quirk is a failing status, so c2patool prints NO report for a
+    set carrying an identity; `TestSignInteropIdentityFragmented` asserts the stderr names the
+    identity's trust and nothing else, and leaves the verdict to `ValidateFragmented`. c2patool signs identities from `[cawg_x509_signer.local] alg, sign_cert, private_key,
+    referenced_assertions, roles` in `--settings` (`c2patoolSignIdentity`).
+  - **The identity key goes through `prepareSigningKey`**, the same gauntlet as the claim key, and may
+    BE the claim key. With a TSA configured the identity signature gets its own `sigTst2` (two TSA
+    round trips per Sign); its token certificates join the self-check's TSA pool. `cawg.identity*` is a
+    reserved label; `Manifest.Identity` without an identity signer, a reference to a label not being
+    written, to the hard binding, or twice, and a role that is not a label are `ErrManifestInvalid`.
+    One identity per manifest.
 - **Timestamping** (`tsaclient.go`) is opt-in via `WithTimestampAuthority(url)` and is the one thing
   that makes `Sign` touch the network. Sign FIRST, then timestamp the signature (`sigTst2`, §13.2):
   the TBS is `coseCountersignData(cbor.Marshal(signature), protected)` — `coseTimestampTBS`, the

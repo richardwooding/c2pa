@@ -101,6 +101,12 @@ type Manifest struct {
 	Title      string
 	Actions    []Action
 	Assertions []Assertion
+	// Identity is what the CAWG identity assertion Sign writes says about the
+	// named actor's relationship to this asset. It is used only when the
+	// Signer has WithIdentitySigner; setting it without one is
+	// ErrManifestInvalid. The zero value is fine: the identity then vouches for
+	// the hard binding alone, with no roles.
+	Identity IdentityInfo
 }
 
 // Action is one entry of the c2pa.actions.v2 assertion. DigitalSourceType is
@@ -130,15 +136,44 @@ type Assertion struct {
 	JSON  []byte
 }
 
+// IdentityInfo describes the named actor's relationship to an asset for the
+// CAWG identity assertion (cawg.identity) a Signer with WithIdentitySigner
+// writes. See ValidationResult.Identities for how it reads back.
+type IdentityInfo struct {
+	// Roles are the actor's roles in producing the asset — the Role* constants
+	// (CAWG spec §5.2.3) or an entity-namespaced label such as
+	// "com.example.reviewer". Optional.
+	Roles []string
+	// References names further assertions of this manifest the actor signs
+	// over, by label: "c2pa.actions.v2", a caller assertion's label, … The hard
+	// binding is always referenced and must not be listed. Each label at most
+	// once, and each must exist in the manifest being written.
+	References []string
+}
+
+// Named-actor roles defined by the CAWG Identity Assertion spec (§5.2.3), for
+// IdentityInfo.Roles.
+const (
+	RoleCreator     = "cawg.creator"
+	RoleContributor = "cawg.contributor"
+	RoleEditor      = "cawg.editor"
+	RoleProducer    = "cawg.producer"
+	RolePublisher   = "cawg.publisher"
+	RoleSponsor     = "cawg.sponsor"
+	RoleTranslator  = "cawg.translator"
+)
+
 // SignerOption configures a Signer. See the With* constructors.
 type SignerOption func(*signerConfig)
 
 type signerConfig struct {
-	generator GeneratorInfo
-	vendor    string
-	hashAlg   string
-	tsaURL    string
-	tsaClient *http.Client
+	generator     GeneratorInfo
+	vendor        string
+	hashAlg       string
+	tsaURL        string
+	tsaClient     *http.Client
+	identityKey   crypto.Signer
+	identityChain []*x509.Certificate
 }
 
 // WithClaimGenerator sets claim_generator_info, the software that produced the
@@ -175,6 +210,22 @@ func WithTimestampAuthority(url string) SignerOption {
 // Validate's option for revocation fetches, hence the distinct name.
 func WithTimestampHTTPClient(client *http.Client) SignerOption {
 	return func(c *signerConfig) { c.tsaClient = client }
+}
+
+// WithIdentitySigner adds a CAWG identity assertion (cawg.identity, sig_type
+// cawg.x509.cose) to every manifest the Signer writes: the named actor's own
+// COSE signature, with this key and chain, over the hard binding and whatever
+// Manifest.Identity adds — a second signature inside the manifest, independent
+// of the claim's, that says WHO vouches for the content where the claim says
+// which tool wrote it. The key and chain are validated exactly as NewSigner
+// validates the claim key (same errors, with an "identity" prefix); they may be
+// the claim's own. The assertion's payload is encoded in the field order
+// c2pa-rs re-serialises before verifying, so c2patool accepts it; a validator
+// reports it cawg.identity.well-formed, and cawg.identity.trusted once the chain
+// is anchored with WithIdentityTrust. When a timestamp authority is configured
+// the identity signature is timestamped too.
+func WithIdentitySigner(key crypto.Signer, chain []*x509.Certificate) SignerOption {
+	return func(c *signerConfig) { c.identityKey, c.identityChain = key, chain }
 }
 
 func defaultSignerConfig() signerConfig {
@@ -214,6 +265,18 @@ type Signer struct {
 	chain    []*x509.Certificate
 	chainDER [][]byte
 	cfg      signerConfig
+	// identity is the CAWG identity signer, nil without WithIdentitySigner.
+	identity *signingKey
+}
+
+// signingKey is a key with the chain that names it, checked against the C2PA
+// certificate profile: the claim signer's, or the identity signer's.
+type signingKey struct {
+	key      crypto.Signer
+	alg      cose.Algorithm
+	sigLen   int
+	chain    []*x509.Certificate
+	chainDER [][]byte
 }
 
 // NewSigner validates the key and chain up front so that Sign can only fail on
@@ -258,6 +321,33 @@ func NewSigner(key crypto.Signer, chain []*x509.Certificate, opts ...SignerOptio
 			return nil, fmt.Errorf("%w: timestamp authority %q is not an http(s) URL", ErrSignerOption, cfg.tsaURL)
 		}
 	}
+	sk, err := prepareSigningKey(key, chain)
+	if err != nil {
+		return nil, err
+	}
+	signer := &Signer{key: sk.key, alg: sk.alg, sigLen: sk.sigLen, chain: sk.chain, chainDER: sk.chainDER, cfg: cfg}
+	if cfg.identityKey != nil || cfg.identityChain != nil {
+		if cfg.identityKey == nil {
+			return nil, fmt.Errorf("%w: identity: nil key", ErrSignerKey)
+		}
+		id, err := prepareSigningKey(cfg.identityKey, cfg.identityChain)
+		if err != nil {
+			return nil, fmt.Errorf("identity: %w", err)
+		}
+		signer.identity = id
+	}
+	return signer, nil
+}
+
+// prepareSigningKey is NewSigner's gauntlet for one key and chain: the COSE
+// algorithm and signature width follow from the key; the chain is leaf first,
+// each certificate issued by the next, the leaf matching the key and valid now,
+// and the whole satisfying the C2PA certificate profile exactly as Validate
+// enforces it — so the signer refuses exactly what the validator would fail.
+func prepareSigningKey(key crypto.Signer, chain []*x509.Certificate) (*signingKey, error) {
+	if key == nil {
+		return nil, fmt.Errorf("%w: nil key", ErrSignerKey)
+	}
 	alg, sigLen, err := coseAlgorithmFor(key.Public())
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSignerKey, err)
@@ -295,7 +385,7 @@ func NewSigner(key crypto.Signer, chain []*x509.Certificate, opts ...SignerOptio
 	if violations := certProfileViolations(certs, certs[0], signingEKUOK); len(violations) > 0 {
 		return nil, fmt.Errorf("%w: %s", ErrSignerChain, strings.Join(violations, "; "))
 	}
-	return &Signer{key: key, alg: alg, sigLen: sigLen, chain: certs, chainDER: der, cfg: cfg}, nil
+	return &signingKey{key: key, alg: alg, sigLen: sigLen, chain: certs, chainDER: der}, nil
 }
 
 // Sign reads the whole asset from in (up to ValidateMaxScan), builds a
@@ -640,27 +730,75 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 			priorBoxes = append(priorBoxes, pm.full)
 		}
 	}
+	// The identity assertion, when there is one, references the hard binding's
+	// FINAL hashed_uri and so can only be signed once the digest is known —
+	// after phase (b), like the claim — while its size moves every offset. So
+	// it is a second reserved-size envelope (CAWG §6.3): a placeholder box of
+	// exactly the final length stands in through the layout passes, and the
+	// final assertion is padded to that length (pad1/pad2 exist for this).
+	if err := validateIdentityInfo(m.Identity, s.identity != nil, fixed); err != nil {
+		return nil, err
+	}
+	timestamped := s.cfg.tsaURL != ""
+	h, _ := hashByName(alg)
+	var idCoseReserve, idReserve int
+	var identityBox []byte // the placeholder through (a), the signed assertion from (c)
+	if s.identity != nil {
+		idCoseReserve = coseReserveSize(s.identity.sigLen, s.identity.chainDER, timestamped)
+		template := identityTemplate(hb.label(), m.Identity, h.Size())
+		idReserve, err = identityReserveSize(template, idCoseReserve)
+		if err != nil {
+			return nil, fmt.Errorf("c2pa: internal: %w", err)
+		}
+		identityBox = assertionBox(identityLabel, make([]byte, idReserve))
+	}
+
 	// The binding decides the assertion; a BMFF binding has no byte ranges, so
 	// its layout converges on the output's length rather than on offsets.
 	bindingLabel := hb.label()
-	build := func(excl []byteRange, digest, envelope []byte) (builtStore, error) {
+	// assemble is the assertion store's content bar the identity: the hard
+	// binding for this layout and digest, then the fixed assertions, with the
+	// claim's created_assertions entries. The identity step hashes the SAME
+	// boxes, so what it references is what the claim lists.
+	assemble := func(excl []byteRange, digest []byte) ([]namedBox, []any, error) {
 		payload, err := hb.payload(excl, digest)
 		if err != nil {
-			return builtStore{}, err
+			return nil, nil, err
 		}
 		boxes := append([]namedBox{{bindingLabel, assertionBox(bindingLabel, payload)}}, fixed...)
 		created := make([]any, 0, len(boxes))
-		children := make([][]byte, 0, len(boxes))
 		for _, nb := range boxes {
 			ref, err := hashedURI(alg, assertionURL(nb.label), nb.box)
 			if err != nil {
-				return builtStore{}, err
+				return nil, nil, err
 			}
 			created = append(created, ref)
+		}
+		return boxes, created, nil
+	}
+	build := func(excl []byteRange, digest, envelope []byte) (builtStore, error) {
+		boxes, created, err := assemble(excl, digest)
+		if err != nil {
+			return builtStore{}, err
+		}
+		children := make([][]byte, 0, len(boxes)+1)
+		for _, nb := range boxes {
 			children = append(children, nb.box)
 		}
+		var gathered []any
+		if identityBox != nil {
+			// c2pa-rs lists the identity under gathered_assertions: it is the
+			// actor's statement, gathered into the claim, not the generator's.
+			ref, err := hashedURI(alg, assertionURL(identityLabel), identityBox)
+			if err != nil {
+				return builtStore{}, err
+			}
+			gathered = append(gathered, ref)
+			children = append(children, identityBox)
+		}
 		claim, err := buildClaimV2(claimParams{
-			title: m.Title, instanceID: instanceID, alg: alg, generator: s.cfg.generator, created: created,
+			title: m.Title, instanceID: instanceID, alg: alg, generator: s.cfg.generator,
+			created: created, gathered: gathered,
 		})
 		if err != nil {
 			return builtStore{}, err
@@ -678,9 +816,7 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 	}
 
 	// (a) converge the layout.
-	h, _ := hashByName(alg)
 	zeroDigest := make([]byte, h.Size())
-	timestamped := s.cfg.tsaURL != ""
 	reserve := coseReserveSize(s.sigLen, s.chainDER, timestamped)
 	zeroEnvelope := make([]byte, reserve)
 	excl := []byteRange{{start: 0, length: 0}}
@@ -715,6 +851,26 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 		return nil, fmt.Errorf("%w: %v", ErrMalformedAsset, err)
 	}
 
+	// (b') the identity signature, over the boxes the claim will list — the
+	// hard binding is final now — padded to the placeholder's exact length.
+	var tokenCerts []*x509.Certificate
+	if s.identity != nil {
+		boxes, _, err := assemble(excl, digest)
+		if err != nil {
+			return nil, err
+		}
+		sp, err := identityPayload(alg, boxes, m.Identity)
+		if err != nil {
+			return nil, err
+		}
+		signed, idTokenCerts, err := s.signIdentity(ctx, sp, idCoseReserve, idReserve, timestamped)
+		if err != nil {
+			return nil, err
+		}
+		identityBox = assertionBox(identityLabel, signed)
+		tokenCerts = append(tokenCerts, idTokenCerts...)
+	}
+
 	// (c) sign once, pad to the reserve, embed, and prove nothing else moved.
 	unsigned, err := build(excl, digest, zeroEnvelope)
 	if err != nil {
@@ -724,7 +880,6 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSignerKey, err)
 	}
-	var tokenCerts []*x509.Certificate
 	if timestamped {
 		// Sign first, then timestamp the signature (sigTst2, §13.2): the token
 		// goes in the unprotected header, so the signature stays valid.
@@ -738,7 +893,7 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 		}
 		attachSigTst2(msg, token)
 		if sd, ok := parseCMSSignedData(token); ok {
-			tokenCerts = sd.certs
+			tokenCerts = append(tokenCerts, sd.certs...)
 		}
 	}
 	envelope, err := marshalSign1Padded(msg, reserve)
@@ -769,6 +924,11 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 	pool := x509.NewCertPool()
 	pool.AddCert(s.chain[len(s.chain)-1])
 	checkOpts := []ValidateOption{WithSigningTrust(pool), WithMaxIngredientDepth(0), WithOnlineRevocation(false)}
+	if s.identity != nil {
+		idPool := x509.NewCertPool()
+		idPool.AddCert(s.identity.chain[len(s.identity.chain)-1])
+		checkOpts = append(checkOpts, WithIdentityTrust(idPool))
+	}
 	if len(tokenCerts) > 0 {
 		// The self-check is about the binding, not about whether the caller's
 		// TSA is anchored: the token's own certificates are the pool.
@@ -780,7 +940,8 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 	}
 	res := hb.validateOutput(ctx, final, checkOpts)
 	match := hb.matchCode()
-	if !res.Valid || !res.Has(match) || (timestamped && !res.Has(StatusTimeStampValidated)) {
+	if !res.Valid || !res.Has(match) || (timestamped && !res.Has(StatusTimeStampValidated)) ||
+		(s.identity != nil && !res.Has(StatusIdentityTrusted)) {
 		reason := "hard binding did not verify"
 		if f := res.FirstFailure(); f != nil {
 			reason = string(f.Code) + ": " + f.Explanation

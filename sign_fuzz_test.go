@@ -12,6 +12,13 @@ import (
 // with the signer's own root; when it fails nothing is written.
 func FuzzSign(f *testing.F) {
 	s, sc := newTestSigner(f)
+	// The high bit of `which` picks a signer that also writes a CAWG identity
+	// assertion, so the second reserved envelope is fuzzed alongside the first.
+	idChain := newSigningChain(f)
+	withIdentity, err := NewSigner(sc.key, sc.chain, WithClaimGenerator("c2pa-sign-test", "1.2"), WithIdentitySigner(idChain.key, idChain.chain))
+	if err != nil {
+		f.Fatal(err)
+	}
 	f.Add(unsignedJPEG(f), uint8(0))
 	f.Add(unsignedPNG(f), uint8(1))
 	f.Add(fixtureBytes(f, "c2pa_signed.jpg"), uint8(0))
@@ -28,22 +35,32 @@ func FuzzSign(f *testing.F) {
 	f.Add(unsignedPDF(true), uint8(8))
 	f.Add([]byte{0xFF, 0xD8, 0xFF, 0xD9}, uint8(0))
 	f.Add([]byte{}, uint8(1))
+	f.Add(unsignedJPEG(f), uint8(0x80))
+	f.Add(minimalMP4(false), uint8(0x87))
 	f.Fuzz(func(t *testing.T, data []byte, which uint8) {
 		if len(data) > 1<<20 {
 			return
 		}
-		c := signableContainers[int(which)%len(signableContainers)]
+		c := signableContainers[int(which&0x0f)%len(signableContainers)]
+		signer, m := s, openedManifest("fuzz")
+		if which&0x80 != 0 {
+			signer = withIdentity
+			m.Identity = IdentityInfo{Roles: []string{RoleCreator}, References: []string{"c2pa.actions.v2"}}
+		}
 		var out bytes.Buffer
-		err := s.Sign(context.Background(), c, bytes.NewReader(data), &out, openedManifest("fuzz"))
+		err := signer.Sign(context.Background(), c, bytes.NewReader(data), &out, m)
 		if err != nil {
 			if out.Len() != 0 {
 				t.Fatalf("wrote %d bytes on error %v", out.Len(), err)
 			}
 			return
 		}
-		res := Validate(context.Background(), c, bytes.NewReader(out.Bytes()), WithSigningTrust(sc.roots), WithOnlineRevocation(false), WithMaxIngredientDepth(0))
+		res := Validate(context.Background(), c, bytes.NewReader(out.Bytes()), WithSigningTrust(sc.roots), WithIdentityTrust(idChain.roots), WithOnlineRevocation(false), WithMaxIngredientDepth(0))
 		if !res.Valid {
 			t.Fatalf("signed output does not validate: %v", codes(res))
+		}
+		if signer == withIdentity && (len(res.Identities) != 1 || !res.Identities[0].Trusted) {
+			t.Fatalf("identity not trusted in signed output: %+v %v", res.Identities, codes(res))
 		}
 	})
 }

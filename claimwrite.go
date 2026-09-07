@@ -110,12 +110,13 @@ type claimParams struct {
 	alg        string
 	generator  GeneratorInfo
 	created    []any // hashed_uri maps, in assertion-store order
+	gathered   []any // hashed_uri maps of assertions gathered from others (the CAWG identity)
 }
 
 // buildClaimV2 encodes a c2pa.claim.v2 exactly as c2pa-rs's Claim::serialize_v2
 // does: instanceID, ONE claim_generator_info map (not the 1.x array),
-// signature, created_assertions, dc:title when set, alg. No dc:format (gone
-// in v2), no "assertions" key, no empty gathered_assertions.
+// signature, created_assertions, gathered_assertions only when there are any,
+// dc:title when set, alg. No dc:format (gone in v2), no "assertions" key.
 func buildClaimV2(p claimParams) ([]byte, error) {
 	if p.generator.Name == "" {
 		return nil, fmt.Errorf("claim_generator_info is mandatory")
@@ -126,6 +127,9 @@ func buildClaimV2(p claimParams) ([]byte, error) {
 		"created_assertions":   p.created,
 		"instanceID":           p.instanceID,
 		"signature":            "self#jumbf=c2pa.signature",
+	}
+	if len(p.gathered) > 0 {
+		claim["gathered_assertions"] = p.gathered
 	}
 	if p.title != "" {
 		claim["dc:title"] = p.title
@@ -347,7 +351,8 @@ func reservedAssertionLabel(label string) bool {
 	switch {
 	case label == "", strings.HasPrefix(label, "c2pa.hash."),
 		strings.HasPrefix(label, "c2pa.actions"), strings.HasPrefix(label, "c2pa.claim"),
-		label == "c2pa.signature", label == "c2pa.ingredient.v3":
+		label == "c2pa.signature", label == "c2pa.ingredient.v3",
+		strings.HasPrefix(label, identityLabel):
 		return true
 	}
 	return false

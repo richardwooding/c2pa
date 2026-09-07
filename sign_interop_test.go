@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -610,5 +611,265 @@ func TestSignInteropFragmentedResign(t *testing.T) {
 	active := rep.Manifests[rep.ActiveManifest]
 	if active.Title != "second, by c2pa" || len(active.Ingredients) != 1 || active.Ingredients[0].Relationship != "parentOf" {
 		t.Errorf("active manifest: %+v", active)
+	}
+}
+
+// identityURLSuffix is the tail of the identity assertion's URL in c2patool's
+// report, "self#jumbf=/c2pa/<manifest>/c2pa.assertions/cawg.identity".
+const identityURLSuffix = "/c2pa.assertions/cawg.identity"
+
+// identitySettings writes a c2patool settings TOML anchoring the claim root
+// under [trust] and the identity root under [cawg_trust].
+func identitySettings(t *testing.T, sc, idChain signingChain) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "identity_settings.toml")
+	toml := "[trust]\ntrust_anchors = \"\"\"\n" + string(sc.rootPEM) + "\"\"\"\n\n" +
+		"[cawg_trust]\ntrust_anchors = \"\"\"\n" + string(idChain.rootPEM) + "\"\"\"\n"
+	if err := os.WriteFile(p, []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// assertC2patoolIdentity checks what c2patool 0.27.16 says about a CAWG X.509
+// identity it accepts: cawg.identity.well-formed in success, the identity's
+// hashed_uri matched, and no cawg.identity.* failure. Its trust verdict on the
+// identity is always signingCredential.untrusted at the identity URL — that
+// version applies no [cawg_trust] anchors — which assertC2patoolValid already
+// tolerates (it counts codes, not entries); here every untrusted entry must be
+// the identity's, since the claim root IS anchored.
+func assertC2patoolIdentity(t *testing.T, rep c2patoolReport) {
+	t.Helper()
+	am := rep.ValidationResults.ActiveManifest
+	if am == nil {
+		t.Fatal("no activeManifest results")
+	}
+	var wellFormed, hashed bool
+	for _, s := range am.Success {
+		if s.Code == "cawg.identity.well-formed" && strings.HasSuffix(s.URL, identityURLSuffix) {
+			wellFormed = true
+		}
+		if s.Code == "assertion.hashedURI.match" && strings.HasSuffix(s.URL, identityURLSuffix) {
+			hashed = true
+		}
+	}
+	if !wellFormed || !hashed {
+		t.Errorf("c2patool did not accept the identity (well-formed %v, hashed %v): %v", wellFormed, hashed, am.Success)
+	}
+	for _, s := range am.Failure {
+		if strings.HasPrefix(s.Code, "cawg.") {
+			t.Errorf("c2patool identity failure: %s %s", s.Code, s.Explanation)
+		}
+		if s.Code == "signingCredential.untrusted" && !strings.HasSuffix(s.URL, identityURLSuffix) {
+			t.Errorf("the claim signer should be trusted; untrusted at %s", s.URL)
+		}
+	}
+}
+
+// TestSignInteropIdentity: a CAWG identity assertion this library writes is one
+// c2patool verifies — the signer_payload it re-serialises matches what we
+// signed — with the roles and references intact in its report.
+func TestSignInteropIdentity(t *testing.T) {
+	requireC2patool(t)
+	sc := newSigningChain(t)
+	idChain := newSigningChain(t)
+	s, err := NewSigner(sc.key, sc.chain, WithClaimGenerator("c2pa-go-interop", "0.1"), WithIdentitySigner(idChain.key, idChain.chain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := createdManifest("interop identity")
+	m.Identity = IdentityInfo{Roles: []string{RoleCreator, RolePublisher}, References: []string{"c2pa.actions.v2"}}
+	for _, tc := range []struct {
+		name      string
+		container Container
+		ext       string
+		in        []byte
+	}{
+		{"jpeg", JPEG, ".jpg", unsignedJPEG(t)},
+		{"png", PNG, ".png", unsignedPNG(t)},
+		{"mp4", BMFF, ".mp4", minimalMP4(false)},
+		{"pdf", PDF, ".pdf", unsignedPDF(false)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, out := interopSign(t, s, tc.container, tc.in, tc.ext, m)
+			rep := runC2patoolJSON(t, "--settings", identitySettings(t, sc, idChain), path)
+			binding := "assertion.dataHash.match"
+			if tc.container == BMFF {
+				binding = "assertion.bmffHash.match"
+			}
+			assertC2patoolValid(t, rep, binding)
+			assertC2patoolIdentity(t, rep)
+
+			// c2patool decodes the identity into a report: roles, references and
+			// the identity leaf's issuer.
+			raw := runC2patoolRaw(t, "--settings", identitySettings(t, sc, idChain), path)
+			for _, want := range []string{`"cawg.identity"`, `"cawg.creator"`, `"cawg.publisher"`, `self#jumbf=c2pa.assertions/c2pa.actions.v2`, `"cawg.x509.cose"`} {
+				if !strings.Contains(raw, want) {
+					t.Errorf("c2patool report lacks %s", want)
+				}
+			}
+			// And we agree with ourselves.
+			res := Validate(context.Background(), tc.container, bytes.NewReader(out), WithSigningTrust(sc.roots), WithIdentityTrust(idChain.roots), WithOnlineRevocation(false))
+			if !res.Valid || len(res.Identities) != 1 || !res.Identities[0].Trusted {
+				t.Errorf("our verifier: valid=%v %+v %v", res.Valid, res.Identities, codes(res))
+			}
+		})
+	}
+}
+
+// runC2patoolRaw returns c2patool's stdout as text.
+func runC2patoolRaw(t *testing.T, args ...string) string {
+	t.Helper()
+	var stdout bytes.Buffer
+	cmd := exec.Command("c2patool", args...)
+	cmd.Stdout = &stdout
+	_ = cmd.Run()
+	return stdout.String()
+}
+
+// c2patoolSignIdentity signs a JPEG with c2patool, the claim from the manifest
+// JSON and a CAWG X.509 identity from [cawg_x509_signer.local] in the settings.
+func c2patoolSignIdentity(t *testing.T, sc, idChain signingChain, in []byte, roles, refs []string) []byte {
+	t.Helper()
+	work := t.TempDir()
+	writeKeyAndCerts := func(prefix string, c signingChain) {
+		keyDER, err := x509.MarshalPKCS8PrivateKey(c.key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(work, prefix+".key"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		certs := string(pemCert(t, c.chain[0])) + string(pemCert(t, c.chain[1]))
+		if err := os.WriteFile(filepath.Join(work, prefix+".pem"), []byte(certs), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeKeyAndCerts("claim", sc)
+	writeKeyAndCerts("ident", idChain)
+	inPath := filepath.Join(work, "in.jpg")
+	if err := os.WriteFile(inPath, in, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"alg":"es256","private_key":"claim.key","sign_cert":"claim.pem",` +
+		`"claim_generator_info":[{"name":"c2patool-interop","version":"0.1"}],"title":"c2patool identity",` +
+		`"assertions":[{"label":"c2pa.actions","data":{"actions":[{"action":"c2pa.created","digitalSourceType":"` + DigitalSourceTypeDigitalCapture + `"}]}}]}`
+	if err := os.WriteFile(filepath.Join(work, "manifest.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	identKey, err := os.ReadFile(filepath.Join(work, "ident.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identCerts, err := os.ReadFile(filepath.Join(work, "ident.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote := func(list []string) string {
+		q := make([]string, len(list))
+		for i, s := range list {
+			q[i] = strconv.Quote(s)
+		}
+		return "[" + strings.Join(q, ", ") + "]"
+	}
+	settings := "[cawg_x509_signer.local]\nalg = \"es256\"\nsign_cert = \"\"\"\n" + string(identCerts) + "\"\"\"\nprivate_key = \"\"\"\n" + string(identKey) + "\"\"\"\n" +
+		"referenced_assertions = " + quote(refs) + "\nroles = " + quote(roles) + "\n"
+	settingsPath := filepath.Join(work, "sign_settings.toml")
+	if err := os.WriteFile(settingsPath, []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outPath := filepath.Join(work, "out.jpg")
+	cmd := exec.Command("c2patool", "--settings", settingsPath, "-m", filepath.Join(work, "manifest.json"), "-o", outPath, inPath)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("c2patool identity signing: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	out, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestSignInteropIdentityReverse: an identity c2patool writes is one this
+// library verifies — trusted once its root is anchored, with the roles and
+// references it was given, listed under gathered_assertions.
+func TestSignInteropIdentityReverse(t *testing.T) {
+	requireC2patool(t)
+	sc := newSigningChain(t)
+	idChain := newSigningChain(t)
+	out := c2patoolSignIdentity(t, sc, idChain, unsignedJPEG(t), []string{RoleCreator}, []string{"c2pa.actions.v2"})
+	ctx := context.Background()
+	res := Validate(ctx, JPEG, bytes.NewReader(out), WithSigningTrust(sc.roots), WithIdentityTrust(idChain.roots), WithOnlineRevocation(false))
+	if !res.Valid {
+		t.Fatalf("%v: %v", codes(res), res.FirstFailure())
+	}
+	if len(res.Identities) != 1 {
+		t.Fatalf("identities = %+v", res.Identities)
+	}
+	id := res.Identities[0]
+	if !id.Trusted || id.Name() != "c2pa test signer" || !equalStrings(id.Roles, []string{RoleCreator}) {
+		t.Errorf("identity = %+v name %q", id, id.Name())
+	}
+	sort.Strings(id.Referenced)
+	if !equalStrings(id.Referenced, []string{"c2pa.actions.v2", "c2pa.hash.data"}) {
+		t.Errorf("referenced = %v", id.Referenced)
+	}
+	store, err := ExtractStore(ctx, JPEG, bytes.NewReader(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := parseStore(ctx, store).active()
+	gathered, _ := m.claim["gathered_assertions"].([]any)
+	found := false
+	for _, g := range gathered {
+		if gm, _ := g.(map[string]any); gm["url"] == assertionURL(identityLabel) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("c2patool's identity is not a gathered assertion: %v", m.claim["gathered_assertions"])
+	}
+	// Without anchors: well-formed, unproven — and c2patool's own output is
+	// judged by the same rule as ours.
+	res = Validate(ctx, JPEG, bytes.NewReader(out), WithSigningTrust(sc.roots), WithOnlineRevocation(false))
+	if !res.Valid || res.Identities[0].Trusted || !res.Identities[0].Valid {
+		t.Errorf("unanchored: valid=%v %+v", res.Valid, res.Identities)
+	}
+}
+
+// TestSignInteropIdentityFragmented: the identity rides along in a DASH set.
+// c2patool's fragment mode prints no report when any status fails, and its
+// 0.27.16 verdict on ANY identity's credential is signingCredential.untrusted,
+// so what it can show here is that it reached the identity's trust check —
+// the failing status it names is the identity's, not the claim's or a
+// cawg.identity.* one. Our own verifier proves the rest.
+func TestSignInteropIdentityFragmented(t *testing.T) {
+	requireC2patool(t)
+	sc := newSigningChain(t)
+	idChain := newSigningChain(t)
+	s, err := NewSigner(sc.key, sc.chain, WithClaimGenerator("c2pa-go-interop", "0.1"), WithIdentitySigner(idChain.key, idChain.chain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	init, frags, names := bunnySet(t)
+	m := createdManifest("fragmented identity")
+	m.Identity = IdentityInfo{Roles: []string{RoleProducer}}
+	outInit, outFrags := signFragmentedSet(t, s, init, frags, m)
+	dir := t.TempDir()
+	initPath := writeFragmentedSet(t, dir, outInit, outFrags, names)
+	rep, stderr := runC2patoolFragment(t, initPath, "BigBuckBunny_2s*.m4s", "--settings", identitySettings(t, sc, idChain))
+	if rep != nil {
+		// A c2patool that applies [cawg_trust] anchors would get here.
+		assertC2patoolValid(t, *rep, "assertion.bmffHash.match")
+		assertC2patoolIdentity(t, *rep)
+	} else if !strings.Contains(stderr, "signingCredential.untrusted") || !strings.Contains(stderr, identityURLSuffix) || strings.Contains(stderr, "cawg.identity.") {
+		t.Errorf("c2patool's failing status should be the identity's trust quirk, got: %s", stderr)
+	}
+	res := ValidateFragmented(context.Background(), bytes.NewReader(outInit), readersOf(outFrags...),
+		WithSigningTrust(sc.roots), WithIdentityTrust(idChain.roots), WithOnlineRevocation(false))
+	if !res.Valid || !res.Has(StatusAssertionBMFFHashMatch) || len(res.Identities) != 1 || !res.Identities[0].Trusted {
+		t.Errorf("our verifier: valid=%v %+v %v", res.Valid, res.Identities, codes(res))
 	}
 }

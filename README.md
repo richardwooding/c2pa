@@ -307,6 +307,29 @@ signer, err := c2pa.NewSigner(key, chain,
     c2pa.WithTimestampHTTPClient(&http.Client{Timeout: 10 * time.Second}))
 ```
 
+**Who vouches for it: CAWG identity.** The claim says which tool signed; a
+[CAWG identity assertion](https://cawg.io/identity/1.1/) says which *named actor* — a photographer, a
+newsroom — stands behind the content, with their own key. `WithIdentitySigner` adds one to every
+manifest the Signer writes: a second COSE signature inside the manifest over the hard binding (always)
+and whatever `Manifest.Identity` adds, listed under the claim's `gathered_assertions` as c2pa-rs does.
+The payload is written in the field order c2patool re-serialises before verifying, so c2patool reports
+it `cawg.identity.well-formed`; this library reports `cawg.identity.trusted` once the actor's CA is
+anchored with `WithIdentityTrust`. The identity key may be the claim key; with a TSA configured the
+identity signature is timestamped too. One identity per Sign.
+
+```go
+signer, err := c2pa.NewSigner(key, chain,
+    c2pa.WithIdentitySigner(actorKey, actorChain)) // the named actor's own credential
+err = signer.Sign(ctx, c2pa.JPEG, in, out, c2pa.Manifest{
+    Title:   "photo.jpg",
+    Actions: []c2pa.Action{{Action: c2pa.ActionCreated, DigitalSourceType: c2pa.DigitalSourceTypeDigitalCapture}},
+    Identity: c2pa.IdentityInfo{
+        Roles:      []string{c2pa.RoleCreator},        // cawg.creator, cawg.editor, … or com.example.reviewer
+        References: []string{"c2pa.actions.v2"},        // further assertions the actor signs over
+    },
+})
+```
+
 **Re-signing chains provenance.** An asset that already carries Content Credentials keeps them:
 every prior manifest is carried into the new store verbatim and the previous active one becomes the
 new manifest's `parentOf` ingredient, with its validation results recorded as c2pa-rs requires. Open
@@ -350,7 +373,8 @@ JSON at all on any failure, an untrusted signer included. Both directions are as
 **Limits.** A flat single-file fragmented MP4 (`moof`/`mdat` pairs in one file) is refused with
 `ErrFragmentedBMFF` — sign it as an initialization segment plus fragments; encrypted (`/Encrypt`) or
 certified (`/Perms`) PDFs and ID3v2.2 MP3 tags are refused; only standard `c2pa.claim.v2` manifests
-are written (no update manifests); the store must fit in 64 MiB and the asset under `ValidateMaxScan`.
+are written (no update manifests); one CAWG identity per manifest, X.509 only (no aggregator
+credentials, no `expected_*` fields); the store must fit in 64 MiB and the asset under `ValidateMaxScan`.
 Every existing store is removed and the new one written at the container's canonical position —
 deterministic, and a deliberate difference from c2pa-rs's replace-in-place.
 
