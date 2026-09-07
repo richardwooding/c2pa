@@ -113,6 +113,24 @@ func (v *validator) verifyChain(certs []*x509.Certificate, roots *x509.CertPool,
 		v.add(StatusSigningCredentialInvalid, uri, "no certificate chain", nil)
 		return false
 	}
+	path, err := buildTrustedPath(certs, roots, verifyTime)
+	if err != nil {
+		code, explanation := chainErrorStatus(err)
+		v.add(code, uri, explanation, err)
+		return false
+	}
+	if !v.checkCertProfile(path, certs[0], ekuOK, uri) {
+		return false
+	}
+	v.add(StatusSigningCredentialTrusted, uri, "certificate chain validated", nil)
+	return true
+}
+
+// buildTrustedPath builds the path from certs[0] through the presented
+// intermediates to a certificate in roots, valid at verifyTime. roots must be
+// non-nil: a nil pool makes x509 fall back to the system roots, which no C2PA
+// trust decision may consult. The error is x509's own, for chainErrorStatus.
+func buildTrustedPath(certs []*x509.Certificate, roots *x509.CertPool, verifyTime time.Time) ([]*x509.Certificate, error) {
 	leaf := certs[0]
 	inter := x509.NewCertPool()
 	for _, c := range certs[1:] {
@@ -122,28 +140,30 @@ func (v *validator) verifyChain(certs []*x509.Certificate, roots *x509.CertPool,
 		Roots:         roots,
 		Intermediates: inter,
 		CurrentTime:   verifyTime,
-		// Enforce the C2PA EKU rule manually below; x509's KeyUsages handling is
-		// too lenient about chains for our needs.
+		// Enforce the C2PA EKU rule manually afterwards; x509's KeyUsages
+		// handling is too lenient about chains for our needs.
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 	})
 	if err != nil {
-		var unknownAuth x509.UnknownAuthorityError
-		var invalid x509.CertificateInvalidError
-		switch {
-		case errors.As(err, &unknownAuth):
-			v.add(StatusSigningCredentialUntrusted, uri, "chain does not reach a trust anchor", err)
-		case errors.As(err, &invalid) && invalid.Reason == x509.Expired:
-			v.add(StatusSigningCredentialExpired, uri, "certificate not valid at signing time", err)
-		default:
-			v.add(StatusSigningCredentialInvalid, uri, "certificate chain verification failed", err)
-		}
-		return false
+		return nil, err
 	}
-	if !v.checkCertProfile(chains[0], leaf, ekuOK, uri) {
-		return false
+	return chains[0], nil
+}
+
+// chainErrorStatus maps an x509 path-building error to the C2PA status it is:
+// no anchor reached is untrusted, a validity-window miss is expired, anything
+// else is an invalid credential.
+func chainErrorStatus(err error) (StatusCode, string) {
+	var unknownAuth x509.UnknownAuthorityError
+	var invalid x509.CertificateInvalidError
+	switch {
+	case errors.As(err, &unknownAuth):
+		return StatusSigningCredentialUntrusted, "chain does not reach a trust anchor"
+	case errors.As(err, &invalid) && invalid.Reason == x509.Expired:
+		return StatusSigningCredentialExpired, "certificate not valid at signing time"
+	default:
+		return StatusSigningCredentialInvalid, "certificate chain verification failed"
 	}
-	v.add(StatusSigningCredentialTrusted, uri, "certificate chain validated", nil)
-	return true
 }
 
 // checkCertProfile applies the manual C2PA certificate-profile constraints to a

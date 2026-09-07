@@ -128,8 +128,10 @@ func FuzzWalkBoxesRanges(f *testing.F) {
 // Contract: never panic, never loop forever; garbage yields Valid=false.
 func FuzzValidate(f *testing.F) {
 	f.Add([]byte{})
-	if b, err := os.ReadFile("testdata/c2pa_signed.jpg"); err == nil {
-		f.Add(b)
+	for _, name := range []string{"testdata/c2pa_signed.jpg", "testdata/cawg_x509.jpg"} {
+		if b, err := os.ReadFile(name); err == nil {
+			f.Add(b)
+		}
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, c := range []Container{JPEG, PNG, BMFF, RIFF, TIFF, GIF, MP3, SVG, PDF} {

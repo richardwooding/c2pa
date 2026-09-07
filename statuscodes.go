@@ -32,6 +32,15 @@ const (
 	StatusAssertionBoxesHashMatch     StatusCode = "assertion.boxesHash.match"
 	StatusAssertionBMFFHashMatch      StatusCode = "assertion.bmffHash.match"
 	StatusIngredientManifestValidated StatusCode = "ingredient.manifest.validated"
+	// StatusIdentityTrusted reports a CAWG identity assertion (cawg.identity)
+	// whose signature, references and padding all check and whose signing
+	// credential reaches an identity trust anchor (WithIdentityTrust). The named
+	// actor is proven. Recorded at "<manifest label>/<assertion label>".
+	StatusIdentityTrusted StatusCode = "cawg.identity.trusted"
+	// StatusIdentityWellFormed reports a CAWG identity assertion that checks in
+	// every way except that no identity trust anchor vouches for its credential
+	// (CAWG spec §7.2.1): the signature is genuine, the actor is unproven.
+	StatusIdentityWellFormed StatusCode = "cawg.identity.well-formed"
 )
 
 // Failure status codes.
@@ -75,6 +84,19 @@ const (
 	StatusAlgorithmUnsupported         StatusCode = "algorithm.unsupported"
 	StatusIngredientManifestMismatch   StatusCode = "ingredient.manifest.mismatch"
 	StatusGeneralError                 StatusCode = "general.error"
+
+	// CAWG identity assertion failures (CAWG Identity Assertion spec §7.2.2),
+	// recorded at "<manifest label>/<assertion label>". Codes the C2PA core
+	// defines for the signature itself — claimSignature.*, signingCredential.*,
+	// timeStamp.*, algorithm.unsupported — are reused at that same URI, as
+	// §8.2.2 directs.
+	StatusIdentityCBORInvalid        StatusCode = "cawg.identity.cbor.invalid"
+	StatusIdentityAssertionMismatch  StatusCode = "cawg.identity.assertion.mismatch"
+	StatusIdentityAssertionDuplicate StatusCode = "cawg.identity.assertion.duplicate"
+	StatusIdentityHardBindingMissing StatusCode = "cawg.identity.hard_binding_missing"
+	StatusIdentitySigTypeUnknown     StatusCode = "cawg.identity.sig_type.unknown"
+	StatusIdentityPadInvalid         StatusCode = "cawg.identity.pad.invalid"
+	StatusIdentityCredentialRevoked  StatusCode = "cawg.identity.credential_revoked"
 )
 
 // Informational status codes.
@@ -101,6 +123,8 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusAssertionBoxesHashMatch:     SeveritySuccess,
 	StatusAssertionBMFFHashMatch:      SeveritySuccess,
 	StatusIngredientManifestValidated: SeveritySuccess,
+	StatusIdentityTrusted:             SeveritySuccess,
+	StatusIdentityWellFormed:          SeveritySuccess,
 
 	StatusClaimMissing:                 SeverityFailure,
 	StatusClaimRequiredMissing:         SeverityFailure,
@@ -129,6 +153,13 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusAlgorithmUnsupported:         SeverityFailure,
 	StatusIngredientManifestMismatch:   SeverityFailure,
 	StatusGeneralError:                 SeverityFailure,
+	StatusIdentityCBORInvalid:          SeverityFailure,
+	StatusIdentityAssertionMismatch:    SeverityFailure,
+	StatusIdentityAssertionDuplicate:   SeverityFailure,
+	StatusIdentityHardBindingMissing:   SeverityFailure,
+	StatusIdentitySigTypeUnknown:       SeverityFailure,
+	StatusIdentityPadInvalid:           SeverityFailure,
+	StatusIdentityCredentialRevoked:    SeverityFailure,
 
 	StatusRevocationUnknown: SeverityInformational,
 	StatusTimeStampMissing:  SeverityInformational,

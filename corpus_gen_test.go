@@ -253,6 +253,13 @@ type manifestSpec struct {
 	// this one. The store's last manifest is the active one, so this is how an
 	// asset whose active manifest updates an earlier one is built.
 	updateOverlay *manifestSpec
+	// derived, when set, produces further assertions from the ones already
+	// boxed — the hard binding included, with the digest of the current
+	// fixpoint pass. A CAWG identity assertion needs it: it references the
+	// hard binding's FINAL hashed_uri, which no static assertionSpec can carry.
+	// What it returns must be size-stable across passes for the layout to
+	// converge (fixed-width hashes and signatures are).
+	derived func(t testing.TB, boxes []namedBox) []assertionSpec
 }
 
 type assertionSpec struct {
@@ -293,7 +300,8 @@ func buildManifest(t testing.TB, spec manifestSpec) []byte {
 
 	var assertionBoxes [][]byte
 	var claimEntries []any
-	for _, a := range spec.assertions {
+	var boxed []namedBox
+	addAssertion := func(a assertionSpec) {
 		payload := a.raw
 		if payload == nil {
 			payload = mustMarshalCBOR(t, a.value)
@@ -305,10 +313,19 @@ func buildManifest(t testing.TB, spec manifestSpec) []byte {
 			bx = assertionBox(a.label, payload)
 		}
 		assertionBoxes = append(assertionBoxes, bx)
+		boxed = append(boxed, namedBox{label: a.label, box: bx})
 		claimEntries = append(claimEntries, map[string]any{
 			"url":  "self#jumbf=c2pa.assertions/" + a.label,
 			"hash": hashOf(t, alg, bx[8:]),
 		})
+	}
+	for _, a := range spec.assertions {
+		addAssertion(a)
+	}
+	if spec.derived != nil {
+		for _, a := range spec.derived(t, boxed) {
+			addAssertion(a)
+		}
 	}
 
 	claimLabel := "c2pa.claim"

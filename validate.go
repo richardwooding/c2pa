@@ -50,6 +50,12 @@ type ValidationResult struct {
 	// SignedAt is the signing time from a verified RFC 3161 timestamp, or zero
 	// when no trusted timestamp was found.
 	SignedAt time.Time
+	// Identities are the active manifest's CAWG identity assertions
+	// (cawg.identity): named actors who signed over the content with their own
+	// credentials, in assertion-store order. Each says whether it is Valid and
+	// whether the actor is Trusted; identities in ingredient manifests are
+	// validated (their statuses carry their URIs) but not listed.
+	Identities []Identity
 }
 
 // VerifiedSigner returns the signer's identity — the leaf certificate's Subject
@@ -116,6 +122,7 @@ func (r ValidationResult) FirstFailure() *StatusEntry {
 type validateConfig struct {
 	signingTrust       *x509.CertPool
 	timestampTrust     *x509.CertPool
+	identityTrust      *x509.CertPool
 	onlineRevocation   bool
 	clock              func() time.Time
 	maxIngredientDepth int
@@ -136,6 +143,16 @@ func WithSigningTrust(pool *x509.CertPool) ValidateOption {
 // used to validate RFC 3161 timestamp tokens.
 func WithTimestampTrust(pool *x509.CertPool) ValidateOption {
 	return func(c *validateConfig) { c.timestampTrust = pool }
+}
+
+// WithIdentityTrust sets the trust anchors for CAWG identity assertions — the
+// certificate authorities whose credentials prove a named actor. There is no
+// default: CAWG publishes no trust list and the spec keeps identity anchors
+// separate from the claim signer's, so without this option a valid identity is
+// reported cawg.identity.well-formed (genuine signature, unproven actor) and
+// never cawg.identity.trusted.
+func WithIdentityTrust(pool *x509.CertPool) ValidateOption {
+	return func(c *validateConfig) { c.identityTrust = pool }
 }
 
 // WithOnlineRevocation enables OCSP/CRL revocation checking, which makes
@@ -464,11 +481,15 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 			v.res.SignerChain = chain
 		}
 		v.verifyChain(chain, v.signingTrustPool(), verifyTime, signingEKUOK, uri)
-		v.checkRevocation(chain, uri)
+		v.checkRevocation(chain, uri, StatusSigningCredentialRevoked)
 	}
 
 	// Assertion integrity: each claimed assertion hash must match its box.
 	v.verifyAssertionHashes(m, uri)
+	// CAWG identity assertions: a named actor's own signature over some of
+	// those assertions. After the hashes, because that is what proves the
+	// identity bytes are the ones the claim signed (CAWG §7.1).
+	v.verifyIdentities(m, uri, depth)
 	// Hard binding: the asset content hash must match. Only the active
 	// manifest's binding covers the asset being validated — an ingredient
 	// manifest's hard binding refers to the ingredient's ORIGINAL bytes, which

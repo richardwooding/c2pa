@@ -22,6 +22,10 @@ var (
 	signingPool     *x509.CertPool
 	tsaPoolOnce     sync.Once
 	tsaPool         *x509.CertPool
+	// noIdentityAnchors is the identity pool when WithIdentityTrust is not
+	// given: empty but NON-NIL, because x509.Verify reads a nil Roots as "use
+	// the system roots", and no CAWG trust decision may consult those.
+	noIdentityAnchors = x509.NewCertPool()
 )
 
 // defaultSigningPool returns the embedded C2PA signing-anchor pool, parsed once.
@@ -58,4 +62,13 @@ func (v *validator) timestampTrustPool() *x509.CertPool {
 		return v.cfg.timestampTrust
 	}
 	return defaultTSAPool()
+}
+
+// identityTrustPool returns the configured CAWG identity anchors, or an empty
+// pool — there is no embedded default (see WithIdentityTrust).
+func (v *validator) identityTrustPool() *x509.CertPool {
+	if v.cfg.identityTrust != nil {
+		return v.cfg.identityTrust
+	}
+	return noIdentityAnchors
 }

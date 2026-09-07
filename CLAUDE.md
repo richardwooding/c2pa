@@ -56,8 +56,11 @@ Public surface:
   `AttributionUnknown` say whether the manifest is a claim about the asset, about something it
   carries, or about something nothing could place.
 - `Validate` / `ValidationResult` / `StatusEntry` / `StatusCode` / `Severity` — the verifier and its
-  result. `ValidateOption` (`WithSigningTrust`, `WithTimestampTrust`, `WithOnlineRevocation`,
-  `WithClock`, `WithMaxIngredientDepth`, `WithMaxScan`, `WithHTTPClient`).
+  result. `ValidateOption` (`WithSigningTrust`, `WithTimestampTrust`, `WithIdentityTrust`,
+  `WithOnlineRevocation`, `WithClock`, `WithMaxIngredientDepth`, `WithMaxScan`, `WithHTTPClient`).
+  `ValidationResult.Identities []Identity` lists the active manifest's CAWG identity assertions
+  (`Identity{Label, URI, SigType, Roles, Referenced, Chain, SignedAt, Valid, Trusted}` and
+  `Name()`, which is empty unless `Trusted` — the `VerifiedSigner` rule; see the CAWG bullets).
 - `ValidateFragmented(ctx, init, fragments, opts...)` — `Validate`'s whole pipeline over a
   fragmented BMFF asset's initialization segment (DASH/CMAF: `ftyp` + `moov` in one file, `.m4s`
   fragments in others), with the hard binding checked against each fragment's merkle box. Same
@@ -381,6 +384,54 @@ empty for that whole generation of files.
 
 ### Validation-specific gotchas
 
+- **CAWG identity assertions (`cawg.go`, `cawgverify.go`).** A `cawg.identity` assertion (Creator
+  Assertions Working Group, Identity Assertion 1.1 — a separate spec from C2PA's) is a named actor's
+  COSE_Sign1 over a CBOR `signer_payload` that names some of the manifest's assertions by hashed_uri,
+  the hard binding always among them. What to know:
+  - **c2pa-rs writes struct-declaration order, not RFC 8949 §4.2.1 order, and re-serialises
+    `signer_payload` before verifying it.** Wire order: `signer_payload {referenced_assertions [{url,
+    alg?, hash}], sig_type, role?}`, `signature`, `pad1`, `pad2?`. Sorted order would put `sig_type`
+    before `referenced_assertions` (and `alg` before `url` when present), and c2patool would then verify
+    different bytes. So the VALIDATOR verifies the stored `signer_payload` bytes (`cbor.RawMessage`,
+    order-agnostic, right for anyone who stores what they signed) and any SIGNER must use
+    `identityEncMode` (fxamacker `SortNone`, struct fields in declaration order).
+    `TestCAWGFixtureEncodingParity` pins this against `testdata/cawg_x509.jpg`.
+  - **Statuses land at `<manifest label>/<assertion label>`**, the spec's "the url MUST be the
+    identity assertion's label" — and NOT at the manifest label, so `hasForActive` (`VerifiedSigner`)
+    never reads an identity's `claimSignature.validated`/`signingCredential.trusted` as the claim's.
+    §8.2.2 applies C2PA §15.5–15.7 to the identity signature, so the C2PA codes are reused there
+    (`claimSignature.*`, `signingCredential.*`, `timeStamp.*`, `algorithm.unsupported`); the CAWG codes
+    are the roll-up (`cawg.identity.trusted` / `.well-formed`) and the structural failures.
+  - **Untrusted is well-formed, not a failure.** CAWG §7.2.1 makes "no root of trust identified" a
+    SUCCESS code; c2pa-rs instead emits `signingCredential.untrusted` at the identity URI (and, in
+    0.27.16, does so under every `[cawg_trust]` setting — its anchors are not applied). With no
+    identity anchors by default, a failure would make every asset carrying an identity invalid. So
+    `verifyIdentityChain` records nothing for `UnknownAuthority`… but STILL enforces the C2PA
+    certificate profile on the presented chain (`certProfileViolations`): a CA leaf, a missing EKU or a
+    SHA-1 chain is `signingCredential.invalid` whoever vouches for it. Expiry is visible without anchors
+    too — `x509.Verify` checks the leaf's window before it looks for a root (only the leaf's).
+  - **No default identity anchors; the empty pool is non-nil.** `WithIdentityTrust` is the only source;
+    CAWG publishes no list and the spec keeps identity anchors separate from the claim signer's. A nil
+    `x509.VerifyOptions.Roots` means the SYSTEM roots, so `noIdentityAnchors` is `x509.NewCertPool()`.
+  - **A v1 `sigTst` on an identity signature is invalid** (spec §8.2.2 last rule) →
+    `timeStamp.mismatch`; `extractTSToken` prefers `sigTst` when both are present, so both is also a
+    mismatch. The identity's `sigTst2` IS validated (c2pa-rs skips it — `tst_info: None`) and pins the
+    identity certificate's validity window; `Identity.SignedAt` is trusted-only like the claim's.
+  - **c2pa-rs puts the identity in `gathered_assertions`** (v2 claims), references every `c2pa.hash.*`
+    assertion plus configured labels, relative URLs, no `alg` in the hashed-uris. We accept absolute
+    URLs too, but only ones naming THIS manifest. References are compared to the CLAIM's entries
+    (§7.1: "the same entry exists in created/gathered/assertions"), which `verifyAssertionHashes` has
+    already proven against the boxes — hence the call order in `validateManifest`.
+  - **Recognised but not evaluated → informational, never silent.** `cawg.identity_claims_aggregation`
+    credentials (W3C VC + DID resolution) and the `expected_*` payload fields get `general.unsupported`
+    at the identity URI and `Identity.Valid` stays false for ICA; an unknown `sig_type` is the failure
+    `cawg.identity.sig_type.unknown`. Unknown keys are ignored (§7.1). Duplicate map keys are
+    `cawg.identity.cbor.invalid` (`identityDecMode`, `DupMapKeyEnforcedAPF`): fxamacker keeps the LAST
+    duplicate for a map target and the FIRST for a struct target, so without it the two decode stages
+    could check different values.
+  - **Edge:** an update manifest's content-binding parent runs at depth 1, so its identities are
+    validated at their URIs but not listed in `Identities`; an identity inside an update manifest can
+    never satisfy `hard_binding_missing`.
 - **The COSE payload is detached.** Real C2PA v2 signatures have `msg.Payload == nil`; the signed
   bytes are the claim box's raw CBOR (`parsedManifest.claimBytes`). `cose_verify.go` injects them
   (`msg.Payload = claimBytes`) before `msg.Verify(nil, verifier)`; `external_aad` is empty. Read the
@@ -589,13 +640,20 @@ nothing lands in `testdata/`. Four things to know before extending it:
 **Every declared status code has an emission site**, and that is an invariant worth keeping: a code
 that can never be reported is worse than an absent one, because `StatusCode.Severity()` treats an
 unknown code as *informational* and a caller matching on it waits forever. `manifest.multipleParents`
-was added without one and had to be fixed separately. To check, compare the `Status*` constants in
-`statuscodes.go` against `v.add(Status…` across the package.
+was added without one and had to be fixed separately. `TestStatusCodesHaveEmissionSites`
+(`statuscodes_test.go`) now enforces it: every `Status*` constant must appear in some non-test file
+other than `statuscodes.go` (by identifier, since a few emissions route through a `code :=` variable).
 
 Where the recent ones live: `assertion.boxesHash.*` in `boxeshash_test.go`; `assertion.bmffHash.*`
 including the Merkle paths in `bmffmerkle_test.go`, and the split-file paths plus
 `ValidateFragmented` in `fragmented_test.go`; `manifest.update.invalid` /
-`manifest.update.wrongParents` / `manifest.multipleParents` in `updatemanifest_test.go`.
+`manifest.update.wrongParents` / `manifest.multipleParents` in `updatemanifest_test.go`;
+`cawg.identity.*` in `cawg_test.go` (corpus-built) and `cawg_fixture_test.go` (`testdata/cawg_x509.jpg`,
+c2pa-rs's `C_with_CAWG_data.jpg`, the one fixture with an identity assertion — see
+`testdata/README.md`). The corpus builds identities through `manifestSpec.derived`, a hook run after
+the static assertions are boxed: an identity references the hard binding's FINAL hashed_uri, which
+changes with every fixpoint pass, so no static `assertionSpec{raw}` can carry it; what the hook returns
+must stay length-stable across passes (fixed-width hashes and COSE signatures are).
 
 **The signer's acceptance test is c2patool.** `sign_interop_test.go` signs each supported container
 and runs c2pa-rs's `c2patool` over the file: `Valid` with only `signingCredential.untrusted` in

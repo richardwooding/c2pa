@@ -13,32 +13,38 @@ import (
 	cose "github.com/veraison/go-cose"
 )
 
-// verifyCOSE verifies a manifest's claim signature (COSE_Sign1). C2PA uses a
-// detached payload (msg.Payload == nil), so the claim box bytes are injected as
-// the payload before verification; external_aad is empty. The signing algorithm
-// is read from the protected header only (an unprotected-header value would be a
-// downgrade vector).
-//
-// It returns the parsed signer chain (leaf first) and the raw COSE signature
-// bytes (which the RFC 3161 timestamp's messageImprint covers). chain is
-// returned even when verification fails, so the caller can still surface the
-// claimed signer; ok reports whether the cryptographic signature verified.
+// verifyCOSE verifies the manifest's COSE_Sign1 signature over the claim. It
+// returns the parsed signer chain (leaf first) and the raw COSE signature bytes
+// (which the RFC 3161 timestamp's messageImprint covers). chain is returned
+// even when verification fails, so the caller can still surface the claimed
+// signer; ok reports whether the cryptographic signature verified.
 func (v *validator) verifyCOSE(m *parsedManifest, uri string) (chain []*x509.Certificate, coseSig []byte, ok bool) {
 	if len(m.signature) == 0 {
 		return nil, nil, false // absence already reported by the caller
 	}
+	return v.verifySign1(m.signature, m.claimBytes, "claim", uri)
+}
+
+// verifySign1 verifies a detached-payload COSE_Sign1 envelope over payload and
+// records the outcome at uri — the claim signature over the claim, or a CAWG
+// identity signature over its signer_payload (CAWG §8.2.2 applies the same
+// rules and codes). subject words the explanations ("claim", "identity").
+//
+// The algorithm is read from the PROTECTED header only, so an attacker cannot
+// downgrade it through the unprotected one; an attached payload is honoured
+// only when it IS the expected payload, since verifying a signature over
+// attacker-chosen bytes while reporting different ones would make the success
+// code meaningless. chain is returned even when verification fails.
+func (v *validator) verifySign1(envelope, payload []byte, subject, uri string) (chain []*x509.Certificate, coseSig []byte, ok bool) {
 	var msg cose.Sign1Message
-	if err := msg.UnmarshalCBOR(m.signature); err != nil {
+	if err := msg.UnmarshalCBOR(envelope); err != nil {
 		v.add(StatusClaimSignatureMismatch, uri, "COSE_Sign1 envelope did not decode", err)
 		return nil, nil, false
 	}
 	if msg.Payload == nil {
-		msg.Payload = m.claimBytes // detached payload: the signed bytes are the claim
-	} else if !bytes.Equal(msg.Payload, m.claimBytes) {
-		// An attached payload is only honest if it IS the claim box. Verifying a
-		// signature over attacker-chosen bytes while reporting a different claim
-		// would make claimSignature.validated meaningless.
-		v.add(StatusClaimSignatureMismatch, uri, "attached COSE payload is not the claim", nil)
+		msg.Payload = payload // detached payload: the signed bytes are the claim
+	} else if !bytes.Equal(msg.Payload, payload) {
+		v.add(StatusClaimSignatureMismatch, uri, "attached COSE payload is not the "+subject, nil)
 		return nil, msg.Signature, false
 	}
 	if len(msg.Payload) == 0 {
@@ -77,10 +83,10 @@ func (v *validator) verifyCOSE(m *parsedManifest, uri string) (chain []*x509.Cer
 		return chain, msg.Signature, false
 	}
 	if err := msg.Verify(nil, verifier); err != nil {
-		v.add(StatusClaimSignatureMismatch, uri, "claim signature did not verify", err)
+		v.add(StatusClaimSignatureMismatch, uri, subject+" signature did not verify", err)
 		return chain, msg.Signature, false
 	}
-	v.add(StatusClaimSignatureValidated, uri, "claim signature verified", nil)
+	v.add(StatusClaimSignatureValidated, uri, subject+" signature verified", nil)
 	return chain, msg.Signature, true
 }
 

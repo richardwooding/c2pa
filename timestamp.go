@@ -42,8 +42,18 @@ var (
 // that is absent is informational (timestamps are optional); one that is
 // present but invalid is a failure.
 func (v *validator) verifyTimestamp(m *parsedManifest, uri string) (genTime time.Time, trusted bool) {
+	return v.verifyTimestampOf(m.signature, m.claimBytes, uri, true)
+}
+
+// verifyTimestampOf is verifyTimestamp over an arbitrary COSE_Sign1 envelope
+// and its detached payload: the claim signature, or a CAWG identity signature
+// (CAWG §8.2.2 applies C2PA's time-stamp rules to it, recorded at the identity
+// assertion's URI). allowV1 admits the 1.x sigTst form, which counter-signs the
+// payload; the CAWG spec forbids it for identity assertions, so a v1 token
+// there is reported as timeStamp.mismatch rather than evaluated.
+func (v *validator) verifyTimestampOf(envelope, payload []byte, uri string, allowV1 bool) (genTime time.Time, trusted bool) {
 	var msg cose.Sign1Message
-	if msg.UnmarshalCBOR(m.signature) != nil {
+	if msg.UnmarshalCBOR(envelope) != nil {
 		return time.Time{}, false
 	}
 	tokenDER, v2 := extractTSToken(msg.Headers.Unprotected)
@@ -51,8 +61,12 @@ func (v *validator) verifyTimestamp(m *parsedManifest, uri string) (genTime time
 		v.add(StatusTimeStampMissing, uri, "no timestamp present", nil)
 		return time.Time{}, false
 	}
+	if !v2 && !allowV1 {
+		v.add(StatusTimeStampMismatch, uri, "v1 time-stamp (sigTst) is not permitted in an identity assertion", nil)
+		return time.Time{}, false
+	}
 
-	protected, signature, ok := coseParts(m.signature)
+	protected, signature, ok := coseParts(envelope)
 	if !ok {
 		v.add(StatusTimeStampMismatch, uri, "could not decode COSE structure for timestamp binding", nil)
 		return time.Time{}, false
@@ -64,7 +78,7 @@ func (v *validator) verifyTimestamp(m *parsedManifest, uri string) (genTime time
 	if v2 {
 		counterPayload, _ = cbor.Marshal(signature)
 	} else {
-		counterPayload = m.claimBytes
+		counterPayload = payload
 	}
 	tbs := coseCountersignData(counterPayload, protected)
 

@@ -312,3 +312,43 @@ func ExampleSigner_Sign_resign() {
 	// ingredient validated: true
 	// prior signer: OpenAI Media Service
 }
+
+// ExampleValidationResult_Identities reads the CAWG identity assertions of a
+// manifest — named actors who signed over the content with their own
+// credentials — and shows the difference between a genuine signature and a
+// proven actor. Without identity trust anchors (the default: CAWG publishes no
+// trust list) a valid identity is well-formed but its actor unproven, so Name
+// is empty; anchoring the actor's CA proves it.
+func ExampleValidationResult_Identities() {
+	f, err := os.Open("testdata/cawg_x509.jpg")
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = f.Close() }()
+	data, _ := io.ReadAll(f)
+	ctx := context.Background()
+
+	r := c2pa.Validate(ctx, c2pa.JPEG, bytes.NewReader(data))
+	for _, id := range r.Identities {
+		fmt.Println("identity:", id.Label, id.SigType)
+		fmt.Println("vouches for:", id.Referenced)
+		fmt.Printf("valid: %v trusted: %v name: %q\n", id.Valid, id.Trusted, id.Name())
+		fmt.Println("presented as:", id.Chain[0].Subject.CommonName)
+	}
+
+	// Anchor the actor's own CA (here, taken from the presented chain for the
+	// sake of the example; a real verifier configures the CAs it trusts).
+	pool := x509.NewCertPool()
+	pool.AddCert(r.Identities[0].Chain[1])
+	r = c2pa.Validate(ctx, c2pa.JPEG, bytes.NewReader(data), c2pa.WithIdentityTrust(pool))
+	id := r.Identities[0]
+	fmt.Printf("anchored: trusted: %v name: %q\n", id.Trusted, id.Name())
+	fmt.Println("status:", r.Has(c2pa.StatusIdentityTrusted))
+	// Output:
+	// identity: cawg.identity cawg.x509.cose
+	// vouches for: [cawg.training-mining c2pa.hash.data]
+	// valid: true trusted: false name: ""
+	// presented as: C2PA Signer
+	// anchored: trusted: true name: "C2PA Signer"
+	// status: true
+}

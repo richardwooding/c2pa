@@ -19,7 +19,10 @@ const maxRevocationBody = 8 << 20
 // response yields an informational "unknown" status — never a validation
 // failure. Only a definitive "revoked" answer is a failure. This avoids turning
 // a flaky responder into a false rejection.
-func (v *validator) checkRevocation(chain []*x509.Certificate, uri string) {
+//
+// revokedCode is the code a definitive answer records: signingCredential.revoked
+// for the claim signer, cawg.identity.credential_revoked for a CAWG identity.
+func (v *validator) checkRevocation(chain []*x509.Certificate, uri string, revokedCode StatusCode) {
 	if !v.cfg.onlineRevocation {
 		v.add(StatusRevocationUnknown, uri, "online revocation checking disabled", nil)
 		return
@@ -31,13 +34,13 @@ func (v *validator) checkRevocation(chain []*x509.Certificate, uri string) {
 	leaf, issuer := chain[0], chain[1]
 	if revoked, ok := v.ocspRevoked(leaf, issuer); ok {
 		if revoked {
-			v.add(StatusSigningCredentialRevoked, uri, "signing certificate revoked (OCSP)", nil)
+			v.add(revokedCode, uri, "signing certificate revoked (OCSP)", nil)
 		}
 		return
 	}
 	if revoked, ok := v.crlRevoked(leaf, issuer); ok {
 		if revoked {
-			v.add(StatusSigningCredentialRevoked, uri, "signing certificate revoked (CRL)", nil)
+			v.add(revokedCode, uri, "signing certificate revoked (CRL)", nil)
 		}
 		return
 	}

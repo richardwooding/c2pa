@@ -129,3 +129,22 @@ chaining through `Media Publisher Company Intermediate CA` to `Media Provenance
 Root CA`, none of which is on the embedded trust list, and no timestamp. It is
 the only signed fragmented fixture, which is what lets `ExampleValidateFragmented`
 run with a real `// Output:` (valid, not fully bound: 1 of 11 fragments).
+
+## cawg_x509.jpg
+
+`C_with_CAWG_data.jpg` from [contentauth/c2pa-rs](https://github.com/contentauth/c2pa-rs)'s test
+assets (`sdk/tests/fixtures/`), licensed under Apache-2.0 / MIT (the c2pa-rs dual license). The
+only fixture carrying a **CAWG identity assertion** (`cawg.identity`, Creator Assertions Working
+Group Identity Assertion 1.1): a `c2pa.claim.v2` whose `gathered_assertions` list a
+`cawg.training-mining` assertion and the identity, which is an X.509 COSE signature
+(`sig_type: cawg.x509.cose`, Ed25519, leaf `C2PA Signer` → `Intermediate CA` → `Root CA`, the
+c2pa-rs test PKI) over `cawg.training-mining` and `c2pa.hash.data`, with no timestamp of its own
+and both pads present and zero-filled. The claim signer is the same test PKI (ECDSA), untrusted
+under the embedded list, and its DigiCert timestamp is `timeStamp.untrusted`, so `Valid` is false
+while the identity is `cawg.identity.well-formed`; anchoring the identity's intermediate makes it
+`cawg.identity.trusted`.
+
+Its bytes also pin the wire order c2pa-rs uses for the assertion (`signer_payload`, `signature`,
+`pad1`, `pad2`; `referenced_assertions`, `sig_type`, `role`; `url`, `hash`) —
+`TestCAWGFixtureEncodingParity` re-encodes it and requires equality, because c2patool re-serialises
+`signer_payload` in that order before verifying an identity signature.

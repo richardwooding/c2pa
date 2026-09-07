@@ -104,7 +104,7 @@ func TestRevocation_OCSPRevoked(t *testing.T) {
 	}
 
 	v := testValidator(true, srv.Client())
-	v.checkRevocation([]*x509.Certificate{leaf, issuer}, "test")
+	v.checkRevocation([]*x509.Certificate{leaf, issuer}, "test", StatusSigningCredentialRevoked)
 	if !v.res.Has(StatusSigningCredentialRevoked) {
 		t.Errorf("expected signingCredential.revoked; got %v", codes(v.res))
 	}
@@ -134,7 +134,7 @@ func TestRevocation_OCSPGood(t *testing.T) {
 	}
 
 	v := testValidator(true, srv.Client())
-	v.checkRevocation([]*x509.Certificate{leaf, issuer}, "test")
+	v.checkRevocation([]*x509.Certificate{leaf, issuer}, "test", StatusSigningCredentialRevoked)
 	if v.res.Has(StatusSigningCredentialRevoked) {
 		t.Errorf("did not expect revoked for a good response; got %v", codes(v.res))
 	}
@@ -149,7 +149,7 @@ func TestRevocation_OfflineUnknown(t *testing.T) {
 	issuer, issuerKey := newTestCA(t)
 	leaf := newTestLeaf(t, issuer, issuerKey, "http://127.0.0.1:0/never-called")
 	v := testValidator(false, nil)
-	v.checkRevocation([]*x509.Certificate{leaf, issuer}, "test")
+	v.checkRevocation([]*x509.Certificate{leaf, issuer}, "test", StatusSigningCredentialRevoked)
 	if !v.res.Has(StatusRevocationUnknown) {
 		t.Errorf("expected revocation.unknown when offline; got %v", codes(v.res))
 	}

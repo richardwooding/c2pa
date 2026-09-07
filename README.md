@@ -137,6 +137,15 @@ What it verifies:
 - **RFC 3161 timestamp** — full CMS signature verification, the TSA chain, and that the timestamp
   covers this signature.
 - **Revocation** — OCSP/CRL, opt-in (off by default), soft-fail.
+- **CAWG identity assertions** — a `cawg.identity` assertion is a named actor's own signature, with
+  their own credential, over some of the manifest's assertions (always the hard binding), following
+  the [CAWG Identity Assertion](https://cawg.io/identity/1.1/) spec. Its CBOR, zero padding and
+  references are checked against the claim, and an X.509 credential (`cawg.x509.cose`) gets the
+  full signature, time-stamp, certificate-profile and revocation treatment at the identity's own
+  URI. Identity anchors are separate from the claim signer's and there is no default list, so a
+  genuine identity is `cawg.identity.well-formed` until `WithIdentityTrust` names a CA that vouches
+  for it, and `cawg.identity.trusted` after. Aggregator credentials
+  (`cawg.identity_claims_aggregation`) are recognised, not evaluated.
 - **Update manifests** — a manifest that adds assertions without changing the content (spec
   §11.2.3) carries no hard binding of its own, so one is not demanded of it. What binds the content
   is the manifest it updates, reached through its single `parentOf` ingredient, and that binding is
@@ -160,6 +169,7 @@ periodically. Supply your own anchors and tune behaviour with options:
 r := c2pa.Validate(ctx, c2pa.JPEG, f,
     c2pa.WithSigningTrust(myPool),       // override signing-anchor *x509.CertPool
     c2pa.WithTimestampTrust(myTSAPool),  // override TSA-anchor pool
+    c2pa.WithIdentityTrust(identityCAs), // CAWG identity anchors (none by default)
     c2pa.WithOnlineRevocation(true),     // enable OCSP/CRL (network; default off)
     c2pa.WithClock(func() time.Time { return now }), // signing-time fallback
     c2pa.WithMaxIngredientDepth(16),     // bound nested-manifest recursion
@@ -170,8 +180,26 @@ r := c2pa.Validate(ctx, c2pa.JPEG, f,
 
 `ValidationResult` also exposes `Info` (the same fields `Read` returns), `ActiveManifestLabel`, and
 the parsed `SignerChain`. Status codes mirror the [C2PA specification §15](https://spec.c2pa.org)
-(e.g. `claimSignature.validated`, `signingCredential.untrusted`, `assertion.dataHash.mismatch`);
-each `StatusEntry` has a `Severity` (success / informational / failure).
+(e.g. `claimSignature.validated`, `signingCredential.untrusted`, `assertion.dataHash.mismatch`) and
+the CAWG identity codes (`cawg.identity.trusted`, `cawg.identity.well-formed`,
+`cawg.identity.assertion.mismatch`, …); each `StatusEntry` has a `Severity` (success /
+informational / failure).
+
+### Who vouched for it
+
+`r.Identities` lists the active manifest's CAWG identity assertions — one per named actor who signed
+over the content. Each says whether the assertion is `Valid` (genuine signature, references intact)
+and whether the actor is `Trusted` (the credential reaches an anchor given with `WithIdentityTrust`);
+`Name()` is the actor's certificate name only when proven, like `VerifiedSigner`.
+
+```go
+r := c2pa.Validate(ctx, c2pa.JPEG, f, c2pa.WithIdentityTrust(identityCAs))
+for _, id := range r.Identities {
+    fmt.Println(id.Label, id.SigType, id.Roles, "over", id.Referenced)
+    fmt.Println("valid:", id.Valid, "trusted:", id.Trusted, "actor:", id.Name())
+    fmt.Println("presented as:", id.Chain[0].Subject.CommonName) // a claim, not a fact, until Trusted
+}
+```
 
 ### Fragmented BMFF (DASH / CMAF)
 
