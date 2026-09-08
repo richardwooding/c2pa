@@ -94,7 +94,9 @@ Public surface:
   match entries, so `Has(StatusAssertionBMFFHashMatch)` keeps meaning "fully bound".
 - `Signer` / `NewSigner(key crypto.Signer, chain []*x509.Certificate, opts...)` /
   `(*Signer).Sign(ctx, container, in io.Reader, out io.Writer, m Manifest) error` — the writer.
-  `Manifest{Title, Actions, Assertions, Identity}`, `Action`, `GeneratorInfo`, `Assertion`,
+  `Manifest{Title, Actions, Assertions, SoftBindings, Identity}`, `SoftBindingInfo` /
+  `SoftBindingBlockInfo` (the caller supplies the algorithm's value bytes; this package computes
+  none), `Action`, `GeneratorInfo`, `Assertion`,
   `IdentityInfo{Roles, References}` and the `Role*` constants; `ActionCreated` /
   `ActionOpened` and the `DigitalSourceType*` constants; `SignerOption` (`WithClaimGenerator`,
   `WithVendor`, `WithHashAlgorithm`, `WithTimestampAuthority`, `WithTimestampHTTPClient`,
@@ -614,6 +616,24 @@ makes (`countingContext`) and asserting the contract at each point. The rules th
     `softBinding.malformed`. That is the CLI's generic-assertion path, not c2pa-rs's typed
     `SoftBinding` model — which uses `serde_bytes` and would produce a bstr — so do NOT coerce an
     array here to accommodate it.
+  - **Writing one** (`Manifest.SoftBindings`): the caller supplies the value, so the package stays
+    algorithm-free and every registered algorithm works, including watermarks it could never
+    implement — the `WithIdentitySigner` layering. Each is a STATIC assertion of fixed size appended
+    last to `fixed`, so the layout fixpoint converges with no derived hook and no reserved envelope.
+    `"pad"` is written as `[]byte{}` and unset optionals are OMITTED, because a nil `[]byte` encodes
+    as CBOR **null** rather than an empty byte string and our own reader would call that malformed
+    (the trap `dataHashAssertion` documents). Instance labels follow c2pa-rs's
+    `Claim::label_with_instance`: bare for the first, `__N` after. The claim's `alg_soft` is
+    deliberately NOT written — a self-contained assertion is what a resolution API can consume, and
+    the per-assertion `alg` wins anyway; the READER honours `alg_soft` because others write it.
+    `Sign` refuses an algorithm the embedded snapshot does not name, which is the one place a stale
+    snapshot can block a writer — accepted deliberately, with the drift check as the mitigation.
+    `c2pa.soft-binding` joined `reservedAssertionLabel`, so the untyped `Manifest.Assertions` path
+    can no longer write one: it cannot get the byte strings, the pad or the algorithm check right.
+  - **The self-check counts them.** `res.Valid` alone would not notice a soft binding dropped from
+    the store or one whose value encoded as something the reader refuses — the output would be
+    perfectly valid without it. So `sign()` requires `len(res.SoftBindings)` to equal what it wrote
+    and each to have read back `WellFormed`.
   - **Probing needs a REAL asset.** The corpus's synthetic JPEG is a 20-byte stub
     (`unsignedCorpusAsset`) and c2pa-rs will not read a store out of it at all ("C2PA provenance not
     found in XMP"), whatever the manifest contains. Any c2patool probe has to go through `Sign` over

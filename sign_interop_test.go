@@ -875,3 +875,70 @@ func TestSignInteropIdentityFragmented(t *testing.T) {
 		t.Errorf("our verifier: valid=%v %+v %v", res.Valid, res.Identities, codes(res))
 	}
 }
+
+// TestSignInteropSoftBinding is the acceptance test for what we write: a soft
+// binding must not change c2patool's verdict, and c2patool must report it back.
+//
+// Probed before this was written, and worth recording: c2patool 0.27.16 READS a
+// soft binding and validates nothing about it — there is no soft-binding status
+// code on its side — so the assertion is expected to be inert. The point of the
+// test is that "inert" stays true: a byte string it could not parse, or a pad it
+// rejected, would surface as a changed verdict.
+func TestSignInteropSoftBinding(t *testing.T) {
+	requireC2patool(t)
+	sc := newSigningChain(t)
+	s, err := NewSigner(sc.key, sc.chain, WithClaimGenerator("c2pa-go-interop", "0.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := createdManifest("interop soft binding")
+	bound := createdManifest("interop soft binding")
+	bound.SoftBindings = []SoftBindingInfo{{
+		Algorithm: "io.iscc.v0",
+		Name:      "whole image",
+		Params:    []byte{0xa1, 0x61, 0x6b, 0x01},
+		Blocks: []SoftBindingBlockInfo{
+			{Value: []byte{1, 2, 3, 4, 5, 6, 7, 8}},
+			{Value: []byte{9, 9}, Timespan: &SoftBindingTimespan{Start: 0, End: 1000}},
+		},
+	}}
+
+	// The control and the subject differ only by the soft binding.
+	controlPath, _ := interopSign(t, s, JPEG, unsignedJPEG(t), ".jpg", plain)
+	path, out := interopSign(t, s, JPEG, unsignedJPEG(t), ".jpg", bound)
+
+	control := runC2patoolJSON(t, controlPath)
+	rep := runC2patoolJSON(t, path)
+	assertC2patoolValid(t, rep, "assertion.dataHash.match")
+
+	// Same verdict as without it: the assertion is inert to c2patool, which is
+	// the honest outcome for something nobody has agreed how to check.
+	if rep.ValidationState != control.ValidationState {
+		t.Errorf("validation_state changed from %q to %q by adding a soft binding",
+			control.ValidationState, rep.ValidationState)
+	}
+	if got, want := len(rep.ValidationResults.ActiveManifest.Failure), len(control.ValidationResults.ActiveManifest.Failure); got != want {
+		t.Errorf("failure count changed from %d to %d: %v",
+			want, got, rep.ValidationResults.ActiveManifest.Failure)
+	}
+	for _, s := range rep.ValidationResults.ActiveManifest.Informational {
+		if strings.Contains(s.Code, "soft") {
+			t.Errorf("c2patool now judges soft bindings (%s: %s) — revisit whether we should too", s.Code, s.Explanation)
+		}
+	}
+
+	// It reports the assertion, with the value as base64 of the byte string —
+	// which is the proof that "value" and "alg-params" travelled as bstr.
+	raw := runC2patoolRaw(t, "--settings", trustSettings(t, sc), path)
+	for _, want := range []string{`"c2pa.soft-binding"`, `"io.iscc.v0"`, `"whole image"`, `"AQIDBAUGBwg="`, `"oWFrAQ=="`} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("c2patool report lacks %s", want)
+		}
+	}
+
+	// And we agree with ourselves.
+	res := Validate(context.Background(), JPEG, bytes.NewReader(out), WithSigningTrust(sc.roots), WithOnlineRevocation(false))
+	if !res.Valid || len(res.SoftBindings) != 1 || !res.SoftBindings[0].WellFormed {
+		t.Errorf("our verifier: valid=%v %+v %v", res.Valid, res.SoftBindings, codes(res))
+	}
+}
