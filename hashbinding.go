@@ -128,7 +128,19 @@ func (v *validator) verifyHardBinding(m *parsedManifest, uri string) {
 			"manifest's only hard binding is a v1 c2pa.hash.bmff assertion, which validators must ignore", nil)
 		v.bind(BindingNone)
 	default:
-		v.add(StatusHardBindingMissing, uri, "manifest has no hard-binding hash assertion", nil)
+		// A soft binding is worth naming here, because §9.1 forbids it as the
+		// SOLE content binding — but the failure is the hard binding's absence,
+		// which is already this status. There is deliberately no
+		// soft-binding-flavoured code for it: that would double-report one
+		// condition, and any check phrased "a soft binding without a hard
+		// binding is a failure" would fail every correctly formed UPDATE
+		// manifest (§11.2.3 forbids those a hard binding), which is why this
+		// only extends the explanation.
+		explain := "manifest has no hard-binding hash assertion"
+		if hasSoftBinding(m) {
+			explain += "; its only content binding is a soft binding, which §9.1 forbids as the sole binding"
+		}
+		v.add(StatusHardBindingMissing, uri, explain, nil)
 		v.bind(BindingNone)
 	}
 }

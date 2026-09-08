@@ -141,6 +141,11 @@ func FuzzValidate(f *testing.F) {
 		signer: newCorpusSigner(f, cose.AlgorithmES256), claimV2: true, siblingSaltAll: true,
 		assertions: []assertionSpec{markerAssertion()},
 	}))
+	// A soft binding assertion, whose nested CBOR Validate now decodes.
+	f.Add(buildAsset(f, JPEG, manifestSpec{
+		signer: newCorpusSigner(f, cose.AlgorithmES256), claimV2: true,
+		assertions: []assertionSpec{markerAssertion(), softBindingSpec()},
+	}))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, c := range []Container{JPEG, PNG, BMFF, RIFF, TIFF, GIF, MP3, SVG, PDF} {
 			_ = Validate(context.Background(), c, bytes.NewReader(data))
