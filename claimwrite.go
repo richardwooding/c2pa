@@ -357,7 +357,8 @@ func reservedAssertionLabel(label string) bool {
 	case label == "", strings.HasPrefix(label, "c2pa.hash."),
 		strings.HasPrefix(label, "c2pa.actions"), strings.HasPrefix(label, "c2pa.claim"),
 		label == "c2pa.signature", label == "c2pa.ingredient.v3",
-		strings.HasPrefix(label, identityLabel):
+		strings.HasPrefix(label, identityLabel),
+		strings.HasPrefix(label, softBindingLabel):
 		return true
 	}
 	return false

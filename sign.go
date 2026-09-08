@@ -101,6 +101,13 @@ type Manifest struct {
 	Title      string
 	Actions    []Action
 	Assertions []Assertion
+	// SoftBindings are written as c2pa.soft-binding assertions (§18.10):
+	// perceptual identifiers that let a re-encoded copy be matched back to this
+	// manifest. The VALUE is the caller's to compute — this library implements
+	// no soft binding algorithm — and the algorithm must be one the embedded
+	// C2PA list names. §9.1 allows any number of them alongside the hard
+	// binding Sign always writes.
+	SoftBindings []SoftBindingInfo
 	// Identity is what the CAWG identity assertion Sign writes says about the
 	// named actor's relationship to this asset. It is used only when the
 	// Signer has WithIdentitySigner; setting it without one is
@@ -570,6 +577,9 @@ func validateManifest(m Manifest) error {
 			return fmt.Errorf("%w: action %d is %q; only the first action may be", ErrManifestInvalid, i, a.Action)
 		}
 	}
+	if err := validateSoftBindings(m.SoftBindings); err != nil {
+		return err
+	}
 	seen := make(map[string]bool, len(m.Assertions))
 	for _, a := range m.Assertions {
 		switch {
@@ -757,6 +767,18 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 			return nil, fmt.Errorf("%w: encoding assertion %q: %v", ErrManifestInvalid, a.Label, err)
 		}
 		fixed = append(fixed, namedBox{a.Label, assertionBox(a.Label, payload)})
+	}
+	// Soft bindings last. Each references nothing and depends on no layout, so
+	// it is a static assertion of fixed size: the fixpoint still converges, and
+	// no derived hook or reserved envelope is needed the way the CAWG identity
+	// needs one.
+	for i, sbi := range m.SoftBindings {
+		payload, err := softBindingAssertion(sbi)
+		if err != nil {
+			return nil, fmt.Errorf("%w: encoding soft binding %d: %v", ErrManifestInvalid, i, err)
+		}
+		l := softBindingInstanceLabel(i)
+		fixed = append(fixed, namedBox{l, assertionBox(l, payload)})
 	}
 
 	var priorBoxes [][]byte
@@ -1007,6 +1029,20 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 			reason = string(f.Code) + ": " + f.Explanation
 		}
 		return nil, fmt.Errorf("%w: %s", ErrSelfCheckFailed, reason)
+	}
+	// res.Valid alone would not notice a soft binding silently dropped from the
+	// store, or one whose value encoded as something the reader refuses — the
+	// output would be perfectly valid without it. So count them and require
+	// each to have read back well-formed.
+	if n := len(m.SoftBindings); n > 0 {
+		if len(res.SoftBindings) != n {
+			return nil, fmt.Errorf("%w: wrote %d soft bindings, the output reads back %d", ErrSelfCheckFailed, n, len(res.SoftBindings))
+		}
+		for _, sbr := range res.SoftBindings {
+			if !sbr.WellFormed {
+				return nil, fmt.Errorf("%w: soft binding %s did not read back well-formed", ErrSelfCheckFailed, sbr.Label)
+			}
+		}
 	}
 	return final, nil
 }

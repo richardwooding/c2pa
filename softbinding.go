@@ -409,3 +409,122 @@ func hasSoftBinding(m *parsedManifest) bool {
 	}
 	return false
 }
+
+// --- writing -----------------------------------------------------------------
+
+// SoftBindingInfo is a c2pa.soft-binding assertion Sign writes.
+//
+// The VALUE is yours to compute. This library implements no soft binding
+// algorithm — see SoftBinding for why that is a decision rather than a gap —
+// so it takes the algorithm's output from the caller, as WithIdentitySigner
+// takes a key rather than minting one. That also means every algorithm in the
+// C2PA list works here, including the proprietary watermarks this package could
+// never implement.
+type SoftBindingInfo struct {
+	// Algorithm is written as "alg": an identifier from the C2PA soft binding
+	// algorithm list (§9.3.2). Required. Sign refuses one this build's embedded
+	// snapshot does not name — strict in what it emits, where Validate is
+	// liberal in what it accepts; see softbindings/README.md.
+	Algorithm string
+	// Name is an optional human-readable description of what the binding
+	// covers, written as "name".
+	Name string
+	// Params is an optional "alg-params", written verbatim as a CBOR byte
+	// string, which is what the CDDL asks for.
+	Params []byte
+	// Blocks are the algorithm's outputs: at least one, each with a non-empty
+	// Value.
+	Blocks []SoftBindingBlockInfo
+}
+
+// SoftBindingBlockInfo is one block of a soft binding Sign writes.
+//
+// The deprecated "extent" and "url" fields have no counterpart here: Validate
+// reports them where a producer wrote them, and this writer does not.
+type SoftBindingBlockInfo struct {
+	// Value is the algorithm's output over this block of content, written as a
+	// CBOR byte string. Required and non-empty.
+	Value []byte
+	// Timespan optionally scopes the block to a millisecond range of a
+	// temporal asset.
+	Timespan *SoftBindingTimespan
+	// Region optionally scopes the block to a region of interest, written
+	// verbatim as raw CBOR. This package models no region, so a caller who
+	// needs one supplies its encoding.
+	Region []byte
+}
+
+// softBindingInstanceLabel is the label of the i-th soft binding assertion:
+// the bare label first, then the "__N" suffix — c2pa-rs's own
+// Claim::label_with_instance rule, where instance 0 takes no suffix.
+func softBindingInstanceLabel(i int) string {
+	if i == 0 {
+		return softBindingLabel
+	}
+	return fmt.Sprintf("%s__%d", softBindingLabel, i)
+}
+
+// validateSoftBindings is what Sign refuses before it reads a byte of the
+// asset. Every rule here is one Validate would fail on read-back, so the
+// refusal is early rather than new — except the algorithm check, which is
+// deliberately stricter than the reader.
+//
+// Nothing here is about the hard binding: Sign always writes the container's
+// own, so §9.1's "never the sole content binding" cannot be violated by this
+// writer. Do not add a check for it — one phrased that way would refuse
+// update manifests, which §11.2.3 forbids a hard binding.
+func validateSoftBindings(sbs []SoftBindingInfo) error {
+	for i, sb := range sbs {
+		switch {
+		case sb.Algorithm == "":
+			return fmt.Errorf("%w: soft binding %d has no algorithm", ErrManifestInvalid, i)
+		case len(sb.Blocks) == 0:
+			return fmt.Errorf("%w: soft binding %d has no blocks", ErrManifestInvalid, i)
+		}
+		if _, ok := LookupSoftBindingAlgorithm(sb.Algorithm); !ok {
+			return fmt.Errorf("%w: soft binding %d names algorithm %q, which is not in the C2PA soft binding algorithm list as of %s (§9.3.2 requires a listed one)",
+				ErrManifestInvalid, i, sb.Algorithm, SoftBindingListSnapshot)
+		}
+		for j, b := range sb.Blocks {
+			if len(b.Value) == 0 {
+				return fmt.Errorf("%w: soft binding %d block %d has no value", ErrManifestInvalid, i, j)
+			}
+		}
+	}
+	return nil
+}
+
+// softBindingAssertion encodes one soft binding as the spec's
+// soft-binding-map. Optional fields are OMITTED rather than written empty: a
+// nil []byte encodes as CBOR null, not as an empty byte string, which our own
+// reader would then call malformed (the same trap dataHashAssertion documents).
+//
+// "pad" is written as an empty byte string. The CDDL requires the field, and
+// this signer needs no padding: sign() converges the layout, so an assertion
+// whose size is fixed reserves no slack. c2pa-rs writes an empty pad for the
+// same reason.
+func softBindingAssertion(sb SoftBindingInfo) ([]byte, error) {
+	blocks := make([]any, 0, len(sb.Blocks))
+	for _, b := range sb.Blocks {
+		scope := map[string]any{}
+		if b.Timespan != nil {
+			scope["timespan"] = map[string]any{"start": b.Timespan.Start, "end": b.Timespan.End}
+		}
+		if len(b.Region) > 0 {
+			scope["region"] = cbor.RawMessage(b.Region)
+		}
+		blocks = append(blocks, map[string]any{"scope": scope, "value": b.Value})
+	}
+	m := map[string]any{
+		"alg":    sb.Algorithm,
+		"pad":    []byte{},
+		"blocks": blocks,
+	}
+	if sb.Name != "" {
+		m["name"] = sb.Name
+	}
+	if len(sb.Params) > 0 {
+		m["alg-params"] = sb.Params
+	}
+	return encMode.Marshal(m)
+}

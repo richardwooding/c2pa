@@ -434,9 +434,30 @@ base_data_offset, every top-level `sidx` (first_offset and each `referenced_size
 moof_offset under `mfra`. A bare fragment — no `moov` — is still `ErrFragmentedBMFF`: that is
 `SignFragmented`'s input.
 
-**Limits.** No soft binding algorithm is implemented, so `Sign` writes no `c2pa.soft-binding`
-assertion yet and `Validate` reports the ones it finds without checking them (see above); encrypted
-(`/Encrypt`) or
+**Soft bindings.** `Manifest.SoftBindings` writes `c2pa.soft-binding` assertions, and **the value is
+yours to compute**: this library implements no soft binding algorithm, so it takes the algorithm's
+output from you — the same layering as `WithIdentitySigner`, which takes a key rather than minting
+one. That way every algorithm in the C2PA list works, including the proprietary watermarks this
+package could never implement.
+
+```go
+m := c2pa.Manifest{
+    Title:   "photo.jpg",
+    Actions: []c2pa.Action{{Action: c2pa.ActionCreated, DigitalSourceType: c2pa.DigitalSourceTypeDigitalCapture}},
+    SoftBindings: []c2pa.SoftBindingInfo{{
+        Algorithm: "io.iscc.v0",                                  // must be in the embedded list
+        Blocks:    []c2pa.SoftBindingBlockInfo{{Value: iscc}},     // you computed this
+    }},
+}
+```
+
+`Sign` refuses an algorithm the embedded snapshot does not name — strict in what it emits, where
+`Validate` is liberal in what it accepts — and refuses a block with no value. The hard binding is
+still written, as §9.1 requires. c2patool reads the result and its verdict is unchanged, which the
+interop suite asserts.
+
+**Limits.** No soft binding algorithm is implemented, so a value must come from the caller and
+`Validate` reports the ones it finds without checking them (see above); encrypted (`/Encrypt`) or
 certified (`/Perms`) PDFs and ID3v2.2 MP3 tags are refused; only standard `c2pa.claim.v2` manifests
 are written (no update manifests); one CAWG identity per manifest, X.509 only (no aggregator
 credentials, no `expected_*` fields); the store must fit in 64 MiB and the asset under `ValidateMaxScan`.
