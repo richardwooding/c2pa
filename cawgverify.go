@@ -77,11 +77,23 @@ func (v *validator) verifyIdentity(m *parsedManifest, a rawAssertion, entries []
 		if v.failedSince(start) {
 			return id
 		}
-		// No issuer trust list exists yet (the CAWG has published none), so
-		// a valid credential is well-formed, never trusted.
 		v.add(StatusICACredentialValid, iuri, "identity claims aggregation credential is valid", nil)
-		id.Valid = true
-		v.add(StatusIdentityWellFormed, iuri, "aggregation credential valid; issuer trust is not evaluated", nil)
+		// The credential is genuine; whether its issuer is one to believe is a
+		// separate question, and one only the caller can answer — CAWG
+		// publishes no aggregator trust list. See WithIdentityIssuers.
+		switch issuers := v.cfg.identityIssuers; {
+		case issuers == nil:
+			id.Valid = true
+			v.add(StatusIdentityWellFormed, iuri, "aggregation credential valid; issuer trust is not evaluated", nil)
+		case issuers[didIdentifier(out.issuer)]:
+			id.Valid, id.Trusted = true, true
+			v.add(StatusIdentityTrusted, iuri, "aggregation credential valid; its issuer is a trusted identity claims aggregator", nil)
+		default:
+			// §8.1.5.2.3: "a DID issued from an untrusted source". Valid stays
+			// false, so Identity.Valid keeps meaning "well-formed or trusted
+			// was recorded" for both sig types.
+			v.add(StatusICAUntrustedIssuer, iuri, fmt.Sprintf("credential issuer %q is not a trusted identity claims aggregator", out.issuer), nil)
+		}
 		return id
 	default:
 		v.add(StatusIdentitySigTypeUnknown, iuri, fmt.Sprintf("unrecognised sig_type %q", sp.SigType), nil)

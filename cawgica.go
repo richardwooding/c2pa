@@ -623,3 +623,12 @@ func keyFitsAlg(alg cose.Algorithm, pub crypto.PublicKey) bool {
 	}
 	return false
 }
+
+// didIdentifier is a DID with any DID URL fragment removed and surrounding
+// space trimmed — the form WithIdentityIssuers compares. A credential names its
+// issuer as a bare DID, while a verification method carries a fragment
+// ("…#0"), and an operator should not have to know which they were handed.
+func didIdentifier(did string) string {
+	did, _, _ = strings.Cut(strings.TrimSpace(did), "#")
+	return did
+}

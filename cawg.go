@@ -242,26 +242,46 @@ type Identity struct {
 	// SignedAt is the signing time from a TRUSTED timestamp on the identity
 	// signature, or zero — like ValidationResult.SignedAt.
 	SignedAt time.Time
-	// Valid: the assertion is well-formed and its signature verifies
-	// (cawg.identity.well-formed or cawg.identity.trusted was recorded). For an
-	// aggregation credential: the credential is cawg.ica.credential_valid.
+	// Valid: the assertion is well-formed and its signature verifies —
+	// cawg.identity.well-formed or cawg.identity.trusted was recorded. For an
+	// aggregation credential that means cawg.ica.credential_valid AND an issuer
+	// that is either trusted or not evaluated: an issuer ruled out by
+	// WithIdentityIssuers is cawg.ica.untrusted_issuer, a failure, and leaves
+	// this false even though the credential itself verified.
 	Valid bool
 	// Trusted: Valid, and the credential reaches a root of trust — an X.509
-	// chain anchored by WithIdentityTrust. No issuer trust list exists for
-	// aggregation credentials yet, so those are never Trusted. Only then is
-	// the actor proven.
+	// chain anchored by WithIdentityTrust, or an aggregator DID named by
+	// WithIdentityIssuers. Neither has a default, so an identity is never
+	// Trusted unless the caller said whom to believe. Only then is the actor
+	// proven, and only then does Name() answer.
 	Trusted bool
 }
 
-// Name returns the actor's name — the leaf certificate's Subject Common Name,
-// falling back to its first Organization — ONLY when Trusted, exactly as
+// Name returns the actor's name, ONLY when Trusted — exactly as
 // ValidationResult.VerifiedSigner does for the claim signer. Otherwise "".
-// The name as presented, proven or not, is Chain[0].Subject.
+//
+// For an X.509 identity that is the leaf certificate's Subject Common Name,
+// falling back to its first Organization; the name as presented, proven or not,
+// is Chain[0].Subject. For an identity claims aggregation credential it is the
+// first VerifiedIdentities entry to carry a Name or a Username — and it is the
+// AGGREGATOR'S word, proven only as far as that aggregator is trusted, which
+// is what putting its DID in WithIdentityIssuers asserts.
 func (id Identity) Name() string {
-	if !id.Trusted || len(id.Chain) == 0 || id.Chain[0] == nil {
+	if !id.Trusted {
 		return ""
 	}
-	return certSubjectName(id.Chain[0])
+	if len(id.Chain) > 0 && id.Chain[0] != nil {
+		return certSubjectName(id.Chain[0])
+	}
+	for _, vi := range id.VerifiedIdentities {
+		if vi.Name != "" {
+			return vi.Name
+		}
+		if vi.Username != "" {
+			return vi.Username
+		}
+	}
+	return ""
 }
 
 // certSubjectName is the display name a certificate presents: Subject CN, or

@@ -501,3 +501,149 @@ func TestICAHashShapes(t *testing.T) {
 		t.Error("out-of-range byte accepted")
 	}
 }
+
+// Issuer trust for aggregation credentials (WithIdentityIssuers, issue #57).
+//
+// The credential's cryptography and the aggregator's standing are separate
+// questions, and only the caller can answer the second — CAWG publishes no
+// list of aggregators to believe. These tests pin all three outcomes: no
+// opinion expressed, issuer believed, issuer ruled out.
+
+func TestICAIssuerTrust(t *testing.T) {
+	sb := newCorpusSigner(t, cose.AlgorithmES256)
+	key, pub := icaEd25519(t)
+	withKey := func(b *icaBuild) { b.key, b.pub = key, pub }
+	issuer := didJWK(t, pub)
+	other := "did:jwk:eyJrdHkiOiJPS1AiLCJjcnYiOiJFZDI1NTE5IiwieCI6Im5vYm9keSJ9"
+
+	for _, tc := range []struct {
+		name    string
+		opts    []ValidateOption
+		trusted bool
+		code    StatusCode
+	}{
+		{"no list configured", nil, false, StatusIdentityWellFormed},
+		{"issuer on the list", []ValidateOption{WithIdentityIssuers(issuer)}, true, StatusIdentityTrusted},
+		{"issuer among several", []ValidateOption{WithIdentityIssuers(other, issuer)}, true, StatusIdentityTrusted},
+		{"issuer not on the list", []ValidateOption{WithIdentityIssuers(other)}, false, StatusICAUntrustedIssuer},
+		// Go hands a variadic function a nil slice for zero arguments, so this
+		// must not be mistaken for the option being absent.
+		{"empty list trusts nobody", []ValidateOption{WithIdentityIssuers()}, false, StatusICAUntrustedIssuer},
+		// A DID URL fragment names a verification method within the same DID.
+		{"list entry carries a fragment", []ValidateOption{WithIdentityIssuers(issuer + "#0")}, true, StatusIdentityTrusted},
+		{"list entry padded with space", []ValidateOption{WithIdentityIssuers("  " + issuer + "\n")}, true, StatusIdentityTrusted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asset := icaCorpusAsset(t, sb, manifestSpec{}, withKey)
+			res := runCorpus(t, JPEG, asset, sb, tc.opts...)
+			assertICAIssuerOutcome(t, res, tc.trusted, tc.code)
+		})
+	}
+}
+
+// assertICAIssuerOutcome checks one issuer-trust verdict end to end: the status
+// recorded, the roll-up, and what Identity then admits to knowing.
+func assertICAIssuerOutcome(t *testing.T, res ValidationResult, trusted bool, code StatusCode) {
+	t.Helper()
+	if !hasAt(res, code, identityURI) {
+		t.Errorf("want %s at the identity URI; got %v", code, codes(res))
+	}
+	// The credential itself verified in every case; only its issuer's standing
+	// differs, and that must stay visible.
+	if !hasAt(res, StatusICACredentialValid, identityURI) {
+		t.Errorf("the credential verified and should say so: %v", codes(res))
+	}
+
+	untrusted := code == StatusICAUntrustedIssuer
+	if res.Valid == untrusted {
+		t.Errorf("result valid = %v with %s", res.Valid, code)
+	}
+	if len(res.Identities) != 1 {
+		t.Fatalf("identities = %d", len(res.Identities))
+	}
+	id := res.Identities[0]
+	if id.Trusted != trusted {
+		t.Errorf("Identity.Trusted = %v, want %v", id.Trusted, trusted)
+	}
+	// Valid keeps one meaning across both sig types: well-formed or trusted
+	// was recorded. An untrusted issuer is neither.
+	if id.Valid == untrusted {
+		t.Errorf("Identity.Valid = %v with %s", id.Valid, code)
+	}
+	// Name() answers only for a proven actor — the VerifiedSigner rule.
+	want := ""
+	if trusted {
+		want = "Corpus Cat" // the corpus credential's verifiedIdentities[0].name
+	}
+	if id.Name() != want {
+		t.Errorf("Name() = %q, want %q", id.Name(), want)
+	}
+	if untrusted && hasAt(res, StatusIdentityWellFormed, identityURI) {
+		t.Error("an untrusted issuer must not also be reported well-formed")
+	}
+}
+
+// TestICAIssuerFragmentInCredential: the fragment may be on either side. A
+// credential naming "did:…#0" as its issuer is the same aggregator as the bare
+// DID an operator configured.
+func TestICAIssuerFragmentInCredential(t *testing.T) {
+	sb := newCorpusSigner(t, cose.AlgorithmES256)
+	key, pub := icaEd25519(t)
+	bare := didJWK(t, pub)
+	asset := icaCorpusAsset(t, sb, manifestSpec{}, func(b *icaBuild) {
+		b.key, b.pub = key, pub
+		b.issuer = bare + "#0"
+	})
+	res := runCorpus(t, JPEG, asset, sb, WithIdentityIssuers(bare))
+	assertICAIssuerOutcome(t, res, true, StatusIdentityTrusted)
+}
+
+// TestICAIssuerTrustDoesNotTouchX509: the two trust lists are separate, and an
+// aggregator DID must not vouch for an X.509 identity or vice versa.
+func TestICAIssuerTrustDoesNotTouchX509(t *testing.T) {
+	claimSB, idSB := identitySigners(t)
+	_, pub := icaEd25519(t)
+	asset := identityAsset(t, claimSB, idSB)
+	res := runCorpus(t, JPEG, asset, claimSB, WithIdentityIssuers(didJWK(t, pub)))
+	if !res.Valid {
+		t.Fatalf("an X.509 identity should be unaffected: %v", codes(res))
+	}
+	if len(res.Identities) != 1 || res.Identities[0].Trusted {
+		t.Errorf("an aggregator DID must not anchor an X.509 identity: %+v", res.Identities)
+	}
+	if !hasAt(res, StatusIdentityWellFormed, identityURI) {
+		t.Errorf("the X.509 identity should still be well-formed: %v", codes(res))
+	}
+	if hasAt(res, StatusICAUntrustedIssuer, identityURI) {
+		t.Error("untrusted_issuer is for aggregation credentials only")
+	}
+}
+
+// TestICAFixtureTrustedIssuer: the same round trip over c2pa-rs's real
+// credential — learn the issuer from the first pass, then trust it. Proves the
+// DID we present is the DID an operator would paste back in.
+func TestICAFixtureTrustedIssuer(t *testing.T) {
+	data := fixtureBytes(t, "cawg_ica.jpg")
+	first := Validate(context.Background(), JPEG, bytes.NewReader(data), WithOnlineRevocation(false))
+	if len(first.Identities) != 1 || first.Identities[0].Issuer == "" {
+		t.Fatalf("no issuer to trust: %+v", first.Identities)
+	}
+	issuer := first.Identities[0].Issuer
+
+	res := Validate(context.Background(), JPEG, bytes.NewReader(data),
+		WithOnlineRevocation(false), WithIdentityIssuers(issuer))
+	iuri := res.ActiveManifestLabel + "/cawg.identity"
+	if !hasAt(res, StatusIdentityTrusted, iuri) {
+		t.Fatalf("want cawg.identity.trusted: %v", codes(res))
+	}
+	id := res.Identities[0]
+	if !id.Valid || !id.Trusted {
+		t.Errorf("identity = %+v", id)
+	}
+	// The aggregator's word about who this is, now that we have said we
+	// believe the aggregator.
+	if id.Name() != "First-Name Last-Name" {
+		t.Errorf("Name() = %q, want the credential's first verified identity", id.Name())
+	}
+	t.Logf("trusted aggregator %s vouches for %q", issuer, id.Name())
+}
