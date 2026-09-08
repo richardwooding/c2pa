@@ -507,6 +507,12 @@ c2pa.WalkBoxes(ctx, store, func(label, tbox string, content []byte) {
   [`veraison/go-cose`](https://github.com/veraison/go-cose) (COSE_Sign1), and
   [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) (OCSP). No cgo.
 
+## Sponsor
+
+If this saves you time, you can [sponsor its maintenance](https://github.com/sponsors/richardwooding).
+Sponsorship pays for the unglamorous half — triage, dependency bumps, release plumbing — and is
+never a condition of getting help here.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). The test fixture under `testdata/` is from
