@@ -31,6 +31,7 @@ func FuzzSign(f *testing.F) {
 	f.Add(unsignedSVG(), uint8(6))
 	f.Add(minimalMP4(false), uint8(7))
 	f.Add(minimalAVIF(true), uint8(7))
+	f.Add(unsignedFlatFragmented(f, 2, flatOpts{sidxVersion: 0, tfhdBase: true, mfra: true}), uint8(7))
 	f.Add(unsignedPDF(false), uint8(8))
 	f.Add(unsignedPDF(true), uint8(8))
 	f.Add([]byte{0xFF, 0xD8, 0xFF, 0xD9}, uint8(0))

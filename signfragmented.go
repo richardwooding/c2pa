@@ -326,6 +326,7 @@ type bmffMerkleBinding struct {
 
 func (bmffMerkleBinding) label() string         { return "c2pa.hash.bmff.v3" }
 func (bmffMerkleBinding) matchCode() StatusCode { return StatusAssertionBMFFHashMatch }
+func (bmffMerkleBinding) embedder() embedder    { return bmffEmbedder{} }
 func (b *bmffMerkleBinding) payload(_ []byteRange, digest []byte) ([]byte, error) {
 	return bmffMerkleAssertion(b.alg, []merkleMapSpec{{uniqueID: 1, localID: 1, count: b.count, alg: b.alg, initHash: digest, hashes: b.row}})
 }

@@ -389,8 +389,18 @@ c2patool says: `c2patool init.mp4 fragment --fragments_glob "*.m4s"` reports `Tr
 `assertion.bmffHash.match` when the root is anchored via `--settings`; its fragment mode prints no
 JSON at all on any failure, an untrusted signer included. Both directions are asserted in CI.
 
-**Limits.** A flat single-file fragmented MP4 (`moof`/`mdat` pairs in one file) is refused with
-`ErrFragmentedBMFF` — sign it as an initialization segment plus fragments; encrypted (`/Encrypt`) or
+**Flat single-file fragmented MP4.** The other fragmented arrangement keeps everything in one file —
+`ftyp`, `moov`, then `moof`/`mdat` pairs — and `Sign(BMFF)` recognises it and binds it with a Merkle
+tree over its own chunks: the manifest after `ftyp`, one merkle box before every `moof`, `initHash`
+over everything before the first one. There is nothing extra to call and no reference implementation
+to match, since c2pa-rs writes only the split form; c2patool reads the result as `Trusted` with
+`assertion.bmffHash.match`, which the interop CI job asserts. The absolute offsets the insertions move
+are repaired in their own scopes: `stco`/`co64`/`saio`/`iloc` under `moov`, each `moof`'s `tfhd`
+base_data_offset, every top-level `sidx` (first_offset and each `referenced_size`) and every `tfra`
+moof_offset under `mfra`. A bare fragment — no `moov` — is still `ErrFragmentedBMFF`: that is
+`SignFragmented`'s input.
+
+**Limits.** Encrypted (`/Encrypt`) or
 certified (`/Perms`) PDFs and ID3v2.2 MP3 tags are refused; only standard `c2pa.claim.v2` manifests
 are written (no update manifests); one CAWG identity per manifest, X.509 only (no aggregator
 credentials, no `expected_*` fields); the store must fit in 64 MiB and the asset under `ValidateMaxScan`.

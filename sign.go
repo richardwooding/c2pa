@@ -429,6 +429,15 @@ func (s *Signer) Sign(ctx context.Context, container Container, in io.Reader, ou
 	var hb hardBinding = dataHashBinding{container: container, alg: s.cfg.hashAlg}
 	if container == BMFF {
 		hb = bmffFlatBinding{alg: s.cfg.hashAlg}
+		// A flat fragmented file — 'moov' then 'moof'/'mdat' pairs in one file
+		// — is bound by a Merkle tree over its chunks, not by one flat hash.
+		flat, err := newFlatMerkleBinding(ctx, s.cfg.hashAlg, asset)
+		if err != nil {
+			return err
+		}
+		if flat != nil {
+			hb = flat
+		}
 	}
 	final, err := s.sign(ctx, container, asset, m, hb)
 	if err != nil {
@@ -450,6 +459,11 @@ func (s *Signer) Sign(ctx context.Context, container Container, in io.Reader, ou
 type hardBinding interface {
 	label() string
 	matchCode() StatusCode
+	// embedder writes the store into the asset. It belongs to the binding
+	// because a flat fragmented BMFF file needs a merkle box before every
+	// 'moof' as well as the manifest after 'ftyp', and only the binding knows
+	// what those boxes say.
+	embedder() embedder
 	payload(excl []byteRange, digest []byte) ([]byte, error)
 	digest(ctx context.Context, layout []byte, excl []byteRange) ([]byte, error)
 	compareRanges(ctx context.Context, layout []byte, excl []byteRange) ([]byteRange, error)
@@ -465,6 +479,10 @@ type dataHashBinding struct {
 
 func (dataHashBinding) label() string         { return "c2pa.hash.data" }
 func (dataHashBinding) matchCode() StatusCode { return StatusAssertionDataHashMatch }
+func (b dataHashBinding) embedder() embedder {
+	e, _ := embedderFor(b.container) // Sign checked it before reading the asset
+	return e
+}
 func (b dataHashBinding) payload(excl []byteRange, digest []byte) ([]byte, error) {
 	return dataHashAssertion(b.alg, excl, digest)
 }
@@ -496,6 +514,7 @@ type bmffFlatBinding struct{ alg string }
 
 func (bmffFlatBinding) label() string         { return "c2pa.hash.bmff.v3" }
 func (bmffFlatBinding) matchCode() StatusCode { return StatusAssertionBMFFHashMatch }
+func (bmffFlatBinding) embedder() embedder    { return bmffEmbedder{} }
 func (b bmffFlatBinding) payload(_ []byteRange, digest []byte) ([]byte, error) {
 	return bmffHashAssertion(b.alg, digest)
 }
@@ -847,7 +866,7 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 		if err != nil {
 			return nil, err
 		}
-		out, next, err := embedStore(ctx, container, asset, placeholder.store)
+		out, next, err := embedStoreWith(ctx, container, hb.embedder(), asset, placeholder.store)
 		if err != nil {
 			if cerr := ctx.Err(); cerr != nil {
 				return nil, cerr // a cut-short parse is not a malformed carrier
@@ -937,7 +956,7 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 	if !bytes.Equal(signed.claim, unsigned.claim) || len(signed.store) != len(placeholder.store) {
 		return nil, errors.New("c2pa: internal: store changed size after signing")
 	}
-	final, finalExcl, err := embedStore(ctx, container, asset, signed.store)
+	final, finalExcl, err := embedStoreWith(ctx, container, hb.embedder(), asset, signed.store)
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, cerr

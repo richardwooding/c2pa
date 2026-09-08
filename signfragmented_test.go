@@ -462,7 +462,10 @@ func TestSignFragmentedBunny(t *testing.T) {
 	if err := s.Sign(context.Background(), BMFF, bytes.NewReader(frags[0]), &out, createdManifest("frag")); !errors.Is(err, ErrFragmentedBMFF) || out.Len() != 0 {
 		t.Errorf("Sign on a fragment: %v (%d bytes)", err, out.Len())
 	}
-	if err := s.Sign(context.Background(), BMFF, bytes.NewReader(fragmentedFlatAsset(t, 2, 1, 1, 1, nil).asset), &out, createdManifest("flat")); !errors.Is(err, ErrFragmentedBMFF) {
+	out.Reset()
+	// A flat fragmented file is Sign's, not SignFragmented's: it re-writes the
+	// merkle boxes of the one in hand (see signflat_test.go for the writer).
+	if err := s.Sign(context.Background(), BMFF, bytes.NewReader(fragmentedFlatAsset(t, 2, 1, 1, 1, nil).asset), &out, createdManifest("flat")); err != nil {
 		t.Errorf("Sign on a flat fragmented file: %v", err)
 	}
 }

@@ -86,12 +86,21 @@ func checkStore(store []byte) error {
 // the package's own reader gets exactly the store back — an embedder whose
 // output this package cannot read is a bug, not an output.
 func embedStore(ctx context.Context, c Container, asset, store []byte) ([]byte, []byteRange, error) {
-	if err := checkStore(store); err != nil {
-		return nil, nil, err
-	}
 	e, ok := embedderFor(c)
 	if !ok {
 		return nil, nil, fmt.Errorf("%w: %s", errCarrierUnsupported, string(c))
+	}
+	return embedStoreWith(ctx, c, e, asset, store)
+}
+
+// embedStoreWith is embedStore with the embedder chosen by the caller — the
+// hard binding, which is the only thing that knows a flat fragmented BMFF file
+// needs merkle boxes as well as the manifest. Every check stays on that path:
+// the store is well formed, it reads back through the container's own
+// extractor, and the exclusions are in bounds and in order.
+func embedStoreWith(ctx context.Context, c Container, e embedder, asset, store []byte) ([]byte, []byteRange, error) {
+	if err := checkStore(store); err != nil {
+		return nil, nil, err
 	}
 	out, excl, err := e.embed(ctx, asset, store)
 	if err != nil {

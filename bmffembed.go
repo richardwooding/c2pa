@@ -102,6 +102,14 @@ func (bmffEmbedder) embed(ctx context.Context, asset, store []byte) ([]byte, []b
 // has nothing to point at any more, which is malformed input rather than
 // something to guess about.
 func bmffPatchOffsets(ctx context.Context, out []byte, remap func(int) (int, bool)) error {
+	return bmffPatchOffsetsIn(ctx, out, parseBMFFBoxes(ctx, out), remap)
+}
+
+// bmffPatchOffsetsIn is bmffPatchOffsets over a chosen subtree of out, which is
+// what the flat fragmented writer needs: in a fragmented file only the 'moov'
+// may be walked wholesale, since a 'saio' inside a 'traf' is relative to the
+// track fragment's base and shifting it would corrupt CENC content.
+func bmffPatchOffsetsIn(ctx context.Context, out []byte, boxes []*bmffBox, remap func(int) (int, bool)) error {
 	var walk func(boxes []*bmffBox) error
 	walk = func(boxes []*bmffBox) error {
 		for _, b := range boxes {
@@ -128,7 +136,7 @@ func bmffPatchOffsets(ctx context.Context, out []byte, remap func(int) (int, boo
 		}
 		return nil
 	}
-	return walk(parseBMFFBoxes(ctx, out))
+	return walk(boxes)
 }
 
 // bmffOffsetField rewrites one w-byte big-endian offset in place.

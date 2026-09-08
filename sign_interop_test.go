@@ -188,6 +188,8 @@ func TestSignInterop(t *testing.T) {
 		{"mp4", BMFF, ".mp4", fixtureBytes(t, "video_no_manifest.mp4")},
 		{"mp4 minimal stco", BMFF, ".mp4", minimalMP4(false)},
 		{"mp4 minimal co64", BMFF, ".mp4", minimalMP4(true)},
+		{"mp4 flat fragmented", BMFF, ".mp4", unsignedFlatFragmented(t, 3, flatOpts{sidxVersion: -1})},
+		{"mp4 flat fragmented with furniture", BMFF, ".mp4", unsignedFlatFragmented(t, 4, flatOpts{sidxVersion: 0, tfhdBase: true, styp: true, mfra: true, stco: true})},
 		{"avif extents", BMFF, ".avif", minimalAVIF(false)},
 		{"avif base offset", BMFF, ".avif", minimalAVIF(true)},
 		{"pdf xref table", PDF, ".pdf", unsignedPDF(false)},
