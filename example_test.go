@@ -117,14 +117,17 @@ func ExampleValidate_pdf() {
 	r := c2pa.Validate(context.Background(), c2pa.PDF, f)
 	fmt.Println("valid:", r.Valid)
 	fmt.Println("verified signer:", r.VerifiedSigner())
-	fmt.Println("content hash bound:", r.Has(c2pa.StatusAssertionDataHashMatch))
+	// Binding answers "were these the signed bytes?" directly: verified,
+	// failed, unevaluated (a binding over other bytes, or a check that could
+	// not run) or none.
+	fmt.Println("binding:", r.Binding)
 	// This document carries no RFC 3161 timestamp, so the signing time is
 	// unproven and SignedAt stays zero.
 	fmt.Println("trusted timestamp:", !r.Has(c2pa.StatusTimeStampMissing))
 	// Output:
 	// valid: true
 	// verified signer: OpenAI Media Service
-	// content hash bound: true
+	// binding: verified
 	// trusted timestamp: false
 }
 

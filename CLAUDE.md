@@ -58,6 +58,16 @@ Public surface:
 - `Validate` / `ValidationResult` / `StatusEntry` / `StatusCode` / `Severity` — the verifier and its
   result. `ValidateOption` (`WithSigningTrust`, `WithTimestampTrust`, `WithIdentityTrust`,
   `WithOnlineRevocation`, `WithClock`, `WithMaxIngredientDepth`, `WithMaxScan`, `WithHTTPClient`).
+  `ValidationResult.Binding BindingState` (`BindingNone` / `BindingVerified` / `BindingFailed` /
+  `BindingUnevaluated`, `String()`) is "were these the signed bytes?" answered without status codes —
+  RECORDED at the decision point (`bind`, first-wins, `bindFromStep` over the statuses one hard-binding
+  step added; `binding.go`) because it is not derivable from `Statuses`: an update manifest's binding
+  statuses carry the PARENT's label and `general.unsupported` is overloaded. `verifyHardBinding` is only
+  reached at depth 0 (directly, or through an update manifest's parent), so recording there is
+  active-manifest-scoped for free; `rejectUpdateManifest` → None; a cancelled call → Unevaluated in
+  `finish()`; a hard-binding step's `general.error` (a cancel or an unreadable fragment) is Unevaluated,
+  any other failure Failed. A test hook (`bindHook`) fails a test on a second, different decision. A
+  flat `hash` that held beside a merkle array only partly verified is Unevaluated — status-faithful.
   `ValidationResult.Identities []Identity` lists the active manifest's CAWG identity assertions
   (`Identity{Label, URI, SigType, Roles, Referenced, Chain, SignedAt, Valid, Trusted}` and
   `Name()`, which is empty unless `Trusted` — the `VerifiedSigner` rule; see the CAWG bullets).
