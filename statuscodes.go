@@ -50,11 +50,14 @@ const (
 	StatusClaimMultiple        StatusCode = "claim.multiple"
 	// StatusManifestUpdateInvalid reports an Update Manifest carrying something
 	// §11.2.3 forbids it: a hard binding, a thumbnail, or an action outside the
-	// four that do not change the content.
+	// four that do not change the content. Rejecting an update manifest also
+	// leaves the asset unbound, so StatusHardBindingMissing is recorded with it.
 	StatusManifestUpdateInvalid StatusCode = "manifest.update.invalid"
 	// StatusManifestUpdateWrongParents reports an Update Manifest with zero or
 	// more than one parentOf ingredient. Exactly one is required: it names the
 	// manifest being updated, and so the hard binding that covers the content.
+	// Recorded with StatusHardBindingMissing, since without that one parent
+	// nothing hashed the asset.
 	StatusManifestUpdateWrongParents StatusCode = "manifest.update.wrongParents"
 	// StatusManifestMultipleParents reports a manifest with more than one
 	// parentOf ingredient, which leaves the asset's lineage ambiguous.
@@ -80,10 +83,14 @@ const (
 	StatusAssertionBMFFHashMismatch    StatusCode = "assertion.bmffHash.mismatch"
 	StatusAssertionBMFFHashMalformed   StatusCode = "assertion.bmffHash.malformed"
 	StatusAssertionMissing             StatusCode = "assertion.missing"
-	StatusHardBindingMissing           StatusCode = "hardBinding.missing"
-	StatusAlgorithmUnsupported         StatusCode = "algorithm.unsupported"
-	StatusIngredientManifestMismatch   StatusCode = "ingredient.manifest.mismatch"
-	StatusGeneralError                 StatusCode = "general.error"
+	// StatusHardBindingMissing reports that no usable hard binding covered the
+	// asset's bytes, so nothing hashed them. Either the manifest carries no
+	// binding this container can use, or an update manifest was rejected before
+	// the parent manifest that would have bound the content was reached.
+	StatusHardBindingMissing         StatusCode = "hardBinding.missing"
+	StatusAlgorithmUnsupported       StatusCode = "algorithm.unsupported"
+	StatusIngredientManifestMismatch StatusCode = "ingredient.manifest.mismatch"
+	StatusGeneralError               StatusCode = "general.error"
 
 	// CAWG identity assertion failures (CAWG Identity Assertion spec §7.2.2),
 	// recorded at "<manifest label>/<assertion label>". Codes the C2PA core

@@ -561,7 +561,7 @@ func ReadAll(ctx context.Context, container Container, r io.Reader) []Info {
 	if objs != nil {
 		// An object-level store names the object it describes, so it is
 		// attributed; whatever is left is only the markers' word.
-		for _, os := range pdfObjectStores(ctx, objs) {
+		for _, os := range pdfObjectStores(ctx, data, objs) {
 			add(os.store, AttributionEmbedded)
 		}
 		for _, store := range pdfMarkedStores(ctx, objs) {

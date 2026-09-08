@@ -113,19 +113,19 @@ func (v *validator) verifyUpdateManifest(m *parsedManifest, store *parsedStore, 
 	for _, a := range m.assertions {
 		switch {
 		case isHardBindingLabel(a.label):
-			v.add(StatusManifestUpdateInvalid, uri,
+			v.rejectUpdateManifest(StatusManifestUpdateInvalid, uri,
 				"update manifest carries the hard binding "+a.label+
-					", but it changed no content", nil)
+					", but it changed no content")
 			return
 		case strings.Contains(a.label, "c2pa.thumbnail"):
-			v.add(StatusManifestUpdateInvalid, uri,
-				"update manifest carries a thumbnail assertion, which implies a content change", nil)
+			v.rejectUpdateManifest(StatusManifestUpdateInvalid, uri,
+				"update manifest carries a thumbnail assertion, which implies a content change")
 			return
 		case isActionsLabel(a.label):
 			if bad, ok := disallowedUpdateAction(a.data); !ok {
-				v.add(StatusManifestUpdateInvalid, uri,
+				v.rejectUpdateManifest(StatusManifestUpdateInvalid, uri,
 					"update manifest declares the action "+bad+
-						", which is not one an update may perform", nil)
+						", which is not one an update may perform")
 				return
 			}
 		}
@@ -133,14 +133,14 @@ func (v *validator) verifyUpdateManifest(m *parsedManifest, store *parsedStore, 
 
 	parents := v.parentIngredients(m)
 	if len(parents) != 1 {
-		v.add(StatusManifestUpdateWrongParents, uri,
-			"update manifest must name exactly one parentOf ingredient, the manifest it updates", nil)
+		v.rejectUpdateManifest(StatusManifestUpdateWrongParents, uri,
+			"update manifest must name exactly one parentOf ingredient, the manifest it updates")
 		return
 	}
 	parent := resolveManifest(parents[0], store.byLabel())
 	if parent == nil {
-		v.add(StatusIngredientManifestMismatch, uri,
-			"update manifest's parentOf ingredient names a manifest not present in the store", nil)
+		v.rejectUpdateManifest(StatusIngredientManifestMismatch, uri,
+			"update manifest's parentOf ingredient names a manifest not present in the store")
 		return
 	}
 	// The parent's binding covers this asset, so it is checked here rather than
@@ -152,6 +152,19 @@ func (v *validator) verifyUpdateManifest(m *parsedManifest, store *parsedStore, 
 	}
 	v.hardBound[parent.label] = true
 	v.verifyHardBinding(parent, parent.label)
+}
+
+// rejectUpdateManifest records why an update manifest was not accepted, and
+// with it the consequence: nothing hashed the asset. Only the parentOf manifest
+// binds the content, and every rejection returns before verifyHardBinding
+// reaches it. No signature covers the JUMBF type UUID, so without this two
+// bytes relabel a real signed manifest onto any file and it still reports a
+// validated signature and a trusted chain. Additive: Valid was already false.
+func (v *validator) rejectUpdateManifest(code StatusCode, uri, explanation string) {
+	v.add(code, uri, explanation, nil)
+	v.add(StatusHardBindingMissing, uri,
+		"update manifest rejected, so the parentOf manifest that binds the asset "+
+			"was never evaluated", nil)
 }
 
 // parentIngredients returns the manifest URLs of every ingredient whose

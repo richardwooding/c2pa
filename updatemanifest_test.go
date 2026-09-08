@@ -126,6 +126,15 @@ func TestUpdateManifestInvalid(t *testing.T) {
 			if !res.Has(StatusManifestUpdateInvalid) {
 				t.Errorf("missing %s; got %v", StatusManifestUpdateInvalid, codes(res))
 			}
+			// The rejection returns before the parent's binding is verified,
+			// so nothing hashed the asset.
+			if !res.Has(StatusHardBindingMissing) {
+				t.Errorf("rejected update manifest left the asset unbound and said so nowhere: %v",
+					codes(res))
+			}
+			if res.Has(StatusAssertionDataHashMatch) {
+				t.Errorf("nothing should have hashed the asset: %v", codes(res))
+			}
 			if res.Valid {
 				t.Errorf("expected invalid, got %v", codes(res))
 			}
@@ -167,6 +176,9 @@ func TestUpdateManifestWrongParents(t *testing.T) {
 		if !res.Has(StatusManifestUpdateWrongParents) {
 			t.Errorf("missing %s; got %v", StatusManifestUpdateWrongParents, codes(res))
 		}
+		if !res.Has(StatusHardBindingMissing) {
+			t.Errorf("two parents leave the binding ambiguous, so nothing was hashed: %v", codes(res))
+		}
 		if res.Valid {
 			t.Errorf("expected invalid, got %v", codes(res))
 		}
@@ -191,7 +203,79 @@ func TestUpdateManifestWrongParents(t *testing.T) {
 		if !res.Has(StatusManifestUpdateWrongParents) {
 			t.Errorf("missing %s; got %v", StatusManifestUpdateWrongParents, codes(res))
 		}
+		if !res.Has(StatusHardBindingMissing) {
+			t.Errorf("no parent means no binding at all: %v", codes(res))
+		}
 	})
+
+	// The third early return: exactly one parentOf ingredient, naming a
+	// manifest the store does not hold. Nothing resolves, so nothing binds.
+	t.Run("parent not in the store", func(t *testing.T) {
+		sb := newCorpusSigner(t, cose.AlgorithmES256)
+		asset := buildFramedAsset(t, func(store []byte) ([]byte, []byteRange) {
+			return assembleAsset(JPEG, store)
+		}, manifestSpec{
+			signer:     sb,
+			label:      "urn:uuid:00000000-0000-4000-8000-0000000000aa",
+			assertions: []assertionSpec{markerAssertion()},
+			updateOverlay: &manifestSpec{
+				signer:         sb,
+				label:          "urn:uuid:00000000-0000-4000-8000-0000000000bb",
+				updateManifest: true,
+				noHardBinding:  true,
+				assertions:     []assertionSpec{parentOfAssertion(t, otherLabel)},
+			},
+		})
+		res := runCorpus(t, JPEG, asset, sb)
+		if !res.Has(StatusIngredientManifestMismatch) {
+			t.Errorf("missing %s; got %v", StatusIngredientManifestMismatch, codes(res))
+		}
+		if !res.Has(StatusHardBindingMissing) {
+			t.Errorf("an unresolvable parent binds nothing: %v", codes(res))
+		}
+	})
+}
+
+// TestUpdateManifestRelabelCannotSilenceTheBinding is why the status is
+// reported rather than left implicit, on a real signed file. Two bytes of the
+// superbox's JUMBF type UUID — "c2ma" to "c2um" — relabel a genuine manifest as
+// an Update Manifest: no signature covers that UUID, so everything the claim
+// signed still checks out, §11.2.3 now forbids the binding, and
+// assertion.dataHash.match simply disappears with nothing saying so.
+func TestUpdateManifestRelabelCannotSilenceTheBinding(t *testing.T) {
+	ctx := context.Background()
+	pool, data := fixtureSigningPool(t)
+
+	// The standard manifest UUID differs from the update one in exactly two
+	// bytes: 6332_6D61_… ("c2ma") against 6332_756D_… ("c2um").
+	standard := updateManifestUUID
+	standard[2], standard[3] = 'm', 'a'
+	if n := bytes.Count(data, standard[:]); n != 1 {
+		t.Fatalf("fixture carries %d standard manifest superboxes, want exactly 1", n)
+	}
+	flipped := bytes.Replace(data, standard[:], updateManifestUUID[:], 1)
+
+	before := Validate(ctx, JPEG, bytes.NewReader(data), WithSigningTrust(pool))
+	if !before.Has(StatusAssertionDataHashMatch) {
+		t.Fatalf("fixture's binding did not verify to begin with: %v", codes(before))
+	}
+
+	after := Validate(ctx, JPEG, bytes.NewReader(flipped), WithSigningTrust(pool))
+	if !after.Has(StatusManifestUpdateInvalid) {
+		t.Fatalf("relabelled manifest was not rejected: %v", codes(after))
+	}
+	// The signature still validates over untouched bytes and the binding is
+	// gone, so only hardBinding.missing says the bytes went unchecked.
+	if !after.Has(StatusClaimSignatureValidated) {
+		t.Errorf("the two flipped bytes are covered by no signature, so this should still hold: %v",
+			codes(after))
+	}
+	if after.Has(StatusAssertionDataHashMatch) {
+		t.Errorf("no binding was verified, so this must not be reported: %v", codes(after))
+	}
+	if !after.Has(StatusHardBindingMissing) {
+		t.Errorf("nothing hashed the asset and no status said so: %v", codes(after))
+	}
 }
 
 // TestBMFFUpdateManifestStoreIsActive covers the container half: §A.5.3 splits

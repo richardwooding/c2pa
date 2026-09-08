@@ -1118,6 +1118,31 @@ func TestPDFJUMBF_DecoyCannotDrainBudget(t *testing.T) {
 	}
 }
 
+// TestPDFObjectAFDecodesAreCapped is the other half of that budget's design.
+// maxPDFInflate is charged only for bytes KEPT — the test above is why — so the
+// candidate COUNT is what bounds repetition, and the object walk counted none.
+// n objects name ONE filespec whose stream inflates to non-store bytes, each a
+// distinct candidate under 70 bytes of PDF: 1000 cost 8s of CPU in 94 KB. The
+// claim is a CAPPED ratio; cost was already linear, so "linear" proved nothing.
+func TestPDFObjectAFDecodesAreCapped(t *testing.T) {
+	// Validated rather than scanned: a document is walked twice, by pdfScan and
+	// again by pdfOtherStores, and a per-walk budget bounds the pair. 1 MiB
+	// rather than the 8 MiB measured above keeps the test a few seconds under
+	// -race; it still separates 0.95x capped from 7.9x uncapped.
+	payload := zlibBytes(t, make([]byte, 1<<20))
+	build := func(n int) []byte {
+		d := newPDFDoc().
+			obj(1, "<< /Type /Catalog /Pages 2 0 R >>").
+			obj(3, "<< /Type /Filespec /AFRelationship /C2PA_Manifest /EF << /F 4 0 R >> >>").
+			stream(4, "/Type /EmbeddedFile /Filter /FlateDecode", payload, "")
+		for i := range n {
+			d = d.obj(10+i, "<< /Type /XObject /Subtype /Form /AF [3 0 R] >>")
+		}
+		return d.trailer(1).bytes()
+	}
+	assertDecodeCostIsCapped(t, 2*maxPDFStoreAttempts, 8, build)
+}
+
 // --- end to end --------------------------------------------------------------
 
 // TestReadPDF_RealManifest carries the JPEG fixture's own manifest store in a
@@ -1436,7 +1461,7 @@ func TestPDFObjectLevelManifestIsAttributed(t *testing.T) {
 	doc := pdfObjectLevelDoc(store, store, false)
 	objs := indexPDFObjects(ctx, doc)
 	objs.indexObjectStreams(ctx)
-	got := pdfObjectStores(ctx, objs)
+	got := pdfObjectStores(ctx, doc, objs)
 	if len(got) != 1 {
 		t.Fatalf("expected one object-level store, got %d", len(got))
 	}
@@ -1451,6 +1476,165 @@ func TestPDFObjectLevelManifestIsAttributed(t *testing.T) {
 	}
 	if info := Read(ctx, PDF, bytes.NewReader(doc)); info.Attribution != AttributionEmbedded {
 		t.Errorf("Attribution = %q, want %q", info.Attribution, AttributionEmbedded)
+	}
+}
+
+// pdfSupersededCarrierDoc builds one carrier object defined n+1 times: n
+// superseded definitions naming an /AF candidate that decodes to something that
+// is not a store, then the current definition naming a real object-level store,
+// with an xref table selecting that last one. An incremental update leaves
+// exactly this behind, and a hostile document as much of it as it likes: a
+// superseded definition is a few dozen bytes.
+func pdfSupersededCarrierDoc(t *testing.T, store []byte, n int) []byte {
+	t.Helper()
+	d := newPDFDoc().
+		obj(1, "<< /Type /Catalog /Pages 2 0 R >>").
+		// The decoy the superseded definitions point at: a C2PA filespec whose
+		// embedded file decodes to bytes that are not a JUMBF superbox, so each
+		// one costs a decode and yields nothing.
+		obj(3, "<< /Type /Filespec /AFRelationship /C2PA_Manifest /EF << /F 4 0 R >> >>").
+		stream(4, "/Type /EmbeddedFile /Filter /FlateDecode", zlibBytes(t, make([]byte, 1024)), "").
+		obj(5, "<< /Type /Filespec /AFRelationship /C2PA_Manifest /EF << /F 6 0 R >> >>").
+		stream(6, pdfEmbeddedFileDict, store, "")
+	for range n {
+		d = d.obj(7, "<< /Type /XObject /Subtype /Image /AF [3 0 R] >>")
+	}
+	return d.obj(7, "<< /Type /XObject /Subtype /Image /AF [5 0 R] >>").
+		xrefTrailer(1).bytes()
+}
+
+// TestPDFObjectStoresIgnoreSupersededDefinitions pins that the candidate budget
+// is spent on the definitions that count: maxPDFStoreAttempts obsolete
+// definitions of one carrier, a few KB of PDF, otherwise exhaust it before the
+// current one is examined. pdfScan then falls to pdfStoreMarker, attribution
+// becomes AttributionUnknown, verifyHardBinding's §A.4.3 guard stops firing,
+// and the object's binding is hashed against the whole document.
+func TestPDFObjectStoresIgnoreSupersededDefinitions(t *testing.T) {
+	ctx := context.Background()
+	pool, data := fixtureSigningPool(t)
+	store := extractJUMBF(ctx, JPEG, data)
+	doc := pdfSupersededCarrierDoc(t, store, maxPDFStoreAttempts)
+
+	objs := indexPDFObjects(ctx, doc)
+	objs.indexObjectStreams(ctx)
+	got := pdfObjectStores(ctx, doc, objs)
+	if len(got) != 1 {
+		t.Fatalf("expected one object-level store, got %d", len(got))
+	}
+	if got[0].object != 7 || !bytes.Equal(got[0].store, store) {
+		t.Errorf("attributed to object %d with %d bytes; want object 7 and the embedded store",
+			got[0].object, len(got[0].store))
+	}
+	if _, _, src := pdfScan(ctx, doc); src != pdfStoreObject {
+		t.Errorf("store source = %v, want pdfStoreObject", src)
+	}
+	if info := Read(ctx, PDF, bytes.NewReader(doc)); info.Attribution != AttributionEmbedded {
+		t.Errorf("Attribution = %q, want %q", info.Attribution, AttributionEmbedded)
+	}
+	// The fixture's exclusions describe the JPEG it came from, so hashing this
+	// document against them mismatches. §A.4.3 is why it must not be hashed.
+	r := Validate(ctx, PDF, bytes.NewReader(doc), WithSigningTrust(pool))
+	if r.Has(StatusAssertionDataHashMismatch) {
+		t.Errorf("object-level binding hashed against the document: %v", codes(r))
+	}
+	if r.Info.Attribution != AttributionEmbedded {
+		t.Errorf("Validate Attribution = %q, want %q", r.Info.Attribution, AttributionEmbedded)
+	}
+}
+
+// TestPDFObjectCarrierIsXrefSelected is TestPDFJUMBF_AuthoritativeCatalog's
+// argument for an object-level carrier (§A.4.3). Object indexing continues past
+// %%EOF, so the newest LEXICAL definition of an object number is not the one the
+// document places: appending a definition of the carrier with no /AF, behind a
+// cross-reference section that no startxref names, must not unassociate the
+// store the genuine table's definition associates.
+func TestPDFObjectCarrierIsXrefSelected(t *testing.T) {
+	ctx := context.Background()
+	pool, data := fixtureSigningPool(t)
+	store := extractJUMBF(ctx, JPEG, data)
+
+	// The stream object goes FIRST: an object's body runs past its stream rather
+	// than stopping at the payload's first `endobj`, so a plain object written
+	// ahead of a stream swallows it — and a catalog written ahead of the carrier
+	// would pick up the carrier's own /AF and become the document-level store.
+	genuine := newPDFDoc().
+		stream(6, pdfEmbeddedFileDict, store, "").
+		obj(5, "<< /Type /Filespec /AFRelationship /C2PA_Manifest /EF << /F 6 0 R >> >>").
+		obj(7, "<< /Type /XObject /Subtype /Image /AF [5 0 R] >>").
+		obj(2, "<< /Type /Pages /Kids [] /Count 0 >>").
+		obj(1, "<< /Type /Catalog /Pages 2 0 R >>").
+		xrefTrailer(1)
+	if _, _, src := pdfScan(ctx, genuine.bytes()); src != pdfStoreObject {
+		t.Fatalf("genuine document: store source = %v, want pdfStoreObject", src)
+	}
+
+	// No cross-reference section of its own, so startxref still names the
+	// genuine table and these bytes are not part of the document.
+	tampered := genuine.clone().
+		append("7 0 obj\n<< /Type /XObject /Subtype /Image >>\nendobj\n").bytes()
+	t.Logf("%d bytes appended", len(tampered)-len(genuine.bytes()))
+
+	if _, _, src := pdfScan(ctx, tampered); src != pdfStoreObject {
+		t.Errorf("appended definition unassociated the store: source = %v, want pdfStoreObject", src)
+	}
+	if info := Read(ctx, PDF, bytes.NewReader(tampered)); info.Attribution != AttributionEmbedded {
+		t.Errorf("Attribution = %q, want %q", info.Attribution, AttributionEmbedded)
+	}
+	r := Validate(ctx, PDF, bytes.NewReader(tampered), WithSigningTrust(pool))
+	if r.Has(StatusAssertionDataHashMismatch) {
+		t.Errorf("object-level binding hashed against the document: %v", codes(r))
+	}
+}
+
+// TestPDFUnplacedCarrierIsNotAssociated pins the membership half of that
+// selection: placedDefs holds only placed objects, so a missing key yields
+// index 0 and a bare compare accepted any unplaced object at order[0]. That is
+// the worst direction to get wrong — it earns AttributionEmbedded, under which
+// §A.4.3 deliberately SKIPS the binding, so a manifest nothing associates came
+// back with a trusted signer and nothing hashed. Hence the mismatch asserted.
+func TestPDFUnplacedCarrierIsNotAssociated(t *testing.T) {
+	ctx := context.Background()
+	pool, data := fixtureSigningPool(t)
+	store := extractJUMBF(ctx, JPEG, data)
+
+	// The carrier is written FIRST, so it lands at order[0], and its offset is
+	// dropped so the xref never places it. Everything else resolves normally.
+	d := newPDFDoc().obj(8, "<< /Type /XObject /Subtype /Image /AF [5 0 R] >>")
+	delete(d.offs, 8)
+	doc := d.
+		stream(6, pdfEmbeddedFileDict, store, "").
+		obj(5, "<< /Type /Filespec /AFRelationship /C2PA_Manifest /EF << /F 6 0 R >> >>").
+		obj(2, "<< /Type /Pages /Kids [] /Count 0 >>").
+		obj(1, "<< /Type /Catalog /Pages 2 0 R >>").
+		xrefTrailer(1).bytes()
+
+	objs := indexPDFObjects(ctx, doc)
+	objs.indexObjectStreams(ctx)
+	if objs.order[0].num != 8 {
+		t.Fatalf("order[0] is object %d; the test needs the unplaced carrier there", objs.order[0].num)
+	}
+	if _, _, locs, ok := pdfXrefRoot(ctx, doc, objs); !ok {
+		t.Fatal("the document's xref chain must resolve, or placedDefs is never consulted")
+	} else if _, placed := locs[8]; placed {
+		t.Fatal("object 8 must be absent from the placements for this to test anything")
+	}
+	if got := pdfObjectStores(ctx, doc, objs); len(got) != 0 {
+		t.Errorf("unplaced object %d associated a store: %d found", objs.order[0].num, len(got))
+	}
+	if _, _, src := pdfScan(ctx, doc); src == pdfStoreObject {
+		t.Errorf("store source = pdfStoreObject; nothing the document places associates it")
+	}
+	if info := Read(ctx, PDF, bytes.NewReader(doc)); info.Attribution == AttributionEmbedded {
+		t.Errorf("Attribution = %q; an unplaced object attributes nothing", info.Attribution)
+	}
+
+	r := Validate(ctx, PDF, bytes.NewReader(doc), WithSigningTrust(pool))
+	if !r.Has(StatusAssertionDataHashMismatch) {
+		t.Errorf("the hard binding was skipped for an object the document never associates: %v",
+			codes(r))
+	}
+	if r.Valid {
+		t.Errorf("expected invalid, got %v", codes(r))
 	}
 }
 
@@ -1652,22 +1836,8 @@ func TestPDFRepairCostStaysLinear(t *testing.T) {
 func assertScalesLinearly(t *testing.T, small, factor int, build func(int) []byte) {
 	t.Helper()
 
-	measure := func(n int) time.Duration {
-		data := build(n)
-		start := time.Now()
-		pdfJUMBF(context.Background(), data)
-		return time.Since(start)
-	}
-	// Best of three: a loaded machine inflates individual samples, and the
-	// minimum is the one least polluted by whatever else is running.
-	best := func(n int) time.Duration {
-		d := measure(n)
-		for range 2 {
-			d = min(d, measure(n))
-		}
-		return d
-	}
-	base, scaled := best(small), best(small*factor)
+	run := func(data []byte) { pdfJUMBF(context.Background(), data) }
+	base, scaled := bestOf(build, run, small), bestOf(build, run, small*factor)
 
 	// Linear grows by `factor` (4x), quadratic by factor squared (16x). The
 	// midpoint separates them with headroom on both sides.
@@ -1677,4 +1847,46 @@ func assertScalesLinearly(t *testing.T, small, factor int, build func(int) []byt
 			factor, float64(scaled)/float64(max(base, time.Microsecond)), base, scaled)
 	}
 	t.Logf("input %d %v; input %d %v", small, base.Round(time.Millisecond), small*factor, scaled.Round(time.Millisecond))
+}
+
+// assertDecodeCostIsCapped makes the opposite claim to assertScalesLinearly:
+// not that cost grows with the input, but that past a budget it stops growing.
+// `small` is already over the budget, so the extra candidates must cost nothing
+// and the ratio is expected near 1. A ratio and not a wall-clock ceiling, for
+// assertScalesLinearly's reason: an absolute bound measures the runner too.
+func assertDecodeCostIsCapped(t *testing.T, small, factor int, build func(int) []byte) {
+	t.Helper()
+
+	run := func(data []byte) {
+		Validate(context.Background(), PDF, bytes.NewReader(data))
+	}
+	base, scaled := bestOf(build, run, small), bestOf(build, run, small*factor)
+
+	// Uncapped this scales by `factor`; capped it stays flat. The tolerance sits
+	// below `factor` and above the noise plus indexing the extra objects.
+	const tolerated = 3
+	if scaled > base*tolerated {
+		t.Errorf("scaling the carrier objects %dx took %.1fx the time (%v -> %v); "+
+			"the decode budget looks uncapped again",
+			factor, float64(scaled)/float64(max(base, time.Microsecond)), base, scaled)
+	}
+	t.Logf("%d carriers %v; %d carriers %v", small, base.Round(time.Millisecond),
+		small*factor, scaled.Round(time.Millisecond))
+}
+
+// bestOf builds the document at size n and times `work` over it, three times,
+// returning the fastest run. A loaded machine inflates individual samples, and
+// the minimum is the one least polluted by whatever else is running.
+func bestOf(build func(int) []byte, work func([]byte), n int) time.Duration {
+	measure := func() time.Duration {
+		data := build(n)
+		start := time.Now()
+		work(data)
+		return time.Since(start)
+	}
+	d := measure()
+	for range 2 {
+		d = min(d, measure())
+	}
+	return d
 }

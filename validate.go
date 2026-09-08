@@ -381,7 +381,7 @@ func (v *validator) checkPDFStores(ctx context.Context, data []byte) bool {
 // the active manifest.
 func pdfOtherStores(ctx context.Context, data []byte, objs *pdfObjects, active []byte) [][]byte {
 	prior := pdfCatalogStores(ctx, data, objs, active)
-	for _, os := range pdfObjectStores(ctx, objs) {
+	for _, os := range pdfObjectStores(ctx, data, objs) {
 		prior = append(prior, os.store)
 	}
 	prior = append(prior, pdfMarkedStores(ctx, objs)...)

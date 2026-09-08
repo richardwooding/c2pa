@@ -363,7 +363,30 @@ empty for that whole generation of files.
   `endstream` and never trusted; an indirect one resolves only once the object index is complete,
   which is what `repairIndirectLengths` re-cuts those objects for. **An object ends past its stream,
   not at the payload's first `endobj`** — the store is arbitrary binary and can spell that keyword,
-  which silently lost the whole manifest. Inflation is capped by `maxPDFInflate`.
+  which silently lost the whole manifest. Inflation is capped by `maxPDFInflate` — but that budget is
+  charged only for inflated bytes KEPT (a rejected candidate must not spend a later one's allowance,
+  which `TestPDFJUMBF_DecoyCannotDrainBudget` pins), so what bounds REPETITION is
+  `maxPDFStoreAttempts`: a per-walk cap on candidate decodes, honoured by both the marker scan and
+  the object-level `/AF` walk. The object walk shipped without it, and 1000 objects naming one
+  8 MiB-inflating stream cost 8s of CPU in 94 KB of PDF
+  (`TestPDFObjectAFDecodesAreCapped`, which asserts a CAPPED ratio — cost was already linear, so
+  "stays linear" proved nothing). **Only a CURRENT definition may spend that budget**
+  and the document's own cross-reference chain says which that is (`placedDefs`, over the placements
+  `pdfXrefRoot` now returns for EVERY object it places, not just `/Root` — the same chain, so the
+  carrier walk and the catalog agree which revision they read). A superseded definition is a few
+  dozen bytes, so 32 obsolete definitions of one carrier otherwise starve the definition that
+  counts (`TestPDFObjectStoresIgnoreSupersededDefinitions`); and since indexing continues past
+  `%%EOF`, LEXICAL order lets a definition appended behind a section no `startxref` names
+  unassociate a genuine carrier — `currentDefs` is the fallback for a document with no usable chain
+  ONLY (`TestPDFObjectCarrierIsXrefSelected`, the object-level half of
+  `TestPDFJUMBF_AuthoritativeCatalog`'s argument). Either way the store is dropped, which then
+  reaches `verifyHardBinding` as `AttributionUnknown` and is hashed against the whole document for a
+  false `assertion.dataHash.mismatch`. **Membership in that map is checked two-value**: `placedDefs`
+  holds only the objects the chain places, and a missing key yields index 0, so a one-value compare
+  accepted any UNPLACED object sitting at `order[0]` — earning it `AttributionEmbedded`, under which
+  §A.4.3 deliberately SKIPS the binding, so a manifest the document never associates came back with
+  a validated signature, a trusted signer and nothing hashed
+  (`TestPDFUnplacedCarrierIsNotAssociated`).
   **§A.4.2.1's cross-section merge IS implemented**: `pdfCatalogStores` collects every store the
   document's own catalogs associate, oldest update section first, and `storeWithPriorSections`
   folds their manifests in ahead of the active store's — so an ingredient defined in an earlier
@@ -400,7 +423,13 @@ empty for that whole generation of files.
   reaching the same manifest at depth > 0 would also call it unevaluated. The forbidden set is
   hard bindings, thumbnails, and any action outside `c2pa.edited.metadata` / `c2pa.opened` /
   `c2pa.published` / `c2pa.redacted` → `manifest.update.invalid`; zero or several parents →
-  `manifest.update.wrongParents`. **The four allowed actions are a deliberate divergence**:
+  `manifest.update.wrongParents`. **Every path that REJECTS an update manifest also records
+  `hardBinding.missing`** (`rejectUpdateManifest`): it returns before the parent's binding is
+  verified, so nothing hashed the asset, and reporting only the structural complaint left that
+  unsayable — two bytes flipping `c2ma` to `c2um` lift a genuinely signed manifest onto any file,
+  with the signature, chain and assertion hashes all still reporting success and
+  `assertion.dataHash.match` simply absent (`TestUpdateManifestRelabelCannotSilenceTheBinding`).
+  **The four allowed actions are a deliberate divergence**:
   c2pa-rs's own status-code doc describes ANY actions assertion in an update manifest as invalid,
   which would reject files §11.2.3 permits — the spec text is followed here.
 - **BMFF purpose decides which store is active** (§A.5.3). Ordinarily one box has purpose

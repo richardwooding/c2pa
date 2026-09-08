@@ -74,9 +74,12 @@ const maxPDFHeaderSearch = 1024
 // would cost a full scan per object.
 const maxPDFDictScan = 2048
 
-// maxPDFStoreAttempts caps how many candidate streams are decoded before the
-// marker scan gives up, so a file that repeats a marker cannot make it inflate
-// the rest of the file once per copy.
+// maxPDFStoreAttempts caps how many candidate streams one walk decodes before
+// it gives up, so a file that repeats a pointer cannot make it inflate the rest
+// of the file once per copy. Both walks that decode candidates honour it: the
+// marker scan and the object-level /AF walk. An attempt cap and not a byte
+// budget, because maxPDFInflate is charged only for bytes that turn out to be a
+// store — see maxPDFStreamInflate.
 const maxPDFStoreAttempts = 32
 
 // maxPDFXrefHops bounds the /Prev chain followed looking for a trailer that
@@ -158,6 +161,46 @@ func (o *pdfObjects) body(num int) []byte {
 		}
 	}
 	return nil
+}
+
+// placedDefs maps object number → the index in order of the definition the
+// cross-reference chain places there. This is how a conforming reader selects
+// one, and the only rule an appended decoy cannot bend: indexing continues past
+// %%EOF, so the newest LEXICAL definition is not what a reference resolves to.
+// Matched as catalog matches the catalog's own placement, but in ONE pass —
+// per-object it would be a scan of order each time.
+func (o *pdfObjects) placedDefs(locs map[int]pdfXrefLoc) map[int]int {
+	defs := make(map[int]int, len(locs))
+	for i := range o.order {
+		ob := o.order[i]
+		loc, ok := locs[ob.num]
+		if !ok || !loc.found() {
+			continue
+		}
+		if (loc.stm > 0 && ob.stm == loc.stm && ob.idx == loc.idx) ||
+			(loc.offset > 0 && ob.hdr == loc.offset) {
+			defs[ob.num] = i
+		}
+	}
+	return defs
+}
+
+// currentDefs is placedDefs's fallback, for a document with no usable
+// cross-reference chain. It MUST agree with body, or a walk examines a
+// different definition than a reference resolves to. One pass rather than a
+// body call per object: body's fallback for an object with no visible
+// definition is a backward scan, so per-object it is quadratic in a document
+// whose objects all live in object streams.
+func (o *pdfObjects) currentDefs() map[int]int {
+	cur := make(map[int]int, len(o.newest))
+	for i := range o.order {
+		num := o.order[i].num
+		if j, ok := cur[num]; ok && o.order[j].stm == 0 && o.order[i].stm > 0 {
+			continue // a compressed definition must not displace a visible one
+		}
+		cur[num] = i
+	}
+	return cur
 }
 
 // catalog returns the document catalog's body. When a cross-reference section
@@ -253,7 +296,7 @@ func pdfScan(ctx context.Context, data []byte) (*pdfObjects, []byte, pdfStoreSou
 	// Nothing the catalog associates, so this is not the document's manifest.
 	// §A.4.3 lets an object associate one of its own; resolving that says which
 	// object a store describes, which the identical §A.4.1 markers cannot.
-	if objStores := pdfObjectStores(ctx, objs); len(objStores) > 0 {
+	if objStores := pdfObjectStores(ctx, data, objs); len(objStores) > 0 {
 		return objs, objStores[0].store, pdfStoreObject
 	}
 	// Found by the markers with nothing associating it either way. Reported as
@@ -630,7 +673,7 @@ func pdfObjNumber(data []byte, pos int) (num, hdr int, ok bool) {
 // the store in its /EF stream. Returns nil when that chain names no C2PA file,
 // which is the only thing that can attribute a store to the document.
 func pdfActiveStore(ctx context.Context, data []byte, objs *pdfObjects) []byte {
-	root, loc, placed := pdfXrefRoot(ctx, data, objs)
+	root, loc, _, placed := pdfXrefRoot(ctx, data, objs)
 	if !placed {
 		var ok bool
 		if root, ok = pdfRootLexical(ctx, data); !ok {
@@ -992,7 +1035,7 @@ func pdfXrefRoot(
 	ctx context.Context,
 	data []byte,
 	objs *pdfObjects,
-) (root int, loc pdfXrefLoc, ok bool) {
+) (root int, loc pdfXrefLoc, locs map[int]pdfXrefLoc, ok bool) {
 	end, named := len(data), 0
 	for tries := 0; tries < maxPDFXrefStarts; tries++ {
 		p := bytes.LastIndex(data[:end], []byte("startxref"))
@@ -1004,12 +1047,15 @@ func pdfXrefRoot(
 		if !spelled {
 			continue
 		}
-		candidate, at, placed := pdfXrefChain(ctx, data, objs, pos)
+		candidate, at, placements, placed := pdfXrefChain(ctx, data, objs, pos)
 		// An in-use entry is not a resolution: the offset it carries has to land on the catalog it
 		// names. One placing /Root at offset 1 would otherwise take the document and leave the
 		// genuine earlier startxref untried.
 		if placed && objs.catalog(candidate, at, true) != nil {
-			return candidate, at, true
+			// placements is every object this chain places, not just /Root, so a
+			// caller resolving any other object agrees with this one about which
+			// revision of the document it is reading.
+			return candidate, at, placements, true
 		}
 		if candidate > 0 && named == 0 {
 			named = candidate
@@ -1018,10 +1064,10 @@ func pdfXrefRoot(
 	if named > 0 {
 		// Some section named a catalog and no section placed it. Reported as placed with nowhere to
 		// look, so the caller fails closed rather than falling back to lexical order, which is the
-		// thing an appended decoy exploits.
-		return named, pdfXrefLoc{}, true
+		// thing an appended decoy exploits. No chain resolved, so there are no placements to share.
+		return named, pdfXrefLoc{}, nil, true
 	}
-	return 0, pdfXrefLoc{}, false
+	return 0, pdfXrefLoc{}, nil, false
 }
 
 // pdfXrefChain walks the /Prev chain from the section at pos and returns the
@@ -1035,8 +1081,9 @@ func pdfXrefChain(
 	data []byte,
 	objs *pdfObjects,
 	pos int,
-) (root int, loc pdfXrefLoc, placed bool) {
-	locs, found := map[int]pdfXrefLoc{}, false
+) (root int, loc pdfXrefLoc, locs map[int]pdfXrefLoc, placed bool) {
+	found := false
+	locs = map[int]pdfXrefLoc{}
 	for hop := 0; hop < maxPDFXrefHops; hop++ {
 		if ctx.Err() != nil || pos <= 0 || pos >= len(data) {
 			break
@@ -1057,12 +1104,12 @@ func pdfXrefChain(
 		pos = prev
 	}
 	if !found {
-		return 0, pdfXrefLoc{}, false
+		return 0, pdfXrefLoc{}, nil, false
 	}
 	// A trailer naming /Root is not the same as a section placing it: an appended decoy needs only
 	// the name, so the placement is what earns this candidate the document.
 	loc = locs[root]
-	return root, loc, loc.found()
+	return root, loc, locs, loc.found()
 }
 
 // pdfXrefSection returns the trailer dictionary of the cross-reference section
@@ -1607,24 +1654,40 @@ type pdfObjectStore struct {
 //
 // The catalog's own associations are excluded; those are document-level and
 // pdfCatalogStores has them. Ordered by object number so the result does not
-// depend on the index's iteration order.
-func pdfObjectStores(ctx context.Context, objs *pdfObjects) []pdfObjectStore {
+// depend on the index's iteration order, and bounded by maxPDFStoreAttempts
+// candidate decodes.
+func pdfObjectStores(ctx context.Context, data []byte, objs *pdfObjects) []pdfObjectStore {
 	if objs == nil {
 		return nil
 	}
 	var out []pdfObjectStore
-	seen := map[int]bool{}
+	// Under the marker scan's candidate budget, and only the definition the
+	// document PLACES may spend it: the association is keyed on the referring
+	// object, so n objects naming ONE stream are n candidates, and 1000 of them
+	// over an 8 MiB-inflating stream cost 8s of CPU in 94 KB of PDF. Same chain
+	// pdfXrefRoot takes, so this and the catalog agree which revision they read;
+	// placedDefs and currentDefs carry why lexical order is only a fallback.
+	current := objs.currentDefs()
+	if _, _, locs, ok := pdfXrefRoot(ctx, data, objs); ok && len(locs) > 0 {
+		current = objs.placedDefs(locs)
+	}
+	attempts := 0
 	for i := range objs.order {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || attempts >= maxPDFStoreAttempts {
 			break
+		}
+		num := objs.order[i].num
+		// Two-value: placedDefs holds only the objects the chain PLACES, and a
+		// missing key yields index 0, which would accept an unplaced object that
+		// happens to be order[0] — buying it AttributionEmbedded, and with it a
+		// hard binding skipped under §A.4.3 for an object the document never
+		// associates.
+		if def, placed := current[num]; !placed || def != i {
+			continue // superseded, or not what a reference to num resolves to
 		}
 		body := objs.order[i].body
 		if pdfIfCatalog(body) != nil {
 			continue // document-level; pdfCatalogStores covers it
-		}
-		num := objs.order[i].num
-		if seen[num] {
-			continue // a superseded definition of the same object
 		}
 		// /AF on a stream sits in its dictionary, which pdfDict yields for
 		// both shapes.
@@ -1633,16 +1696,21 @@ func pdfObjectStores(ctx context.Context, objs *pdfObjects) []pdfObjectStore {
 			continue
 		}
 		for _, ref := range refs {
+			if attempts >= maxPDFStoreAttempts {
+				break
+			}
 			filespec := objs.body(ref)
 			if filespec == nil ||
 				pdfName(pdfDict(filespec), "AFRelationship") != pdfC2PARelationship {
 				continue
 			}
+			// Counted per candidate rather than per store found, as the
+			// marker loop counts: it is the decode that costs.
+			attempts++
 			store := pdfEmbeddedStore(ctx, objs, filespec)
 			if store == nil {
 				continue
 			}
-			seen[num] = true
 			out = append(out, pdfObjectStore{object: num, store: store})
 			break
 		}
