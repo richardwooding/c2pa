@@ -260,6 +260,14 @@ type manifestSpec struct {
 	// What it returns must be size-stable across passes for the layout to
 	// converge (fixed-width hashes and signatures are).
 	derived func(t testing.TB, boxes []namedBox) []assertionSpec
+	// saltAll writes a 16-byte c2sh salt into every assertion's jumd as a
+	// private field (toggles 0x13) — the shape c2pa-rs writes. siblingSaltAll
+	// instead writes the salt as a c2sh box BEFORE the data box, in every
+	// assertion AND in the claim and signature superboxes — the shape the spec
+	// tolerates and dataChild must skip. Both add a constant 24 bytes per
+	// box, so the layout fixpoint still converges.
+	saltAll        bool
+	siblingSaltAll bool
 }
 
 type assertionSpec struct {
@@ -267,6 +275,46 @@ type assertionSpec struct {
 	value any
 	json  bool
 	raw   []byte
+	// salt, when set, is written into this assertion's jumd as a private
+	// field; siblingSalt as a c2sh box before the data box.
+	salt        []byte
+	siblingSalt []byte
+}
+
+// corpusSalt is the fixed salt the corpus writes: deterministic, so a salted
+// asset is reproducible across fixpoint passes and runs.
+var corpusSalt = []byte("corpus-salt-0123")
+
+// jumdBoxSalted is jumdBox with a c2sh salt box carried as the description's
+// private field: toggles 0x13 (requestable | label | private), the label, then
+// the salt box inside the jumd's own extent — exactly what c2pa-rs writes and
+// what parseJumd consumes by honouring the jumd's lbox.
+func jumdBoxSalted(typeUUID [16]byte, label string, salt []byte) []byte {
+	payload := make([]byte, 0, 17+len(label)+1+8+len(salt))
+	payload = append(payload, typeUUID[:]...)
+	payload = append(payload, 0x13)
+	payload = append(payload, label...)
+	payload = append(payload, 0x00)
+	payload = append(payload, leafBox("c2sh", salt)...)
+	return leafBox("jumd", payload)
+}
+
+// superBoxWith frames children under a description box: salted in the jumd
+// when salt is set, with a sibling c2sh box first when siblingSalt is set.
+func superBoxWith(typeUUID [16]byte, label string, salt, siblingSalt []byte, children ...[]byte) []byte {
+	var content []byte
+	if salt != nil {
+		content = jumdBoxSalted(typeUUID, label, salt)
+	} else {
+		content = jumdBox(typeUUID, label)
+	}
+	if siblingSalt != nil {
+		content = append(content, leafBox("c2sh", siblingSalt)...)
+	}
+	for _, c := range children {
+		content = append(content, c...)
+	}
+	return append(boxHeader(8+len(content), "jumb"), content...)
 }
 
 func mustMarshalCBOR(t testing.TB, v any) []byte {
@@ -306,11 +354,23 @@ func buildManifest(t testing.TB, spec manifestSpec) []byte {
 		if payload == nil {
 			payload = mustMarshalCBOR(t, a.value)
 		}
+		salt, sibling := a.salt, a.siblingSalt
+		if spec.saltAll && salt == nil {
+			salt = corpusSalt
+		}
+		if spec.siblingSaltAll && sibling == nil {
+			sibling = corpusSalt
+		}
 		var bx []byte
-		if a.json {
+		switch {
+		case salt == nil && sibling == nil && a.json:
 			bx = jsonAssertionBox(a.label, payload)
-		} else {
+		case salt == nil && sibling == nil:
 			bx = assertionBox(a.label, payload)
+		case a.json:
+			bx = superBoxWith(uuidJSON, a.label, salt, sibling, leafBox("json", payload))
+		default:
+			bx = superBoxWith(uuidCBOR, a.label, salt, sibling, leafBox("cbor", payload))
 		}
 		assertionBoxes = append(assertionBoxes, bx)
 		boxed = append(boxed, namedBox{label: a.label, box: bx})
@@ -352,11 +412,15 @@ func buildManifest(t testing.TB, spec manifestSpec) []byte {
 
 	claimBytes := mustMarshalCBOR(t, claim)
 
+	var sibling []byte
+	if spec.siblingSaltAll {
+		sibling = corpusSalt
+	}
 	children := [][]byte{superBox(uuidC2PA, "c2pa.assertions", assertionBoxes...)}
 	if spec.emptyClaim {
 		children = append(children, superBox(uuidCBOR, claimLabel))
 	} else {
-		children = append(children, superBox(uuidCBOR, claimLabel, leafBox("cbor", claimBytes)))
+		children = append(children, superBoxWith(uuidCBOR, claimLabel, nil, sibling, leafBox("cbor", claimBytes)))
 	}
 	if spec.duplicateClaim {
 		second := mustMarshalCBOR(t, map[string]any{"dc:title": "an impostor claim"})
@@ -364,7 +428,7 @@ func buildManifest(t testing.TB, spec manifestSpec) []byte {
 	}
 	if !spec.omitSig {
 		sig := signClaim(t, spec, claimBytes)
-		children = append(children, superBox(uuidCBOR, "c2pa.signature", leafBox("cbor", sig)))
+		children = append(children, superBoxWith(uuidCBOR, "c2pa.signature", nil, sibling, leafBox("cbor", sig)))
 	}
 
 	label := spec.label

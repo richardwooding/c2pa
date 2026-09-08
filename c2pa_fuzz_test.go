@@ -77,6 +77,9 @@ func FuzzWalkBoxes(f *testing.F) {
 		0x00,                                             // toggles (no label)
 		0x00, 0x00, 0x00, 0x09, 'c', 'b', 'o', 'r', 0xA0, // cbor child {}
 	})
+	// A superbox with a sibling c2sh salt box before its data box — the shape
+	// dataChild must skip.
+	f.Add(superBoxWith(uuidCBOR, "com.example.salted", nil, corpusSalt, leafBox("cbor", []byte{0xA0})))
 	// LBox claiming far more than the buffer holds — must bail, not index OOB.
 	f.Add([]byte{0x00, 0x00, 0xFF, 0xFF, 'j', 'u', 'm', 'b'})
 	// Self-nesting `jumb` chain (no valid jumd at any level) — exercises the
@@ -133,6 +136,11 @@ func FuzzValidate(f *testing.F) {
 			f.Add(b)
 		}
 	}
+	// A corpus asset whose every superbox carries a sibling c2sh salt box.
+	f.Add(buildAsset(f, JPEG, manifestSpec{
+		signer: newCorpusSigner(f, cose.AlgorithmES256), claimV2: true, siblingSaltAll: true,
+		assertions: []assertionSpec{markerAssertion()},
+	}))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, c := range []Container{JPEG, PNG, BMFF, RIFF, TIFF, GIF, MP3, SVG, PDF} {
 			_ = Validate(context.Background(), c, bytes.NewReader(data))

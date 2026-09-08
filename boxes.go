@@ -222,13 +222,20 @@ var updateManifestUUID = [16]byte{
 	0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
 }
 
-// dataChild returns a superbox's first content box (the box after its jumd), or
-// nil if it has none.
+// dataChild returns a superbox's content box — the first child after its jumd
+// that is not a salt box — or nil if it has none. A c2sh salt box may precede
+// the data box as a sibling (the spec allows the shape), so choosing by type
+// rather than position keeps the payload right; a superbox holding only a salt
+// has no data box. c2pa-rs writes its salt INSIDE the jumd as a private field
+// (toggle 0x10), which parseJumd consumes, so real files never reach this
+// branch — see CLAUDE.md on salts.
 func dataChild(b *box) *box {
-	if len(b.children) == 0 {
-		return nil
+	for _, c := range b.children {
+		if c.tbox != "c2sh" {
+			return c
+		}
 	}
-	return b.children[0]
+	return nil
 }
 
 // isClaimLabel reports whether a box label denotes a C2PA claim box, matching
