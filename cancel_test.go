@@ -275,6 +275,27 @@ func TestSignCancelledAtEveryStep(t *testing.T) {
 			}
 		})
 	}
+	// The flat fragmented arrangement runs through Sign with a Merkle tree over
+	// the file's own chunks, which is more hashing than any other Sign path.
+	t.Run("bmff flat", func(t *testing.T) {
+		t.Parallel()
+		in := unsignedFlatFragmented(t, 3, flatOpts{sidxVersion: 0, tfhdBase: true, mfra: true})
+		dry := newCountingContext(0)
+		var full bytes.Buffer
+		if err := s.Sign(dry, BMFF, bytes.NewReader(in), &full, m); err != nil {
+			t.Fatalf("uncancelled Sign: %v", err)
+		}
+		for _, n := range sweepPoints(dry.total(), 40) {
+			var out bytes.Buffer
+			err := s.Sign(newCountingContext(n), BMFF, bytes.NewReader(in), &out, m)
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("cancel at check %d: err = %v", n, err)
+			}
+			if out.Len() != 0 {
+				t.Errorf("cancel at check %d: wrote %d bytes", n, out.Len())
+			}
+		}
+	})
 	t.Run("fragmented", func(t *testing.T) {
 		init, frags := unsignedFragmentedSet(3, fragOpts{})
 		dry := newCountingContext(0)

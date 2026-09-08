@@ -43,7 +43,8 @@ one file:
   `gif.go`, `riff.go`, `tiff.go`, `mp3.go`, `svg.go`), `bmffembed.go` (the C2PA uuid box after
   `ftyp` and the `stco`/`co64`/`saio`/`iloc` offset rewrite), `bmffmerklewrite.go` (the fragmented
   binding's writers: merkle box, padding, proofs, the fragment editor), `signfragmented.go`
-  (`SignFragmented`, the one-fragment-at-a-time source, the merkle binding), `pdfwrite.go` (the
+  (`SignFragmented`, the one-fragment-at-a-time source, the merkle binding), `signflat.go` (the flat
+  single-file fragmented binding and its scoped offset patcher), `pdfwrite.go` (the
   incremental update: embedded file stream, file specification, redefined catalog, cross-reference
   table or stream)
 
@@ -137,9 +138,9 @@ Public surface:
   addresses the same eight bytes, and `TestEmbedBMFFOracle` reproduces `c2pa_signed_video.mp4`
   byte for byte from `video_no_manifest.mp4` plus its store (the two fixtures differ by exactly one
   30662-byte box and a 30662 shift of every `stco` entry). Refused with `ErrFragmentedBMFF`: any
-  top-level `moof`, `mfra`, `sidx` or `styp`, or a merkle-purpose C2PA box — a fragmented file is
-  signed with `SignFragmented` as an init plus fragments; the flat single-file arrangement (moof/mdat
-  pairs in one file, which the verifier handles) has no writer yet. Also refused: trailing bytes
+  top-level `moof`, `mfra`, `sidx` or `styp`, or a merkle-purpose C2PA box — a split fragmented set is
+  signed with `SignFragmented` as an init plus fragments, and a flat single-file one never reaches this
+  embedder (`Sign` dispatches it to `bmffFlatMerkleBinding`, below). Also refused: trailing bytes
   outside any box, no `ftyp`, nothing after `ftyp`. Every existing C2PA uuid box (any purpose) is
   removed; the core carries the lineage in the new store.
 - **The signing pipeline is one function with a `hardBinding` strategy** (`sign.go`): `label`,
@@ -186,6 +187,41 @@ Public surface:
     several renditions in one manifest — see the multi-rendition rule in the Merkle bullet.
   - **Re-signing replaces the fragments' merkle boxes** and chains the init's prior manifest as
     `parentOf` with `ValidateFragmented`'s verdict on the ORIGINAL set as its `validationResults`.
+- **Flat single-file fragmented signing** (`signflat.go`) — the OTHER fragmented arrangement, one file
+  of `ftyp`, `moov`, then `moof`/`mdat` pairs. `Sign(BMFF)` recognises it (`newFlatMerkleBinding`: a
+  `moov` before the first `moof`, `bmffChunks` non-nil, an `mdat` in every chunk) and binds it with
+  `bmffFlatMerkleBinding` — a Merkle tree over the file's OWN chunks — instead of the flat hash. There
+  is no c2pa-rs writer for this shape, so c2patool is the only oracle: it reads our output as `Trusted`
+  with `assertion.bmffHash.match` (the `interop` job's `mp4 flat fragmented` rows). What matters:
+  - **The hard binding is its own embedder.** `hardBinding` gained `embedder()` and `sign()` calls
+    `embedStoreWith`, because only the binding knows a flat file needs a merkle box before every `moof`
+    as well as the manifest after `ftyp`. Every `embedStore` check — `checkStore`, the read-back through
+    `extractJUMBF`, the exclusion bounds — stays on the path.
+  - **The leaves are cut from the LAYOUT, not from the input.** A merkle box's content is excluded from
+    every hash but its LENGTH moves the `moof`/`mdat` behind it, and those offsets are hashed as
+    markers — so `digest` runs on the converged layout `sign()` hands it: `bmffChunks` over the
+    layout's own boxes, `hashBMFFTopLevel` per chunk (the verifier's function), `merkleLayers`, and
+    `bmffInitHash` from the first `moof`. The tree is kept on the binding so `embed` can write the
+    proofs in phase (c), and `payload` emits a row of ZERO hashes of the same encoded length while the
+    tree does not exist yet — that is what lets the store's length settle first. Same argument as the
+    identity assertion's placeholder envelope.
+  - **The offset patcher is SCOPED** (`bmffPatchFlatOffsets`), which is the whole difference from the
+    plain BMFF embedder: `bmffPatchOffsetsIn` walks the `moov` subtree only (`stco`/`co64`/`saio`/
+    `iloc`), each `moof`'s `tfhd` base_data_offset is re-anchored, every top-level `sidx` gets its
+    first_offset AND each `referenced_size` (`patchSidxSizes`: cumulative from `sidx.end +
+    first_offset`, the top bit is reference_type and is preserved, 31-bit overflow is
+    `errCarrierUnsupported`), and every `tfra` under `mfra` gets its moof_offset (`patchTfra`: the
+    three trailing field widths are the low six bits of the u32 after track_ID; `mfro` is untouched).
+    A whole-tree walk would shift a `saio` inside a `traf`, which is base-relative, and corrupt CENC
+    content. A subsegment measured from one `moof` to the next grows by the merkle box of the NEXT
+    chunk — box 0 falls before the first subsegment, which `first_offset` skips past, exactly as the
+    split-file writer's does — so the sizes still tile the media region exactly.
+  - **Nothing hashes these offsets**, so only `TestSignFlatOffsets` would notice a mistake: it checks
+    every `stco` entry still addresses the same eight bytes, `first_offset` still resolves to the first
+    `moof`, each `referenced_size` grew by exactly one box, and every `tfhd`/`tfra` value points at its
+    `moof`. `unsignedFlatFragmented` builds the input and fills its absolute offsets in a second pass.
+  - A bare fragment (no `moov`) stays `ErrFragmentedBMFF` — `SignFragmented`'s input; a chunk with no
+    `mdat`, or more chunks than `maxMerkleLeaves`, is `ErrUnsupportedContainer`.
 - **CAWG identity signing** (`cawgsign.go`; the verifier's half is under "Validation-specific
   gotchas"). `WithIdentitySigner(key, chain)` makes `sign()` write a `cawg.identity` assertion — the
   named actor's own detached COSE_Sign1 over a `signer_payload` naming the hard binding (always) and
