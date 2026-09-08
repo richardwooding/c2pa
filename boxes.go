@@ -144,13 +144,15 @@ func (s *parsedStore) active() *parsedManifest {
 func parseStore(ctx context.Context, jumbf []byte) *parsedStore {
 	st := &parsedStore{}
 	for _, b := range parseBoxTree(ctx, jumbf) {
-		collectManifests(b, st)
+		collectManifests(ctx, b, st)
 	}
 	return st
 }
 
-func collectManifests(b *box, st *parsedStore) {
-	if b.tbox != "jumb" {
+// collectManifests recurses over the box tree; the fan-out is the input's, so
+// the context is checked at every node.
+func collectManifests(ctx context.Context, b *box, st *parsedStore) {
+	if b.tbox != "jumb" || ctx.Err() != nil {
 		return
 	}
 	if m := asManifest(b); m != nil {
@@ -158,7 +160,7 @@ func collectManifests(b *box, st *parsedStore) {
 		return
 	}
 	for _, c := range b.children {
-		collectManifests(c, st)
+		collectManifests(ctx, c, st)
 	}
 }
 

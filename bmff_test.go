@@ -71,12 +71,12 @@ func TestParseBMFFBoxes(t *testing.T) {
 		t.Fatalf("ftyp box wrong: %+v", top[0])
 	}
 	// Deep descent through pure containers.
-	got := matchBMFFXPath(top, "/moov/trak/mdia/minf/stbl/stco")
+	got := matchBMFFXPath(context.Background(), top, "/moov/trak/mdia/minf/stbl/stco")
 	if len(got) != 1 || got[0].typ != "stco" {
 		t.Fatalf("stco not found via xpath: %v", got)
 	}
 	// FullBox container: children offset +4.
-	if got := matchBMFFXPath(top, "/meta/iloc"); len(got) != 1 {
+	if got := matchBMFFXPath(context.Background(), top, "/meta/iloc"); len(got) != 1 {
 		t.Fatalf("meta/iloc not found (FullBox descent broken)")
 	}
 	// mdat is a leaf.
@@ -217,19 +217,19 @@ func TestMatchBMFFXPath(t *testing.T) {
 	moov := synthBox("moov", trak1, trak2)
 	top := parseBMFFBoxes(context.Background(), moov)
 
-	if got := matchBMFFXPath(top, "/moov/trak"); len(got) != 2 {
+	if got := matchBMFFXPath(context.Background(), top, "/moov/trak"); len(got) != 2 {
 		t.Fatalf("unindexed segment should match all siblings, got %d", len(got))
 	}
-	if got := matchBMFFXPath(top, "/moov/trak[2]/mdia"); len(got) != 1 {
+	if got := matchBMFFXPath(context.Background(), top, "/moov/trak[2]/mdia"); len(got) != 1 {
 		t.Fatalf("indexed segment should match one, got %d", len(got))
 	}
-	if got := matchBMFFXPath(top, "/moov/trak[3]"); len(got) != 0 {
+	if got := matchBMFFXPath(context.Background(), top, "/moov/trak[3]"); len(got) != 0 {
 		t.Fatalf("out-of-range index matched %d boxes", len(got))
 	}
-	if got := matchBMFFXPath(top, "moov/trak"); got != nil {
+	if got := matchBMFFXPath(context.Background(), top, "moov/trak"); got != nil {
 		t.Fatal("xpath without leading slash should match nothing")
 	}
-	if got := matchBMFFXPath(top, "/moov/nope"); len(got) != 0 {
+	if got := matchBMFFXPath(context.Background(), top, "/moov/nope"); len(got) != 0 {
 		t.Fatal("nonexistent type matched")
 	}
 }
@@ -322,10 +322,10 @@ func TestHashBMFFTopLevel(t *testing.T) {
 		{xpath: "/uuid", length: -1, version: -1, exact: true,
 			data: []bmffDataMatch{{offset: 8, value: c2paBoxUUID[:]}}},
 	}
-	ranges := bmffExclusionByteRanges(file, top, excl)
+	ranges := bmffExclusionByteRanges(context.Background(), file, top, excl)
 
 	h := sha256.New()
-	hashBMFFTopLevel(context.Background(), file, top, ranges, h)
+	_ = hashBMFFTopLevel(context.Background(), file, top, ranges, h)
 	got := h.Sum(nil)
 
 	// Independently: only mdat contributes — 8-byte BE offset then its bytes.
@@ -351,9 +351,9 @@ func TestHashBMFFTopLevel_Subset(t *testing.T) {
 		{xpath: "/mdat", length: -1, version: -1, exact: true,
 			subset: []bmffSubsetRange{{offset: 16, length: 0}}},
 	}
-	ranges := bmffExclusionByteRanges(file, top, excl)
+	ranges := bmffExclusionByteRanges(context.Background(), file, top, excl)
 	h := sha256.New()
-	hashBMFFTopLevel(context.Background(), file, top, ranges, h)
+	_ = hashBMFFTopLevel(context.Background(), file, top, ranges, h)
 
 	want := sha256.New()
 	var off [8]byte

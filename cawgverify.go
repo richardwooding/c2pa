@@ -21,6 +21,9 @@ func (v *validator) verifyIdentities(m *parsedManifest, uri string, depth int) {
 		if !isIdentityLabel(a.label) {
 			continue
 		}
+		if v.cancelled(uri+"/"+a.label, "before verifying an identity assertion") {
+			return
+		}
 		if entries == nil {
 			entries = claimAssertionEntries(m.claim)
 		}

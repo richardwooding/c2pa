@@ -352,7 +352,7 @@ func TestBoxHashExclusionOutsidePermittedRange(t *testing.T) {
 		// Hash the chunk with its data carved out, so the ONLY thing standing
 		// between this assertion and a pass is the permitted-range check.
 		h, _ := hashByName("sha256")
-		writeGaps(asset, b.start, b.end(), []byteRange{{start: b.start + 8, length: 4}}, h)
+		_ = writeGaps(context.Background(), asset, b.start, b.end(), []byteRange{{start: b.start + 8, length: 4}}, h)
 		entries[i]["hash"] = h.Sum(nil)
 		entries[i]["exclusions"] = []any{map[string]any{"start": 8, "length": 4}}
 		return entries
@@ -383,7 +383,7 @@ func TestBoxHashMetadataExclusion(t *testing.T) {
 		}
 		excl := b.allowed[0]
 		h, _ := hashByName("sha256")
-		writeGaps(asset, b.start, b.end(),
+		_ = writeGaps(context.Background(), asset, b.start, b.end(),
 			[]byteRange{{start: b.start + excl.start, length: excl.length}}, h)
 		entries[i]["hash"] = h.Sum(nil)
 		entries[i]["exclusions"] = []any{
@@ -715,7 +715,7 @@ func TestJPEGEntropySize(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := jpegEntropySize(tc.in); got != tc.want {
+			if got := jpegEntropySize(context.Background(), tc.in); got != tc.want {
 				t.Errorf("got %d, want %d", got, tc.want)
 			}
 		})

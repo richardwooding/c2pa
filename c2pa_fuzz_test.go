@@ -173,7 +173,7 @@ func FuzzVerifyDataHash(f *testing.F) {
 			return
 		}
 		h := sha256.New()
-		hashWithExclusions(data, h, ranges)
+		_ = hashWithExclusions(context.Background(), data, h, ranges)
 		_ = h.Sum(nil)
 	})
 }
@@ -290,9 +290,9 @@ func FuzzBMFFHash(f *testing.F) {
 			return
 		}
 		top := parseBMFFBoxes(ctx, asset)
-		ranges := bmffExclusionByteRanges(asset, top, excl)
+		ranges := bmffExclusionByteRanges(context.Background(), asset, top, excl)
 		h := sha256.New()
-		hashBMFFTopLevel(ctx, asset, top, ranges, h)
+		_ = hashBMFFTopLevel(ctx, asset, top, ranges, h)
 		_ = h.Sum(nil)
 	})
 }
@@ -584,7 +584,7 @@ func FuzzMerkleLeafRanges(f *testing.F) {
 			m.fixedBlockSize = fixed
 		}
 		box := &bmffBox{typ: "mdat", start: start, end: start + size}
-		ranges, status := merkleLeafRanges(box, m)
+		ranges, status := merkleLeafRanges(context.Background(), box, m)
 		if status != "" {
 			if ranges != nil {
 				t.Fatalf("rejected cut still returned %d ranges", len(ranges))

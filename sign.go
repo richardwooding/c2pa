@@ -422,7 +422,7 @@ func (s *Signer) Sign(ctx context.Context, container Container, in io.Reader, ou
 	if err := validateManifest(m); err != nil {
 		return err
 	}
-	asset, err := readWholeAsset(in)
+	asset, err := readWholeAsset(ctx, in)
 	if err != nil {
 		return err
 	}
@@ -468,12 +468,14 @@ func (dataHashBinding) matchCode() StatusCode { return StatusAssertionDataHashMa
 func (b dataHashBinding) payload(excl []byteRange, digest []byte) ([]byte, error) {
 	return dataHashAssertion(b.alg, excl, digest)
 }
-func (b dataHashBinding) digest(_ context.Context, layout []byte, excl []byteRange) ([]byte, error) {
+func (b dataHashBinding) digest(ctx context.Context, layout []byte, excl []byteRange) ([]byte, error) {
 	h, ok := hashByName(b.alg)
 	if !ok {
 		return nil, fmt.Errorf("unsupported hash algorithm %q", b.alg)
 	}
-	hashWithExclusions(layout, h, excl)
+	if err := hashWithExclusions(ctx, layout, h, excl); err != nil {
+		return nil, err
+	}
 	return h.Sum(nil), nil
 }
 func (dataHashBinding) compareRanges(_ context.Context, _ []byte, excl []byteRange) ([]byteRange, error) {
@@ -515,9 +517,12 @@ func (bmffFlatBinding) validateOutput(ctx context.Context, final []byte, opts []
 }
 
 // readWholeAsset reads an asset for signing: whole, under ValidateMaxScan, and
-// not empty.
-func readWholeAsset(in io.Reader) ([]byte, error) {
-	asset, err := io.ReadAll(io.LimitReader(in, int64(ValidateMaxScan)))
+// not empty. A cancelled context comes back as its own error.
+func readWholeAsset(ctx context.Context, in io.Reader) ([]byte, error) {
+	asset, err := readAllCtx(ctx, in, ValidateMaxScan)
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, cerr
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMalformedAsset, err)
 	}
@@ -595,13 +600,18 @@ func (p *priorStore) has(label string) bool {
 // provenance means keeping something a validator can resolve.
 func (s *Signer) priorManifests(ctx context.Context, container Container, asset []byte) (*priorStore, error) {
 	store := extractJUMBF(ctx, container, asset)
+	// A cut-short scan is not "no store" — and a cut-short parse below is not
+	// "no manifest": the context is asked before either result is read.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(store) == 0 {
 		return nil, nil
 	}
 	var found []*priorManifest
 	var walk func(b *box)
 	walk = func(b *box) {
-		if b.tbox != "jumb" {
+		if b.tbox != "jumb" || ctx.Err() != nil {
 			return
 		}
 		if m := asManifest(b); m != nil {
@@ -623,6 +633,9 @@ func (s *Signer) priorManifests(ctx context.Context, container Container, asset 
 	}
 	for _, b := range parseBoxTree(ctx, store) {
 		walk(b)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if len(found) == 0 {
 		return nil, fmt.Errorf("%w: the asset's manifest store holds no manifest", ErrMalformedAsset)
@@ -661,6 +674,9 @@ type builtStore struct {
 func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m Manifest, hb hardBinding) ([]byte, error) {
 	prior, err := s.priorManifests(ctx, container, asset)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if prior != nil {
@@ -833,6 +849,9 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 		}
 		out, next, err := embedStore(ctx, container, asset, placeholder.store)
 		if err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, cerr // a cut-short parse is not a malformed carrier
+			}
 			return nil, embedError(err)
 		}
 		if sameRanges(next, excl) && len(out) == prevLen {
@@ -848,7 +867,13 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 	// (b) the digest over the converged layout.
 	digest, err := hb.digest(ctx, layout, excl)
 	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr // a truncated digest is not a malformed asset
+		}
 		return nil, fmt.Errorf("%w: %v", ErrMalformedAsset, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// (b') the identity signature, over the boxes the claim will list — the
@@ -889,12 +914,17 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 		}
 		token, err := s.fetchTimestamp(ctx, tbs)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrTimestamp, err)
+			// %w on the cause too: a cancelled request is ErrTimestamp AND the
+			// context's error, and errors.Is finds both.
+			return nil, fmt.Errorf("%w: %w", ErrTimestamp, err)
 		}
 		attachSigTst2(msg, token)
 		if sd, ok := parseCMSSignedData(token); ok {
 			tokenCerts = append(tokenCerts, sd.certs...)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	envelope, err := marshalSign1Padded(msg, reserve)
 	if err != nil {
@@ -909,12 +939,18 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 	}
 	final, finalExcl, err := embedStore(ctx, container, asset, signed.store)
 	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
 		return nil, embedError(err)
 	}
 	// Outside the store, the signed file must be the placeholder layout to the
 	// byte; the binding says which ranges the comparison ignores.
 	compare, err := hb.compareRanges(ctx, layout, excl)
 	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
 		return nil, fmt.Errorf("%w: %v", ErrMalformedAsset, err)
 	}
 	if !sameRanges(finalExcl, excl) || !sameOutsideExclusions(final, layout, compare) {
@@ -939,6 +975,11 @@ func (s *Signer) sign(ctx context.Context, container Container, asset []byte, m 
 		checkOpts = append(checkOpts, WithTimestampTrust(tsaPool))
 	}
 	res := hb.validateOutput(ctx, final, checkOpts)
+	if err := ctx.Err(); err != nil {
+		// A self-check under a cancelled context fails for that reason alone;
+		// calling it a failed self-check would be the wrong diagnosis.
+		return nil, fmt.Errorf("c2pa: cancelled during the self-check: %w", err)
+	}
 	match := hb.matchCode()
 	if !res.Valid || !res.Has(match) || (timestamped && !res.Has(StatusTimeStampValidated)) ||
 		(s.identity != nil && !res.Has(StatusIdentityTrusted)) {

@@ -106,7 +106,7 @@ func TestMerkleRowPolicy(t *testing.T) {
 		h := sha256.Sum256([]byte{byte(i)})
 		leaves[i] = h[:]
 	}
-	layers := merkleLayers("sha256", leaves)
+	layers := mustLayers("sha256", leaves)
 	rowIndex := merkleRowIndex(11)
 	m := merkleMap{count: 11, hashes: layers[rowIndex]}
 	for loc := range leaves {

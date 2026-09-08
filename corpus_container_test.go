@@ -187,7 +187,7 @@ func buildFramedAsset(t testing.TB, frame assetFraming, spec manifestSpec) []byt
 		}
 	} else {
 		h, _ := hashByName(alg)
-		hashWithExclusions(asset, h, excl)
+		_ = hashWithExclusions(context.Background(), asset, h, excl)
 		digest = h.Sum(nil)
 	}
 	final, _ := assemble(excl, digest)

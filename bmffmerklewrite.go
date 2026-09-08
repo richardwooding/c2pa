@@ -179,6 +179,9 @@ func merkleBoxSize(alg string, uniqueID, localID, count, rowIndex int) (int, err
 // box (c2pa-rs's own output) is taken to mean the media after it.
 func prepareFragment(ctx context.Context, frag, box []byte) ([]byte, error) {
 	top := parseBMFFBoxes(ctx, frag)
+	if err := ctx.Err(); err != nil {
+		return nil, err // a cut-short parse is not a malformed fragment
+	}
 	if len(top) == 0 {
 		return nil, fmt.Errorf("%w: no BMFF box structure", errCarrierMalformed)
 	}

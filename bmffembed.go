@@ -46,6 +46,9 @@ func c2paBoxBytes(purpose string, store []byte) ([]byte, error) {
 
 func (bmffEmbedder) embed(ctx context.Context, asset, store []byte) ([]byte, []byteRange, error) {
 	top := parseBMFFBoxes(ctx, asset)
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err // a cut-short parse is not a malformed carrier
+	}
 	if len(top) == 0 {
 		return nil, nil, fmt.Errorf("%w: no BMFF box structure", errCarrierMalformed)
 	}
@@ -108,13 +111,13 @@ func bmffPatchOffsets(ctx context.Context, out []byte, remap func(int) (int, boo
 			var err error
 			switch b.typ {
 			case "stco":
-				err = patchChunkOffsets(out, b, 4, remap)
+				err = patchChunkOffsets(ctx, out, b, 4, remap)
 			case "co64":
-				err = patchChunkOffsets(out, b, 8, remap)
+				err = patchChunkOffsets(ctx, out, b, 8, remap)
 			case "saio":
-				err = patchSaio(out, b, remap)
+				err = patchSaio(ctx, out, b, remap)
 			case "iloc":
-				err = patchIloc(out, b, remap)
+				err = patchIloc(ctx, out, b, remap)
 			}
 			if err != nil {
 				return err
@@ -156,7 +159,7 @@ func bmffOffsetField(out []byte, at, w int, remap func(int) (int, bool), what st
 
 // patchChunkOffsets handles 'stco' (w = 4) and 'co64' (w = 8): a FullBox
 // header, an entry count, then the chunk offsets.
-func patchChunkOffsets(out []byte, b *bmffBox, w int, remap func(int) (int, bool)) error {
+func patchChunkOffsets(ctx context.Context, out []byte, b *bmffBox, w int, remap func(int) (int, bool)) error {
 	p := b.start + b.headerLen
 	if p+8 > b.end {
 		return fmt.Errorf("%w: truncated '%s'", errCarrierMalformed, b.typ)
@@ -166,6 +169,12 @@ func patchChunkOffsets(out []byte, b *bmffBox, w int, remap func(int) (int, bool
 		return fmt.Errorf("%w: '%s' declares %d entries", errCarrierMalformed, b.typ, count)
 	}
 	for i := 0; i < count; i++ {
+		// A chunk-offset table can hold tens of millions of entries.
+		if i&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		if err := bmffOffsetField(out, p+8+i*w, w, remap, b.typ); err != nil {
 			return err
 		}
@@ -176,7 +185,7 @@ func patchChunkOffsets(out []byte, b *bmffBox, w int, remap func(int) (int, bool
 // patchSaio handles the sample auxiliary information offsets of encrypted
 // (CENC) content: version 0 has 32-bit offsets, version 1 64-bit; flag bit 0
 // adds aux_info_type and its parameter before the count.
-func patchSaio(out []byte, b *bmffBox, remap func(int) (int, bool)) error {
+func patchSaio(ctx context.Context, out []byte, b *bmffBox, remap func(int) (int, bool)) error {
 	p := b.start + b.headerLen
 	if p+4 > b.end {
 		return fmt.Errorf("%w: truncated 'saio'", errCarrierMalformed)
@@ -199,6 +208,11 @@ func patchSaio(out []byte, b *bmffBox, remap func(int) (int, bool)) error {
 		return fmt.Errorf("%w: 'saio' declares %d entries", errCarrierMalformed, count)
 	}
 	for i := 0; i < count; i++ {
+		if i&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		if err := bmffOffsetField(out, q+4+i*w, w, remap, "saio"); err != nil {
 			return err
 		}
@@ -211,7 +225,7 @@ func patchSaio(out []byte, b *bmffBox, remap func(int) (int, bool)) error {
 // 'idat' (construction_method != 0) carry no file offsets and are skipped.
 // When a base_offset is present and every extent's absolute position moves by
 // the same amount, the base alone is patched; otherwise each extent_offset is.
-func patchIloc(out []byte, b *bmffBox, remap func(int) (int, bool)) error {
+func patchIloc(ctx context.Context, out []byte, b *bmffBox, remap func(int) (int, bool)) error {
 	p := b.start + b.headerLen
 	if p+6 > b.end {
 		return fmt.Errorf("%w: truncated 'iloc'", errCarrierMalformed)

@@ -222,6 +222,27 @@ type validator struct {
 	// Non-nil but empty still means the caller declared the asset fragmented,
 	// so the split-file rules apply.
 	fragments *fragmentSet
+	// cancelReported records that the context's cancellation has been written
+	// into Statuses once, so finish's safety net does not add a second entry.
+	cancelReported bool
+}
+
+// cancelled reports whether the context has ended and, the first time, records
+// it: a general.error (a FAILURE) at uri carrying ctx.Err(), so an aborted run
+// never comes out Valid and is never mistaken for a mismatch or a missing
+// manifest. Every step that follows a hash, a parse or a read with a verdict
+// asks this before pronouncing. Dedup is by flag, not by inspecting Err — a
+// caller's reader can return its own context.Canceled.
+func (v *validator) cancelled(uri, what string) bool {
+	err := v.ctx.Err()
+	if err == nil {
+		return false
+	}
+	if !v.cancelReported {
+		v.cancelReported = true
+		v.add(StatusGeneralError, uri, "validation cancelled "+what, err)
+	}
+	return true
 }
 
 func (v *validator) add(code StatusCode, uri, explain string, err error) {
@@ -235,6 +256,11 @@ func (v *validator) add(code StatusCode, uri, explain string, err error) {
 }
 
 func (v *validator) finish() ValidationResult {
+	// The safety net under every path: a context that ended before the report
+	// was complete fails the report, whatever the steps managed to record —
+	// including a cancel that lands after the last step, which is the price of
+	// the rule being simple enough to hold everywhere.
+	v.cancelled("", "before the report was complete")
 	v.res.Valid = true
 	for i := range v.res.Statuses {
 		if v.res.Statuses[i].Severity == SeverityFailure {
@@ -285,18 +311,27 @@ func (v *validator) run(r io.Reader) ValidationResult {
 		v.add(StatusGeneralError, "", "no readable input", nil)
 		return v.finish()
 	}
-	if ctx.Err() != nil {
-		v.add(StatusGeneralError, "", "context cancelled before validation", ctx.Err())
+	if v.cancelled("", "before validation") {
 		return v.finish()
 	}
-	data, err := io.ReadAll(io.LimitReader(r, int64(cfg.maxScan)))
+	data, err := readAllCtx(ctx, r, cfg.maxScan)
+	if v.cancelled("", "while reading the asset") {
+		return v.finish()
+	}
 	if err != nil || len(data) == 0 {
 		v.add(StatusGeneralError, "", "no readable input", err)
 		return v.finish()
 	}
 	v.data = data
 
+	// A cut-short scan yields an empty or partial store; interpreting either
+	// would call a file that has a manifest "claim.missing", or validate the
+	// wrong manifest of a store missing its tail. So the context is asked
+	// BEFORE the result is read, here and after every parse below.
 	jumbf := extractJUMBF(ctx, container, data)
+	if v.cancelled("", "while locating the manifest store") {
+		return v.finish()
+	}
 	if len(jumbf) == 0 {
 		v.add(StatusClaimMissing, "", "no C2PA manifest found", nil)
 		return v.finish()
@@ -320,6 +355,10 @@ func (v *validator) run(r io.Reader) ValidationResult {
 	}
 
 	store := v.storeWithPriorSections(ctx, parseStore(ctx, jumbf))
+	if v.cancelled("", "while parsing the manifest store") {
+		v.res.Info = Info{} // built from a partial store
+		return v.finish()
+	}
 	m := store.active()
 	if m == nil {
 		v.add(StatusClaimMissing, "", "no parseable manifest in store", nil)
@@ -387,6 +426,9 @@ func pdfOtherStores(ctx context.Context, data []byte, objs *pdfObjects, active [
 	prior = append(prior, pdfMarkedStores(ctx, objs)...)
 	out := prior[:0]
 	for _, store := range prior {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if bytes.Equal(store, active) || slices.ContainsFunc(out,
 			func(have []byte) bool { return bytes.Equal(have, store) }) {
 			continue
@@ -429,6 +471,10 @@ func extractJUMBF(ctx context.Context, container Container, data []byte) []byte 
 func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, depth int) {
 	uri := m.label
 	v.visited[m.label] = true
+	// Ingredients recurse here, so this is the check every depth passes.
+	if v.cancelled(uri, "before validating manifest "+uri) {
+		return
+	}
 	if m.claimBytes == nil {
 		v.add(StatusClaimRequiredMissing, uri, "manifest has no claim", nil)
 	}
@@ -540,6 +586,9 @@ func (v *validator) storeWithPriorSections(ctx context.Context, active *parsedSt
 	}
 	merged := &parsedStore{}
 	for _, jumbf := range v.priorStores {
+		if ctx.Err() != nil {
+			return active // the caller asks the context before reading the result
+		}
 		for _, m := range parseStore(ctx, jumbf).manifests {
 			if have[m.label] {
 				continue

@@ -143,6 +143,22 @@ type pdfObjects struct {
 	newest  map[int]int   // object number → index into order
 	byNum   map[int][]int // object number → every index, built on demand
 	inflate int           // decompression budget left for this extraction
+	// ctx is the scan's context, for the walks over order and the inflater —
+	// both input-sized — that have no context of their own. nil means none.
+	ctx context.Context
+}
+
+// cancelled reports whether the scan's context has ended.
+func (o *pdfObjects) cancelled() bool {
+	return o.ctx != nil && o.ctx.Err() != nil
+}
+
+// inflateCtx is the context the inflater checks between reads.
+func (o *pdfObjects) inflateCtx() context.Context {
+	if o.ctx == nil {
+		return context.Background()
+	}
+	return o.ctx
 }
 
 // body returns the newest visible definition of an object number, falling back
@@ -172,6 +188,9 @@ func (o *pdfObjects) body(num int) []byte {
 func (o *pdfObjects) placedDefs(locs map[int]pdfXrefLoc) map[int]int {
 	defs := make(map[int]int, len(locs))
 	for i := range o.order {
+		if i&0xFFF == 0 && o.cancelled() {
+			return defs
+		}
 		ob := o.order[i]
 		loc, ok := locs[ob.num]
 		if !ok || !loc.found() {
@@ -194,6 +213,9 @@ func (o *pdfObjects) placedDefs(locs map[int]pdfXrefLoc) map[int]int {
 func (o *pdfObjects) currentDefs() map[int]int {
 	cur := make(map[int]int, len(o.newest))
 	for i := range o.order {
+		if i&0xFFF == 0 && o.cancelled() {
+			return cur
+		}
 		num := o.order[i].num
 		if j, ok := cur[num]; ok && o.order[j].stm == 0 && o.order[i].stm > 0 {
 			continue // a compressed definition must not displace a visible one
@@ -312,7 +334,7 @@ func pdfScan(ctx context.Context, data []byte) (*pdfObjects, []byte, pdfStoreSou
 // definition of the same object number supersedes an earlier one: that is what
 // an incremental update is.
 func indexPDFObjects(ctx context.Context, data []byte) *pdfObjects {
-	objs := &pdfObjects{newest: map[int]int{}, inflate: maxPDFInflate}
+	objs := &pdfObjects{newest: map[int]int{}, inflate: maxPDFInflate, ctx: ctx}
 	// endobj advances monotonically: once we know where the next `endobj` is,
 	// or that there is none, later headers reuse it. Re-searching per header
 	// would cost a full scan each for a file of unterminated objects.
@@ -544,6 +566,9 @@ func (o *pdfObjects) indexObjStm(stm int, body []byte) {
 	}
 	nums, offs, p := make([]int, 0, n), make([]int, 0, n), 0
 	for i := 0; i < n; i++ {
+		if i&0xFFF == 0 && o.cancelled() {
+			return
+		}
 		num, q, ok := pdfUint(payload, pdfSkipSpace(payload, p), first)
 		if !ok {
 			break
@@ -564,7 +589,7 @@ func (o *pdfObjects) indexObjStm(stm int, body []byte) {
 		o.inflate -= len(payload)
 	}
 	for i := range nums {
-		if len(o.order) >= maxPDFObjects {
+		if len(o.order) >= maxPDFObjects || (i&0xFFF == 0 && o.cancelled()) {
 			return
 		}
 		start, end := first+offs[i], len(payload)
@@ -993,7 +1018,7 @@ func (o *pdfObjects) decodeStream(dict, raw []byte) (out []byte, inflated bool) 
 	case len(filters) == 0:
 		return raw, false
 	case len(filters) == 1 && (filters[0] == "FlateDecode" || filters[0] == "Fl"):
-		return pdfInflate(raw, min(o.inflate, maxPDFStreamInflate)), true
+		return pdfInflate(o.inflateCtx(), raw, min(o.inflate, maxPDFStreamInflate)), true
 	default:
 		return nil, false
 	}
@@ -1003,25 +1028,28 @@ func (o *pdfObjects) decodeStream(dict, raw []byte) (out []byte, inflated bool) 
 // FlateDecode is zlib-wrapped; a raw deflate payload (which some producers
 // emit) is retried without the wrapper. Whatever decoded before an error is
 // kept, so a truncated stream still yields the store when the store came first.
-func pdfInflate(raw []byte, limit int) []byte {
+func pdfInflate(ctx context.Context, raw []byte, limit int) []byte {
 	if limit <= 0 {
 		return nil
 	}
 	if zr, err := zlib.NewReader(bytes.NewReader(raw)); err == nil {
-		out := pdfDrain(zr, limit)
+		out := pdfDrain(ctx, zr, limit)
 		_ = zr.Close()
 		if len(out) > 0 {
 			return out
 		}
 	}
 	fr := flate.NewReader(bytes.NewReader(raw))
-	out := pdfDrain(fr, limit)
+	out := pdfDrain(ctx, fr, limit)
 	_ = fr.Close()
 	return out
 }
 
-func pdfDrain(r io.Reader, limit int) []byte {
-	out, _ := io.ReadAll(io.LimitReader(r, int64(limit)))
+// pdfDrain reads the inflater to its limit, checking the context between reads:
+// a 16 MiB inflation is not free, and the caller asks the context before
+// interpreting a short result.
+func pdfDrain(ctx context.Context, r io.Reader, limit int) []byte {
+	out, _ := readAllCtx(ctx, r, limit)
 	return out
 }
 
@@ -1088,7 +1116,7 @@ func pdfXrefChain(
 		if ctx.Err() != nil || pos <= 0 || pos >= len(data) {
 			break
 		}
-		trailer := pdfXrefSection(data, pos, objs, locs)
+		trailer := pdfXrefSection(ctx, data, pos, objs, locs)
 		if trailer == nil {
 			break
 		}
@@ -1115,12 +1143,12 @@ func pdfXrefChain(
 // pdfXrefSection returns the trailer dictionary of the cross-reference section
 // at pos and places the objects it lists into locs, which an earlier section
 // never overwrites.
-func pdfXrefSection(data []byte, pos int, objs *pdfObjects, locs map[int]pdfXrefLoc) []byte {
+func pdfXrefSection(ctx context.Context, data []byte, pos int, objs *pdfObjects, locs map[int]pdfXrefLoc) []byte {
 	p := pdfSkipSpace(data, pos)
 	if bytes.HasPrefix(data[p:], []byte("xref")) {
-		return pdfClassicXref(data, p+len("xref"), locs)
+		return pdfClassicXref(ctx, data, p+len("xref"), locs)
 	}
-	return pdfXrefStream(data, p, objs, locs)
+	return pdfXrefStream(ctx, data, p, objs, locs)
 }
 
 // place records where an object lives, unless a newer section already did.
@@ -1134,8 +1162,11 @@ func pdfPlace(locs map[int]pdfXrefLoc, num int, loc pdfXrefLoc) {
 
 // pdfClassicXref reads a cross-reference table's subsections and the trailer
 // that follows them, placing every in-use entry at its byte offset.
-func pdfClassicXref(data []byte, p int, locs map[int]pdfXrefLoc) []byte {
+func pdfClassicXref(ctx context.Context, data []byte, p int, locs map[int]pdfXrefLoc) []byte {
 	for rows := 0; rows <= maxPDFObjects; {
+		if ctx.Err() != nil {
+			return nil
+		}
 		p = pdfSkipSpace(data, p)
 		if bytes.HasPrefix(data[p:], []byte("trailer")) {
 			return pdfDict(data[p+len("trailer"):])
@@ -1149,6 +1180,9 @@ func pdfClassicXref(data []byte, p int, locs map[int]pdfXrefLoc) []byte {
 			return nil
 		}
 		for i := 0; i < count; i++ {
+			if i&0xFFF == 0 && ctx.Err() != nil {
+				return nil
+			}
 			var entry int
 			if entry, q, ok = pdfUint(data, pdfSkipSpace(data, q), len(data)); !ok {
 				return nil
@@ -1175,7 +1209,7 @@ func pdfClassicXref(data []byte, p int, locs map[int]pdfXrefLoc) []byte {
 // of /W bytes covering the object ranges /Index names. Without decoding it the
 // catalog has no location, and lexical order is exactly what an appended decoy
 // exploits.
-func pdfXrefStream(data []byte, p int, objs *pdfObjects, locs map[int]pdfXrefLoc) []byte {
+func pdfXrefStream(ctx context.Context, data []byte, p int, objs *pdfObjects, locs map[int]pdfXrefLoc) []byte {
 	k := bytes.Index(data[p:min(len(data), p+maxPDFDictScan)], []byte("obj"))
 	if k < 0 {
 		return nil
@@ -1216,6 +1250,9 @@ func pdfXrefStream(data []byte, p int, objs *pdfObjects, locs map[int]pdfXrefLoc
 	for i := 0; i+1 < len(index); i += 2 {
 		first, count := index[i], index[i+1]
 		for j := 0; j < count && at+row <= len(payload); j++ {
+			if j&0xFFF == 0 && ctx.Err() != nil {
+				return dict
+			}
 			kind := 1 // /W[0] of zero means every entry is type 1
 			if w[0] > 0 {
 				kind = field(at, w[0])

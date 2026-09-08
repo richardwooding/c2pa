@@ -87,6 +87,9 @@ func (v *validator) verifyBMFFHash(a *rawAssertion, uri string) {
 		return
 	}
 	seg, ok := newBMFFSegment(v.ctx, v.data, excl)
+	if v.cancelled(subj, "while parsing the asset's boxes") {
+		return // a cut-short parse is not a malformed asset
+	}
 	if !ok {
 		v.add(StatusAssertionBMFFHashMalformed, subj, "asset has no parseable BMFF box structure", nil)
 		return
@@ -99,7 +102,10 @@ func (v *validator) verifyBMFFHash(a *rawAssertion, uri string) {
 	}
 
 	if len(want) > 0 {
-		hashBMFFTopLevel(v.ctx, seg.data, seg.top, seg.ranges, h)
+		if hashBMFFTopLevel(v.ctx, seg.data, seg.top, seg.ranges, h) != nil {
+			v.cancelled(subj, "while hashing the asset") // a truncated digest is not a mismatch
+			return
+		}
 		if subtle.ConstantTimeCompare(h.Sum(nil), want) != 1 {
 			v.add(StatusAssertionBMFFHashMismatch, subj, "asset BMFF hash does not match", nil)
 			return
@@ -197,17 +203,18 @@ func decodeBMFFExclusions(raw any) ([]bmffExclusion, bool) {
 // tree. An unindexed segment matches every sibling of that type; a "[n]"
 // suffix selects the nth (1-based) sibling of that type within its parent. An
 // xpath may match zero or more boxes.
-func matchBMFFXPath(roots []*bmffBox, xpath string) []*bmffBox {
+func matchBMFFXPath(ctx context.Context, roots []*bmffBox, xpath string) []*bmffBox {
 	if !strings.HasPrefix(xpath, "/") {
 		return nil
 	}
-	return matchBMFFXPathSegments(roots, strings.Split(strings.TrimPrefix(xpath, "/"), "/"))
+	return matchBMFFXPathSegments(ctx, roots, strings.Split(strings.TrimPrefix(xpath, "/"), "/"))
 }
 
 // matchBMFFXPathSegments recursively matches path segments against sibling
-// pools; "[n]" indices count per sibling pool.
-func matchBMFFXPathSegments(pool []*bmffBox, segs []string) []*bmffBox {
-	if len(segs) == 0 {
+// pools; "[n]" indices count per sibling pool. Both the path and the tree are
+// the input's, so the context is checked at every level.
+func matchBMFFXPathSegments(ctx context.Context, pool []*bmffBox, segs []string) []*bmffBox {
+	if len(segs) == 0 || ctx.Err() != nil {
 		return nil
 	}
 	seg := segs[0]
@@ -239,7 +246,7 @@ func matchBMFFXPathSegments(pool []*bmffBox, segs []string) []*bmffBox {
 	}
 	var out []*bmffBox
 	for _, b := range matched {
-		out = append(out, matchBMFFXPathSegments(b.children, segs[1:])...)
+		out = append(out, matchBMFFXPathSegments(ctx, b.children, segs[1:])...)
 	}
 	return out
 }
@@ -293,10 +300,13 @@ func bmffExclusionApplies(data []byte, b *bmffBox, e bmffExclusion) bool {
 // sorted, merged byte ranges. An exclusion that matches no box contributes
 // nothing (allowed), and a subset past the box end is clamped, so nothing here
 // can fail: the exclusions were validated when they were decoded.
-func bmffExclusionByteRanges(data []byte, roots []*bmffBox, excl []bmffExclusion) []byteRange {
+func bmffExclusionByteRanges(ctx context.Context, data []byte, roots []*bmffBox, excl []bmffExclusion) []byteRange {
 	var out []byteRange
 	for _, e := range excl {
-		for _, b := range matchBMFFXPath(roots, e.xpath) {
+		if ctx.Err() != nil {
+			return nil
+		}
+		for _, b := range matchBMFFXPath(ctx, roots, e.xpath) {
 			if !bmffExclusionApplies(data, b, e) {
 				continue
 			}
@@ -329,19 +339,25 @@ func bmffExclusionByteRanges(data []byte, roots []*bmffBox, excl []bmffExclusion
 // included range. The two coincide when exclusions cover whole top-level
 // boxes (the real-world case — /uuid, /ftyp, /mfra); the signed-MP4 fixture
 // test is the oracle for this reading.
-func hashBMFFTopLevel(ctx context.Context, data []byte, top []*bmffBox, ranges []byteRange, h hash.Hash) {
+//
+// It returns the context's error when cancelled mid-walk; h then holds a
+// truncated digest that must not be compared with anything.
+func hashBMFFTopLevel(ctx context.Context, data []byte, top []*bmffBox, ranges []byteRange, h hash.Hash) error {
 	var offsetBuf [8]byte
 	for _, b := range top {
-		if ctx.Err() != nil {
-			return
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if coveredByRanges(b.start, b.end, ranges) {
 			continue // wholly excluded: no offset marker, no bytes
 		}
 		binary.BigEndian.PutUint64(offsetBuf[:], uint64(b.start))
 		h.Write(offsetBuf[:])
-		writeGaps(data, b.start, b.end, ranges, h)
+		if err := writeGaps(ctx, data, b.start, b.end, ranges, h); err != nil {
+			return err
+		}
 	}
+	return ctx.Err()
 }
 
 // coveredByRanges reports whether [start,end) is entirely inside one merged
@@ -356,8 +372,9 @@ func coveredByRanges(start, end int, ranges []byteRange) bool {
 }
 
 // writeGaps writes data[start:end] to h, skipping any parts covered by the
-// (sorted, merged) exclusion ranges.
-func writeGaps(data []byte, start, end int, ranges []byteRange, h hash.Hash) {
+// (sorted, merged) exclusion ranges. A single gap can be a whole 'mdat', so the
+// bytes go through hashWrite; the context's error comes back when it ends.
+func writeGaps(ctx context.Context, data []byte, start, end int, ranges []byteRange, h hash.Hash) error {
 	cur := start
 	for _, r := range ranges {
 		rEnd := r.start + r.length
@@ -368,18 +385,21 @@ func writeGaps(data []byte, start, end int, ranges []byteRange, h hash.Hash) {
 			break
 		}
 		if r.start > cur {
-			h.Write(data[cur:min(r.start, end)])
+			if err := hashWrite(ctx, h, data[cur:min(r.start, end)]); err != nil {
+				return err
+			}
 		}
 		if rEnd > cur {
 			cur = rEnd
 		}
 		if cur >= end {
-			return
+			return nil
 		}
 	}
 	if cur < end {
-		h.Write(data[cur:end])
+		return hashWrite(ctx, h, data[cur:end])
 	}
+	return nil
 }
 
 // Merkle BMFF hashing (C2PA spec §18.6.3 / §18.6.6). A c2pa.hash.bmff.v3
@@ -467,7 +487,7 @@ func newBMFFSegment(ctx context.Context, data []byte, excl []bmffExclusion) (bmf
 	if len(top) == 0 {
 		return bmffSegment{}, false
 	}
-	return bmffSegment{data: data, top: top, excl: excl, ranges: bmffExclusionByteRanges(data, top, excl)}, true
+	return bmffSegment{data: data, top: top, excl: excl, ranges: bmffExclusionByteRanges(ctx, data, top, excl)}, true
 }
 
 // verifyBMFFMerkle checks every merkle-map the assertion carries against what
@@ -508,6 +528,9 @@ func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, se
 
 	verified, unverified := 0, ""
 	for i, m := range maps {
+		if v.cancelled(subj, "while verifying the merkle maps") {
+			return
+		}
 		algName := m.alg
 		if algName == "" {
 			algName = defaultAlg
@@ -530,7 +553,7 @@ func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, se
 				initEnd = firstMoof
 			}
 			if !initHashMatches(v.ctx, seg, m, algName, initEnd) {
-				if v.merkleCancelled(subj) {
+				if v.cancelled(subj, "while hashing the initialization segment") {
 					return
 				}
 				v.add(StatusAssertionBMFFHashMismatch, subj,
@@ -548,15 +571,19 @@ func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, se
 				continue
 			}
 			if !fragmentsCut {
-				chunks = bmffChunks(seg.top)
-				if boxes, ok = bmffMerkleBoxes(seg.data, seg.top); !ok {
+				chunks = bmffChunks(v.ctx, seg.top)
+				boxes, ok = bmffMerkleBoxes(v.ctx, seg.data, seg.top)
+				if v.cancelled(subj, "while reading the merkle boxes") {
+					return
+				}
+				if !ok {
 					v.add(StatusAssertionBMFFHashMalformed, subj,
 						"fragmented BMFF merkle box did not decode", nil)
 					return
 				}
 				fragmentsCut = true
 			}
-			if !v.verifyMerkleChunks(subj, algName, m, seg, chunks, boxes) {
+			if v.verifyMerkleChunks(subj, algName, m, seg, chunks, boxes) != merkleOK {
 				return
 			}
 			verified++
@@ -572,12 +599,15 @@ func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, se
 			continue
 		}
 		mdat := mdats[i]
-		leaves, status := merkleLeafRanges(mdat, m)
+		leaves, status := merkleLeafRanges(v.ctx, mdat, m)
+		if v.cancelled(subj, "while cutting the merkle leaves") {
+			return
+		}
 		if status != "" {
 			v.add(status, subj, "merkle-map leaf blocks do not describe this 'mdat' box", nil)
 			return
 		}
-		if !v.checkMerkleTree(subj, algName, m, leaves, seg.data) {
+		if v.checkMerkleTree(subj, algName, m, leaves, seg.data) != merkleOK {
 			return
 		}
 		verified++
@@ -596,16 +626,16 @@ func (v *validator) verifyBMFFMerkle(subj string, raw any, defaultAlg string, se
 	}
 }
 
-// merkleCancelled reports a cancelled context as the informational it is, so a
-// hash cut short by cancellation is never mistaken for a mismatch. It reports
-// whether it added a status.
-func (v *validator) merkleCancelled(subj string) bool {
-	if v.ctx.Err() == nil {
-		return false
-	}
-	v.add(StatusUnsupported, subj, "merkle BMFF hashing cancelled", nil)
-	return true
-}
+// merkleVerdict is what a merkle check returns: carried on, disproved (a
+// status was added), or cut short by the context (a general.error was added)
+// — kept apart so a cancel is never read as a mismatch.
+type merkleVerdict int
+
+const (
+	merkleOK merkleVerdict = iota
+	merkleFailed
+	merkleCancelled
+)
 
 // initHashMatches checks a merkle-map's initHash against the initialization
 // segment: the same offset-marker walk as the flat hash (c2pa-rs reaches both
@@ -614,18 +644,35 @@ func (v *validator) merkleCancelled(subj string) bool {
 // the first 'moof', so the walk covers 'ftyp' and 'moov' alone; an
 // initialization segment that is a file of its own has nothing to cut off and
 // passes len(seg.data).
+//
+// A cancelled context yields false; callers ask the context before calling
+// that a mismatch.
 func initHashMatches(ctx context.Context, seg bmffSegment, m merkleMap, algName string, fragmentedFrom int) bool {
+	sum, err := bmffInitHash(ctx, seg, algName, fragmentedFrom)
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(sum, m.initHash) == 1
+}
+
+// bmffInitHash is the initialization-segment hash a merkle map's initHash
+// records: the offset-marker walk over seg with everything from fragmentedFrom
+// to the end of the file excluded on top of the assertion's exclusions. The
+// verifier compares it; the flat-file writer stores it.
+func bmffInitHash(ctx context.Context, seg bmffSegment, algName string, fragmentedFrom int) ([]byte, error) {
 	h, ok := hashByName(algName)
 	if !ok {
-		return false
+		return nil, fmt.Errorf("unsupported hash algorithm %q", algName)
 	}
 	ranges := seg.ranges
 	if fragmentedFrom < len(seg.data) {
 		ranges = mergeRanges(append(append([]byteRange(nil), seg.ranges...),
 			byteRange{start: fragmentedFrom, length: len(seg.data) - fragmentedFrom}))
 	}
-	hashBMFFTopLevel(ctx, seg.data, seg.top, ranges, h)
-	return subtle.ConstantTimeCompare(h.Sum(nil), m.initHash) == 1
+	if err := hashBMFFTopLevel(ctx, seg.data, seg.top, ranges, h); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
 }
 
 // bmffChunks splits a flat fragmented file into its chunks: each begins at a
@@ -634,7 +681,7 @@ func initHashMatches(ctx context.Context, seg bmffSegment, m merkleMap, algName 
 // to no chunk. nil when there is no 'moof' — or when the file BEGINS with one,
 // which is a bare fragment rather than fragmented content (c2pa-rs
 // split_fragment_boxes draws the same line).
-func bmffChunks(top []*bmffBox) [][]*bmffBox {
+func bmffChunks(ctx context.Context, top []*bmffBox) [][]*bmffBox {
 	first := -1
 	for i, b := range top {
 		if b.typ == "moof" {
@@ -648,6 +695,9 @@ func bmffChunks(top []*bmffBox) [][]*bmffBox {
 	var chunks [][]*bmffBox
 	start := first
 	for i := first + 1; i <= len(top); i++ {
+		if i&0xFFF == 0 && ctx.Err() != nil {
+			return nil
+		}
 		if i == len(top) || top[i].typ == "moof" {
 			chunks = append(chunks, top[start:i])
 			start = i
@@ -664,27 +714,27 @@ func bmffChunks(top []*bmffBox) [][]*bmffBox {
 // 'moof' lies outside the chunk in any case, and under the mandatory "/uuid"
 // exclusion besides. It reports whether to carry on, adding a status itself
 // when it does not.
-func (v *validator) verifyMerkleChunks(subj, algName string, m merkleMap, seg bmffSegment, chunks [][]*bmffBox, boxes []merkleBox) bool {
+func (v *validator) verifyMerkleChunks(subj, algName string, m merkleMap, seg bmffSegment, chunks [][]*bmffBox, boxes []merkleBox) merkleVerdict {
 	if len(chunks) != m.count {
 		v.add(StatusAssertionBMFFHashMismatch, subj,
 			fmt.Sprintf("asset holds %d fragment chunks but the merkle map binds %d", len(chunks), m.count), nil)
-		return false
+		return merkleFailed
 	}
 	if len(boxes) != m.count {
 		v.add(StatusAssertionBMFFHashMismatch, subj,
 			fmt.Sprintf("asset carries %d merkle boxes but the merkle map binds %d chunks", len(boxes), m.count), nil)
-		return false
+		return merkleFailed
 	}
 	for k, chunk := range chunks {
-		if v.merkleCancelled(subj) {
-			return false
+		if v.cancelled(subj, "while verifying the fragment chunks") {
+			return merkleCancelled
 		}
 		mb := boxes[k]
 		if m.uniqueID >= 0 && (mb.uniqueID != m.uniqueID || mb.localID != m.localID) {
 			v.add(StatusAssertionBMFFHashMismatch, subj,
 				fmt.Sprintf("fragmented BMFF chunk %d carries a merkle box for uniqueId %d, localId %d, not this map's %d, %d",
 					k, mb.uniqueID, mb.localID, m.uniqueID, m.localID), nil)
-			return false
+			return merkleFailed
 		}
 		// §15.12.2: locations run 0, 1, 2… in rendered order, and a flat file
 		// renders in file order. Left unchecked, two chunks could swap places
@@ -692,32 +742,36 @@ func (v *validator) verifyMerkleChunks(subj, algName string, m merkleMap, seg bm
 		if mb.location != k {
 			v.add(StatusAssertionBMFFHashMismatch, subj,
 				fmt.Sprintf("fragmented BMFF chunk %d carries merkle location %d", k, mb.location), nil)
-			return false
+			return merkleFailed
 		}
 		h, _ := hashByName(algName)
-		hashBMFFTopLevel(v.ctx, seg.data, chunk, seg.ranges, h)
+		if hashBMFFTopLevel(v.ctx, seg.data, chunk, seg.ranges, h) != nil {
+			v.cancelled(subj, "while hashing a fragment chunk")
+			return merkleCancelled
+		}
 		ok, malformed := merkleProve(algName, m, h.Sum(nil), k, mb.hashes)
 		if malformed {
 			v.add(StatusAssertionBMFFHashMalformed, subj,
 				fmt.Sprintf("fragmented BMFF chunk %d carries a merkle proof that does not fit the tree", k), nil)
-			return false
+			return merkleFailed
 		}
 		if !ok {
-			if v.merkleCancelled(subj) {
-				return false
-			}
 			v.add(StatusAssertionBMFFHashMismatch, subj,
 				fmt.Sprintf("fragmented BMFF chunk %d hash does not match its merkle proof", k), nil)
-			return false
+			return merkleFailed
 		}
 	}
-	return true
+	return merkleOK
 }
 
 // merkleLeafRanges cuts an 'mdat' box into the leaf blocks a merkle-map
 // declares. The blocks start mdatBlockPrefix bytes into the box and must cover
 // the rest of it exactly.
-func merkleLeafRanges(mdat *bmffBox, m merkleMap) ([]byteRange, StatusCode) {
+//
+// Up to maxMerkleLeaves ranges are cut, so the loops check the context; a
+// cancelled cut returns no ranges and no status, and the caller asks the
+// context before reading either.
+func merkleLeafRanges(ctx context.Context, mdat *bmffBox, m merkleMap) ([]byteRange, StatusCode) {
 	start := mdat.start + mdatBlockPrefix
 	length := (mdat.end - mdat.start) - mdatBlockPrefix
 	if length < 0 || start > mdat.end {
@@ -734,6 +788,9 @@ func merkleLeafRanges(mdat *bmffBox, m merkleMap) ([]byteRange, StatusCode) {
 		}
 		out := make([]byteRange, 0, n)
 		for left := length; left > 0; {
+			if len(out)&0xFFF == 0 && ctx.Err() != nil {
+				return nil, ""
+			}
 			take := min(left, m.fixedBlockSize)
 			out = append(out, byteRange{start: start, length: take})
 			start += take
@@ -745,7 +802,10 @@ func merkleLeafRanges(mdat *bmffBox, m merkleMap) ([]byteRange, StatusCode) {
 			return nil, StatusAssertionBMFFHashMalformed
 		}
 		total := 0
-		for _, n := range m.variableBlockSizes {
+		for i, n := range m.variableBlockSizes {
+			if i&0xFFF == 0 && ctx.Err() != nil {
+				return nil, ""
+			}
 			if n < 0 || n > length-total {
 				return nil, StatusAssertionBMFFHashMalformed
 			}
@@ -770,24 +830,33 @@ func merkleLeafRanges(mdat *bmffBox, m merkleMap) ([]byteRange, StatusCode) {
 // checkMerkleTree hashes each leaf block of data, rebuilds the tree above them
 // and compares it with the row the assertion stored. It reports whether to
 // carry on, adding a status itself when it does not.
-func (v *validator) checkMerkleTree(subj, algName string, m merkleMap, leaves []byteRange, data []byte) bool {
+func (v *validator) checkMerkleTree(subj, algName string, m merkleMap, leaves []byteRange, data []byte) merkleVerdict {
 	if len(leaves) != m.count {
 		v.add(StatusAssertionBMFFHashMalformed, subj,
 			"merkle-map count does not match the leaf blocks it declares", nil)
-		return false
+		return merkleFailed
 	}
 	digests := make([][]byte, 0, len(leaves))
-	for _, r := range leaves {
-		if v.merkleCancelled(subj) {
-			return false
+	for i, r := range leaves {
+		if i&0xFFF == 0 && v.cancelled(subj, "while hashing the merkle leaves") {
+			return merkleCancelled
 		}
 		h, _ := hashByName(algName)
-		h.Write(data[r.start : r.start+r.length])
+		// A single leaf can be a whole 'mdat'.
+		if hashWrite(v.ctx, h, data[r.start:r.start+r.length]) != nil {
+			v.cancelled(subj, "while hashing a merkle leaf")
+			return merkleCancelled
+		}
 		digests = append(digests, h.Sum(nil))
+	}
+	layers, err := merkleLayers(v.ctx, algName, digests)
+	if err != nil {
+		v.cancelled(subj, "while building the merkle tree")
+		return merkleCancelled
 	}
 	// hashes is one row of the tree — leaf-most, root, or between — and which
 	// row is implied by its length.
-	for _, layer := range merkleLayers(algName, digests) {
+	for _, layer := range layers {
 		if len(layer) != len(m.hashes) {
 			continue
 		}
@@ -795,14 +864,14 @@ func (v *validator) checkMerkleTree(subj, algName string, m merkleMap, leaves []
 			if subtle.ConstantTimeCompare(layer[i], m.hashes[i]) != 1 {
 				v.add(StatusAssertionBMFFHashMismatch, subj,
 					"asset BMFF merkle hash does not match", nil)
-				return false
+				return merkleFailed
 			}
 		}
-		return true
+		return merkleOK
 	}
 	v.add(StatusAssertionBMFFHashMalformed, subj,
 		"merkle-map hashes match no row of the tree its leaf count implies", nil)
-	return false
+	return merkleFailed
 }
 
 // merkleLayers builds the C2PA Merkle tree over already-hashed leaves and
@@ -810,11 +879,20 @@ func (v *validator) checkMerkleTree(subj, algName string, m merkleMap, leaves []
 // concatenated; a last child with no sibling is carried up UNCHANGED — not
 // duplicated and not re-hashed, which is what makes this tree C2PA's rather
 // than the more common Bitcoin-style one.
-func merkleLayers(algName string, leaves [][]byte) [][][]byte {
+//
+// The leaf row can hold maxMerkleLeaves nodes — half a million pair hashes —
+// so the context is checked every 4096 nodes; its error comes back when it
+// ends, with no tree.
+func merkleLayers(ctx context.Context, algName string, leaves [][]byte) ([][][]byte, error) {
 	layers := [][][]byte{leaves}
 	for cur := leaves; len(cur) > 1; {
 		next := make([][]byte, 0, (len(cur)+1)/2)
 		for i := 0; i < len(cur); i += 2 {
+			if i&0x1FFF == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			if i+1 == len(cur) {
 				next = append(next, cur[i])
 				continue
@@ -827,7 +905,7 @@ func merkleLayers(algName string, leaves [][]byte) [][][]byte {
 		layers = append(layers, next)
 		cur = next
 	}
-	return layers
+	return layers, ctx.Err()
 }
 
 // merkleLayout returns the width of every row of a C2PA Merkle tree over count
@@ -899,9 +977,12 @@ func merkleProve(algName string, m merkleMap, leaf []byte, location int, proof [
 // false when one of them does not decode or there are more than the leaf cap
 // allows: the file then says something the verifier cannot read, which is
 // malformed rather than a mismatch.
-func bmffMerkleBoxes(data []byte, top []*bmffBox) ([]merkleBox, bool) {
+func bmffMerkleBoxes(ctx context.Context, data []byte, top []*bmffBox) ([]merkleBox, bool) {
 	var out []merkleBox
-	for _, b := range top {
+	for i, b := range top {
+		if i&0xFFF == 0 && ctx.Err() != nil {
+			return nil, false
+		}
 		payload := c2paMerklePayload(data, b)
 		if payload == nil {
 			continue

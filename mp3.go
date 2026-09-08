@@ -42,7 +42,7 @@ func mp3JUMBF(ctx context.Context, data []byte) []byte {
 	end := min(10+size, len(data))
 	body := data[10:end]
 	if major == 3 && flags&0x80 != 0 {
-		body = id3DeUnsync(body)
+		body = id3DeUnsync(ctx, body)
 	}
 
 	pos := 0
@@ -76,7 +76,7 @@ func mp3JUMBF(ctx context.Context, data []byte) []byte {
 			return nil
 		}
 		if id == "GEOB" {
-			frame := id3GEOBObject(major, frameFlags, body[start:start+frameSize])
+			frame := id3GEOBObject(ctx, major, frameFlags, body[start:start+frameSize])
 			if store := id3GEOBStore(frame); store != nil {
 				return store
 			}
@@ -88,9 +88,12 @@ func mp3JUMBF(ctx context.Context, data []byte) []byte {
 
 // id3DeUnsync reverses ID3v2 unsynchronisation: every 0x00 that follows a 0xFF
 // was stuffed on write and is dropped. Output is never longer than the input.
-func id3DeUnsync(b []byte) []byte {
+func id3DeUnsync(ctx context.Context, b []byte) []byte {
 	out := make([]byte, 0, len(b))
 	for i := 0; i < len(b); i++ {
+		if i&0xFFFF == 0 && ctx.Err() != nil {
+			return nil // a tag can be file-sized
+		}
 		out = append(out, b[i])
 		if b[i] == 0xFF && i+1 < len(b) && b[i+1] == 0x00 {
 			i++
@@ -201,7 +204,7 @@ func parseID3ForWrite(ctx context.Context, data []byte) (id3Parsed, error) {
 	}
 	body := data[10 : 10+size]
 	if major == 3 && flags&0x80 != 0 {
-		body = id3DeUnsync(body)
+		body = id3DeUnsync(ctx, body)
 	}
 	pos := 0
 	if flags&0x40 != 0 {
@@ -240,7 +243,7 @@ func parseID3ForWrite(ctx context.Context, data []byte) (id3Parsed, error) {
 			return id3Parsed{}, fmt.Errorf("%w: ID3 frame %q overruns the tag", errCarrierMalformed, id)
 		}
 		frame := body[pos : start+frameSize]
-		if string(id) == "GEOB" && id3GEOBStore(id3GEOBObject(major, body[pos+9], body[start:start+frameSize])) != nil {
+		if string(id) == "GEOB" && id3GEOBStore(id3GEOBObject(ctx, major, body[pos+9], body[start:start+frameSize])) != nil {
 			pos = start + frameSize
 			continue // an existing store; the new tag gets a fresh one
 		}
@@ -253,12 +256,12 @@ func parseID3ForWrite(ctx context.Context, data []byte) (id3Parsed, error) {
 // id3GEOBObject undoes what a v2.4 frame's format flags did to its body —
 // per-frame unsynchronisation, a data-length indicator — so the GEOB fields can
 // be read; v2.3 bodies are already plain by the time the tag is de-unsynced.
-func id3GEOBObject(major, frameFlags byte, body []byte) []byte {
+func id3GEOBObject(ctx context.Context, major, frameFlags byte, body []byte) []byte {
 	if major != 4 {
 		return body
 	}
 	if frameFlags&0x02 != 0 {
-		body = id3DeUnsync(body)
+		body = id3DeUnsync(ctx, body)
 	}
 	if frameFlags&0x01 != 0 && len(body) >= 4 {
 		body = body[4:]

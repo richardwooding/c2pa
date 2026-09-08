@@ -78,7 +78,7 @@ func pdfChainForWrite(ctx context.Context, data []byte, objs *pdfObjects, pos in
 			q := pdfSkipSpace(data, pos)
 			wc.stream = !bytes.HasPrefix(data[q:], []byte("xref"))
 		}
-		trailer := pdfXrefSection(data, pos, objs, locs)
+		trailer := pdfXrefSection(ctx, data, pos, objs, locs)
 		if trailer == nil {
 			break
 		}

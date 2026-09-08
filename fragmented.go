@@ -161,8 +161,7 @@ func (v *validator) verifyBMFFFragmented(subj string, assertion map[string]any, 
 	anyOK := false
 	for i, m := range maps {
 		initOK[i] = initHashMatches(v.ctx, seg, m, algs[i], len(seg.data))
-		if v.ctx.Err() != nil {
-			v.add(StatusGeneralError, subj, "validation cancelled while verifying the initialization segment", v.ctx.Err())
+		if v.cancelled(subj, "while verifying the initialization segment") {
 			return
 		}
 		anyOK = anyOK || initOK[i]
@@ -188,7 +187,10 @@ func (v *validator) verifyBMFFFragmented(subj string, assertion map[string]any, 
 			v.add(StatusGeneralError, uri, fmt.Sprintf("fragment %d: nil reader", i), nil)
 			continue
 		}
-		data, err := io.ReadAll(io.LimitReader(r, int64(v.cfg.maxScan)))
+		data, err := readAllCtx(v.ctx, r, v.cfg.maxScan)
+		if v.cancelled(uri, fmt.Sprintf("while reading fragment %d", i)) {
+			return // and the fragments after it are not opened
+		}
 		if err != nil {
 			v.add(StatusGeneralError, uri, fmt.Sprintf("fragment %d: read failed", i), err)
 			continue
@@ -204,11 +206,10 @@ func (v *validator) verifyBMFFFragmented(subj string, assertion map[string]any, 
 			continue
 		}
 		outcomes := verifyFragmentBuffer(v.ctx, mc, data)
-		if v.ctx.Err() != nil {
-			// A hash cut short by cancellation looks like a mismatch; report
-			// the cancellation instead, and as a failure — an aborted run must
-			// not come out Valid.
-			v.add(StatusGeneralError, uri, fmt.Sprintf("validation cancelled while verifying fragment %d", i), v.ctx.Err())
+		// A hash cut short by cancellation looks like a mismatch; report the
+		// cancellation instead, and as a failure — an aborted run must not come
+		// out Valid.
+		if v.cancelled(uri, fmt.Sprintf("while verifying fragment %d", i)) {
 			return
 		}
 		for _, o := range outcomes {
@@ -286,7 +287,7 @@ func verifyFragmentBuffer(ctx context.Context, mc merkleContext, frag []byte) []
 	if !ok {
 		return malformed("no parseable BMFF box structure")
 	}
-	boxes, ok := bmffMerkleBoxes(seg.data, seg.top)
+	boxes, ok := bmffMerkleBoxes(ctx, seg.data, seg.top)
 	if !ok {
 		return malformed("C2PA merkle box did not decode")
 	}
@@ -304,12 +305,17 @@ func verifyFragmentBuffer(ctx context.Context, mc merkleContext, frag []byte) []
 		if !ok {
 			return nil, false
 		}
-		hashBMFFTopLevel(ctx, seg.data, seg.top, seg.ranges, h)
+		if hashBMFFTopLevel(ctx, seg.data, seg.top, seg.ranges, h) != nil {
+			return nil, false // cut short; the caller asks the context first
+		}
 		sums[alg] = h.Sum(nil)
 		return sums[alg], true
 	}
 	out := make([]fragmentOutcome, 0, len(boxes))
 	for _, mb := range boxes {
+		if ctx.Err() != nil {
+			return out
+		}
 		o := fragmentOutcome{mapIndex: -1, location: mb.location}
 		for i, m := range mc.maps {
 			if m.uniqueID == mb.uniqueID && m.localID == mb.localID {

@@ -157,7 +157,12 @@ What it verifies:
 `r.Valid` is true exactly when no failure-severity status was recorded. Like `Read`, `Validate`
 never returns an error and never panics — malformed or untrusted input is reported as failure
 statuses. It reads up to `c2pa.ValidateMaxScan` (256 MiB) so it can hash the whole asset; an asset
-larger than the cap reports an informational status rather than a false hash mismatch.
+larger than the cap reports an informational status rather than a false hash mismatch. A cancelled or
+expired context stops the work promptly — every loop, every hash and every network request honours it
+— and is reported as `general.error` carrying the context's error: a cancelled result is never `Valid`,
+and never a false mismatch. `Read` and `ReadAll` return nothing when cancelled, `ExtractStore` returns
+the context's error, and `Sign` returns an error for which `errors.Is(err, ctx.Err())` holds, having
+written nothing.
 
 ### Trust anchors and options
 

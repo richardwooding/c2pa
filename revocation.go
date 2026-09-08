@@ -3,7 +3,7 @@ package c2pa
 import (
 	"bytes"
 	"crypto/x509"
-	"io"
+	"net/http"
 
 	"golang.org/x/crypto/ocsp"
 )
@@ -58,12 +58,19 @@ func (v *validator) ocspRevoked(leaf, issuer *x509.Certificate) (revoked, ok boo
 	if err != nil {
 		return false, false
 	}
-	httpResp, err := v.cfg.httpClient.Post(leaf.OCSPServer[0], "application/ocsp-request", bytes.NewReader(reqBytes))
+	// The request carries the validation's context: a cancelled Validate must
+	// not sit through a responder's timeout, or through several of them.
+	req, err := http.NewRequestWithContext(v.ctx, http.MethodPost, leaf.OCSPServer[0], bytes.NewReader(reqBytes))
+	if err != nil {
+		return false, false
+	}
+	req.Header.Set("Content-Type", "application/ocsp-request")
+	httpResp, err := v.cfg.httpClient.Do(req)
 	if err != nil {
 		return false, false
 	}
 	defer func() { _ = httpResp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(httpResp.Body, maxRevocationBody))
+	body, err := readAllCtx(v.ctx, httpResp.Body, maxRevocationBody)
 	if err != nil {
 		return false, false
 	}
@@ -86,11 +93,18 @@ func (v *validator) ocspRevoked(leaf, issuer *x509.Certificate) (revoked, ok boo
 // fail like ocspRevoked.
 func (v *validator) crlRevoked(leaf, issuer *x509.Certificate) (revoked, ok bool) {
 	for _, url := range leaf.CRLDistributionPoints {
-		httpResp, err := v.cfg.httpClient.Get(url)
+		if v.ctx.Err() != nil {
+			return false, false
+		}
+		req, err := http.NewRequestWithContext(v.ctx, http.MethodGet, url, nil)
 		if err != nil {
 			continue
 		}
-		body, err := io.ReadAll(io.LimitReader(httpResp.Body, maxRevocationBody))
+		httpResp, err := v.cfg.httpClient.Do(req)
+		if err != nil {
+			continue
+		}
+		body, err := readAllCtx(v.ctx, httpResp.Body, maxRevocationBody)
 		_ = httpResp.Body.Close()
 		if err != nil {
 			continue
