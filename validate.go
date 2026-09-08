@@ -56,6 +56,19 @@ type ValidationResult struct {
 	// whether the actor is Trusted; identities in ingredient manifests are
 	// validated (their statuses carry their URIs) but not listed.
 	Identities []Identity
+
+	// SoftBindings are the ACTIVE manifest's soft binding assertions
+	// (c2pa.soft-binding), in assertion-store order: perceptual identifiers
+	// that let a re-encoded copy be matched to this manifest, or a stripped
+	// manifest be recovered from a provenance store elsewhere.
+	//
+	// Each is AS PRESENTED and none is proven — this library computes no soft
+	// binding algorithm, so it neither confirms nor refutes a match; see
+	// SoftBinding. Soft bindings in ingredient manifests are decoded and
+	// checked (their statuses carry their own URIs) but NOT listed here: one
+	// identifies the content of the manifest that carries it, so an
+	// ingredient's identifies an earlier work rather than these bytes.
+	SoftBindings []SoftBinding
 	// Binding says what the ACTIVE manifest's hard binding proved about THESE
 	// bytes: verified, failed, unevaluated, or none. It is the question "were
 	// these the signed bytes?" answered directly; see BindingState.
@@ -582,6 +595,11 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 			"ingredient manifest hard binding not evaluated (original asset bytes unavailable)", nil)
 	}
 	// Ingredients: recursively validate referenced nested manifests.
+	// Soft bindings AFTER the hard binding, deliberately: a soft binding is
+	// never a content binding (§9.1), and running it here means it structurally
+	// cannot reach the first-wins bind decision that produced Binding.
+	v.verifySoftBindings(m, uri, depth)
+
 	v.validateIngredients(m, store, depth)
 }
 

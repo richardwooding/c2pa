@@ -29,8 +29,8 @@ one file:
   `bmff.go`, `riff.go`, `tiff.go`, `gif.go`, `mp3.go`, `svg.go`, `pdf.go`
 - **JUMBF** (parse the store): `boxes.go`
 - **validation**: `validate.go`, `cose_verify.go`, `chain.go`, `trust.go`, `revocation.go`,
-  `timestamp.go`, `ingredient.go`, `statuscodes.go`, `softbindingalgs.go` (the embedded C2PA soft
-  binding algorithm list)
+  `timestamp.go`, `ingredient.go`, `statuscodes.go`, `softbinding.go` (the `c2pa.soft-binding`
+  reader) + `softbindingalgs.go` (the embedded C2PA soft binding algorithm list)
 - **hard bindings**: `hashbinding.go` (dispatch + `c2pa.hash.data`), `bmffhash.go` (BMFF and
   Merkle — everything one file can settle), `fragmented.go` (`ValidateFragmented` — Merkle across an
   initialization segment and separate fragment files), `boxmap.go` + `boxeshash.go`
@@ -70,6 +70,12 @@ Public surface:
   `finish()`; a hard-binding step's `general.error` (a cancel or an unreadable fragment) is Unevaluated,
   any other failure Failed. A test hook (`bindHook`) fails a test on a second, different decision. A
   flat `hash` that held beside a merkle array only partly verified is Unevaluated — status-faithful.
+  `ValidationResult.SoftBindings []SoftBinding` lists the active manifest's `c2pa.soft-binding`
+  assertions — perceptual identifiers (a watermark, or a fingerprint) that let a re-encoded copy be
+  matched to this manifest, or a stripped manifest be recovered from a provenance store (§9.3.1).
+  Every field is AS PRESENTED; `WellFormed` is the only verdict and it is about the STRUCTURE. There
+  is deliberately no `Matched` and no `Valid` — see the soft-binding bullet under the validation
+  gotchas for why reporting is the honest position.
   `ValidationResult.Identities []Identity` lists the active manifest's CAWG identity assertions
   (`Identity{Label, URI, SigType, Roles, Referenced, Chain, SignedAt, Valid, Trusted}` and
   `Name()`, which is empty unless `Trusted` — the `VerifiedSigner` rule; see the CAWG bullets).
@@ -563,6 +569,40 @@ makes (`countingContext`) and asserting the contract at each point. The rules th
   tolerates that shape; nothing we have seen writes it), for claim, signature and assertions alike; the
   hashed_uri is unaffected either way because it covers the whole superbox payload. The corpus writes both
   shapes (`saltAll` in-jumd via `jumdBoxSalted`, `siblingSaltAll`); our own signer stays salt-free.
+- **Soft bindings (`softbinding.go`) are READ and REPORTED, never verified.** A `c2pa.soft-binding`
+  assertion (§18.10 — the label takes a **HYPHEN**, unlike every `c2pa.hash.*` label; the underscore
+  spelling circulates and is wrong) carries a perceptual identifier so content whose bits changed can
+  still be matched to its manifest. This library computes none of the 53 registered algorithms, and
+  that is deliberate rather than pending: verifying a soft binding means recomputing over the asset and
+  comparing within a TOLERANCE, and a tolerance is policy, not fact. So the public type has no
+  `Matched` and no `Valid`, only `WellFormed` (structure), and every well-formed one earns exactly one
+  informational `softBinding.unevaluated` — the `expected_*` treatment. Details that cost time to
+  establish:
+  - **`alg` resolution order**: the assertion's own `alg`, else the claim's `alg_soft` (§10.2.1); with
+    neither, the spec says outright that "the structure is invalid; there is no default", so that is
+    the failure `softBinding.alg.missing`. Mirrors `verifyAssertionHashes`'s claim-default-then-override
+    for the hash algorithm.
+  - **An unlisted algorithm is informational** (`softBinding.alg.unlisted`), a deliberate divergence
+    from §9.3.2 which requires a listed one: the list grows by third-party pull request and the spec's
+    OWN worked example uses `"alg": "phash"`, which nobody registered. The explanation names
+    `SoftBindingListSnapshot` so "unlisted" is actionable. The writer will refuse what the reader only
+    notes — strict out, liberal in.
+  - **§9.1 (never the sole content binding) is the EXISTING `hardBinding.missing`**, extended to say
+    so, and no new code. A check phrased "a soft binding without a hard binding is a failure" would
+    fail every correctly formed UPDATE manifest, which §11.2.3 forbids a hard binding.
+  - **It runs after the hard-binding step** (`validate.go`), so it structurally cannot reach the
+    first-wins `bind` decision. A soft binding must never move `Binding`, and the tests assert that on
+    every defect row.
+  - **`identityDecMode`, not `decMode`**: the decode reads keys then values, and fxamacker keeps the
+    LAST duplicate for a map and the FIRST for a struct, so duplicate keys must be refused or the two
+    stages could check one value and present another.
+  - **The region of interest is kept as RAW CBOR** and never decoded — a large structure worth nothing
+    to a library that evaluates no region, and modelling it would imply that it did. `extent` and `url`
+    are deprecated by the spec: carried, named in the explanation, and `url` is **never dereferenced**
+    (a manifest-controlled outbound request is an SSRF).
+  - **Divergence to remember**: the CDDL says `"alg-params": bstr`, while c2pa-rs models it as
+    `Option<String>` — so `Params` is carried verbatim and uninterpreted. The empty `scope`, and a
+    timespan whose `End < Start`, are presented as found: the spec assigns them no meaning.
 - **CAWG identity assertions (`cawg.go`, `cawgverify.go`).** A `cawg.identity` assertion (Creator
   Assertions Working Group, Identity Assertion 1.1 — a separate spec from C2PA's) is a named actor's
   COSE_Sign1 over a CBOR `signer_payload` that names some of the manifest's assertions by hashed_uri,

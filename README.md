@@ -220,6 +220,40 @@ for _, id := range r.Identities {
 }
 ```
 
+### What the content says about itself — soft bindings
+
+A hard binding is a hash of the bytes, so it dies the moment anything re-encodes the asset. A **soft
+binding** is the spec's answer (§9.3.1): a perceptual identifier — an embedded watermark, or a
+fingerprint computed from the content — so that a re-encoded copy can still be matched to its
+manifest, and a manifest *stripped* from an asset can be recovered from a provenance store elsewhere.
+
+`r.SoftBindings` lists the active manifest's, and this is the honest part: **they are reported, never
+verified.** This library computes none of the 53 registered algorithms, and it does not intend to —
+checking a soft binding means recomputing it over the asset and comparing within a *tolerance*, and a
+tolerance is a policy rather than a fact. So there is no `Matched` field to read, and no `Valid`:
+`WellFormed` is about the structure alone.
+
+```go
+r := c2pa.Validate(ctx, c2pa.JPEG, f, c2pa.WithSigningTrust(pool))
+for _, sb := range r.SoftBindings {
+    fmt.Println(sb.Algorithm, "registered:", sb.AlgorithmRegistered, sb.AlgorithmType)
+    for _, b := range sb.Blocks {
+        fmt.Printf("  %x over %+v\n", b.Value, b.Scope) // hand this to a matcher, or a resolution API
+    }
+}
+```
+
+`AlgorithmRegistered` says the algorithm appears in the [C2PA soft binding algorithm
+list](https://github.com/c2pa-org/softbinding-algorithm-list) as embedded in this build — a
+point-in-time snapshot (`c2pa.SoftBindingListSnapshot` dates it), so `false` may mean "registered
+upstream since" as much as "registered by nobody". §9.3.2 requires a listed algorithm, but an
+unlisted one is reported informationally rather than failed, because the list grows by third-party
+pull request and the spec's own worked example uses an identifier that is not in it.
+
+A soft binding is never a content binding: §9.1 allows any number of them but the hard binding is
+what proves *these* bytes, and `r.Binding` is that answer. A manifest bound only by a soft binding
+still reports `hardBinding.missing` and is not `Valid`.
+
 ### Fragmented BMFF (DASH / CMAF)
 
 A streaming asset ships as an initialization segment (`init.mp4`: `ftyp` + `moov`, carrying the
@@ -400,7 +434,9 @@ base_data_offset, every top-level `sidx` (first_offset and each `referenced_size
 moof_offset under `mfra`. A bare fragment — no `moov` — is still `ErrFragmentedBMFF`: that is
 `SignFragmented`'s input.
 
-**Limits.** Encrypted (`/Encrypt`) or
+**Limits.** No soft binding algorithm is implemented, so `Sign` writes no `c2pa.soft-binding`
+assertion yet and `Validate` reports the ones it finds without checking them (see above); encrypted
+(`/Encrypt`) or
 certified (`/Perms`) PDFs and ID3v2.2 MP3 tags are refused; only standard `c2pa.claim.v2` manifests
 are written (no update manifests); one CAWG identity per manifest, X.509 only (no aggregator
 credentials, no `expected_*` fields); the store must fit in 64 MiB and the asset under `ValidateMaxScan`.

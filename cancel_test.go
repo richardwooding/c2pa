@@ -93,6 +93,10 @@ func cancelAssets(t *testing.T) []cancelAsset {
 		{"corpus jpeg timestamped", JPEG, buildAsset(t, JPEG, manifestSpec{
 			signer: sb, claimV2: true, tsKind: 2, tsa: ta, assertions: []assertionSpec{markerAssertion()},
 		}), corpusOpts, StatusAssertionDataHashMatch},
+		// A soft binding adds a context check of its own, before it pronounces.
+		{"corpus jpeg soft binding", JPEG, buildAsset(t, JPEG, manifestSpec{
+			signer: sb, claimV2: true, assertions: []assertionSpec{markerAssertion(), softBindingSpec()},
+		}), corpusOpts, StatusAssertionDataHashMatch},
 		{"corpus png boxes", PNG, buildAsset(t, PNG, manifestSpec{signer: sb, assertions: []assertionSpec{markerAssertion()}}), corpusOpts, StatusAssertionDataHashMatch},
 		{"corpus pdf", PDF, buildAsset(t, PDF, manifestSpec{signer: sb, claimV2: true, assertions: []assertionSpec{markerAssertion()}}), corpusOpts, StatusAssertionDataHashMatch},
 		{"signed jpeg", JPEG, signed(JPEG), signOpts, StatusAssertionDataHashMatch},

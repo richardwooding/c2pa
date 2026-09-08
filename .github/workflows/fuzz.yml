@@ -38,6 +38,7 @@ jobs:
           - FuzzBMFFFragment
           - FuzzMerkleBoxDecode
           - FuzzMerkleProve
+          - FuzzSoftBinding
           - FuzzValidateFragmented
           - FuzzBoxMap
           - FuzzBoxesHash

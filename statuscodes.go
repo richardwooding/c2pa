@@ -110,6 +110,15 @@ const (
 	StatusIdentityPadInvalid         StatusCode = "cawg.identity.pad.invalid"
 	StatusIdentityCredentialRevoked  StatusCode = "cawg.identity.credential_revoked"
 
+	// Soft binding failures (spec §18.10), recorded at
+	// "<manifest label>/<assertion label>". Structural only: whether the bytes
+	// are a well-formed soft binding is checkable with certainty, whether the
+	// content matches is not — that is softBinding.unevaluated, informational.
+	// The C2PA specification defines no status codes for soft bindings.
+	StatusSoftBindingMalformed  StatusCode = "softBinding.malformed"
+	StatusSoftBindingAlgMissing StatusCode = "softBinding.alg.missing"
+	StatusSoftBindingPadInvalid StatusCode = "softBinding.pad.invalid"
+
 	// Identity claims aggregation failures (CAWG §8.1.5.6), at the identity
 	// assertion's URI. Not declared, having no emission site: did_unavailable
 	// (no DID is resolved over the network), untrusted_issuer (no issuer trust
@@ -136,6 +145,20 @@ const (
 	StatusRevocationUnknown StatusCode = "signingCredential.revocation.unknown"
 	StatusTimeStampMissing  StatusCode = "timeStamp.missing"
 	StatusUnsupported       StatusCode = "general.unsupported"
+
+	// Soft binding informationals (spec §18.10), at the assertion's URI.
+	// softBinding.unevaluated is the verdict on every well-formed soft binding:
+	// this library computes no soft binding algorithm, so a match is neither
+	// proved nor disproved. It is a code of its own rather than
+	// general.unsupported because that code is used for several unrelated
+	// things and a caller must be able to find THIS one.
+	// softBinding.alg.unlisted is an algorithm absent from the embedded
+	// snapshot of the C2PA algorithm list. §9.3.2 requires a listed algorithm,
+	// but the list grows by third-party pull request and the specification's own
+	// example uses an unregistered identifier, so failing on it would fail
+	// correct files — a deliberate divergence, see softbindings/README.md.
+	StatusSoftBindingUnevaluated StatusCode = "softBinding.unevaluated"
+	StatusSoftBindingAlgUnlisted StatusCode = "softBinding.alg.unlisted"
 	// StatusAssertionBoxesHashAdditionalExclusions reports that a box-hash
 	// assertion excluded something beyond the C2PA store itself — asset
 	// metadata, or a whole non-C2PA box skipped with "excluded": true. Those
@@ -193,6 +216,9 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusIdentityHardBindingMissing:     SeverityFailure,
 	StatusIdentitySigTypeUnknown:         SeverityFailure,
 	StatusIdentityPadInvalid:             SeverityFailure,
+	StatusSoftBindingMalformed:           SeverityFailure,
+	StatusSoftBindingAlgMissing:          SeverityFailure,
+	StatusSoftBindingPadInvalid:          SeverityFailure,
 	StatusIdentityCredentialRevoked:      SeverityFailure,
 	StatusICAInvalidCOSESign1:            SeverityFailure,
 	StatusICAInvalidAlg:                  SeverityFailure,
@@ -213,6 +239,9 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusRevocationUnknown: SeverityInformational,
 	StatusTimeStampMissing:  SeverityInformational,
 	StatusUnsupported:       SeverityInformational,
+
+	StatusSoftBindingUnevaluated: SeverityInformational,
+	StatusSoftBindingAlgUnlisted: SeverityInformational,
 
 	StatusAssertionBoxesHashAdditionalExclusions: SeverityInformational,
 }
