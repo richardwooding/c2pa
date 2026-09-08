@@ -452,7 +452,30 @@ m := c2pa.Manifest{
 ```
 
 `Sign` refuses an algorithm the embedded snapshot does not name — strict in what it emits, where
-`Validate` is liberal in what it accepts — and refuses a block with no value. The hard binding is
+`Validate` is liberal in what it accepts — and refuses a block with no value.
+
+**What goes in `Value`?** For an ISCC (`io.iscc.v0`, ISO 24138 — the one open algorithm on the list),
+the parts are [`fingerprint.ISCCPixels`](https://github.com/richardwooding/fingerprint) for the
+normalisation and [`iscc-lib`](https://github.com/iscc/iscc-lib) for the code:
+
+```go
+pixels, _ := fingerprint.ISCCPixelsFromReader(f)
+code, _ := iscc.GenImageCodeV0(pixels, 64)   // ISCC:EEA4GQZQTY6J5DTH
+dec, _ := iscc.IsccDecode(code.Iscc)
+
+m.SoftBindings = []c2pa.SoftBindingInfo{{
+    Algorithm: "io.iscc.v0",
+    Name:      code.Iscc,                                    // the canonical string, for humans
+    Blocks:    []c2pa.SoftBindingBlockInfo{{Value: dec.Digest}}, // the raw digest, for matchers
+}}
+```
+
+The byte format is **a choice, not a rule**: the spec says only "algorithm specific format" and the
+registry entry for ISCC defines none. The raw digest is used because the CDDL asks for a `bstr`
+where a text identifier would have wanted a `tstr`, because the Resolution API base64s the value,
+and because `alg` plus the length already say what the bytes are — with the canonical string carried
+in `Name` so nothing is lost. It is unverified against any third-party resolver, there being none to
+verify against. `c2pa-mcp` does this end to end if you would rather not. The hard binding is
 still written, as §9.1 requires. c2patool reads the result and its verdict is unchanged, which the
 interop suite asserts.
 

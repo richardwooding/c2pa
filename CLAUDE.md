@@ -630,6 +630,18 @@ makes (`countingContext`) and asserting the contract at each point. The rules th
     snapshot can block a writer — accepted deliberately, with the drift check as the mitigation.
     `c2pa.soft-binding` joined `reservedAssertionLabel`, so the untyped `Manifest.Assertions` path
     can no longer write one: it cannot get the byte strings, the pad or the algorithm check right.
+  - **What goes in `value` for `io.iscc.v0`, and why it is a choice.** The spec says only
+    "algorithm specific format", and the registry entry for ISCC defines nothing — no format note,
+    no resolution API. So this is decided rather than discovered: **the raw ISCC-UNIT digest**
+    (8 bytes at 64 bits, from `iscc.IsccDecode(code).Digest`), with the canonical `ISCC:…` string
+    in the assertion's `name`. The reasoning, so it can be revisited on evidence: the CDDL says
+    `bstr` where a `tstr` would be the natural type for a text identifier; the one registered
+    algorithm with public docs (`com.joinmonolith.sha256`) is a hash, i.e. raw bytes; the Soft
+    Binding Resolution API base64s the value, which suits binary; and the digest is unambiguous in
+    context, since `alg` names the algorithm and the length gives the bit width. Putting the
+    canonical string in `name` means a human or a tool reading the manifest still sees
+    `ISCC:EEA4GQZQTY6J5DTH`. **Unverified against any third-party resolver** — there is nothing to
+    verify it against yet.
   - **The self-check counts them.** `res.Valid` alone would not notice a soft binding dropped from
     the store or one whose value encoded as something the reader refuses — the output would be
     perfectly valid without it. So `sign()` requires `len(res.SoftBindings)` to equal what it wrote
