@@ -603,6 +603,21 @@ makes (`countingContext`) and asserting the contract at each point. The rules th
   - **Divergence to remember**: the CDDL says `"alg-params": bstr`, while c2pa-rs models it as
     `Option<String>` — so `Params` is carried verbatim and uninterpreted. The empty `scope`, and a
     timespan whose `End < Start`, are presented as found: the spec assigns them no meaning.
+  - **What c2patool 0.27.16 actually does** (probed 2026-09-08, findings worth not re-deriving):
+    it **reads and reports** a soft binding we write, prints it under `assertions`, keeps
+    `validation_state: Trusted`, and **validates nothing about it** — no soft-binding status code
+    exists on its side, so its verdict on a soft-binding-bearing asset is identical to one without.
+    A bstr `alg-params` is accepted and printed base64, which is why `Params` ships as the CDDL's
+    `bstr` despite c2pa-rs's `Option<String>`. But its own **`-m` manifest-definition JSON cannot
+    write one correctly**: JSON has no byte-string type, so `"value": [1,2,3,4]` and `"pad": []`
+    become CBOR ARRAYS (`84 01 02 03 04`, `80`), which our reader rightly calls
+    `softBinding.malformed`. That is the CLI's generic-assertion path, not c2pa-rs's typed
+    `SoftBinding` model — which uses `serde_bytes` and would produce a bstr — so do NOT coerce an
+    array here to accommodate it.
+  - **Probing needs a REAL asset.** The corpus's synthetic JPEG is a 20-byte stub
+    (`unsignedCorpusAsset`) and c2pa-rs will not read a store out of it at all ("C2PA provenance not
+    found in XMP"), whatever the manifest contains. Any c2patool probe has to go through `Sign` over
+    an encoder's output, as `sign_interop_test.go` does.
 - **CAWG identity assertions (`cawg.go`, `cawgverify.go`).** A `cawg.identity` assertion (Creator
   Assertions Working Group, Identity Assertion 1.1 — a separate spec from C2PA's) is a named actor's
   COSE_Sign1 over a CBOR `signer_payload` that names some of the manifest's assertions by hashed_uri,
