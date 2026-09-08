@@ -61,3 +61,15 @@ jobs:
             exit 1
           fi
           echo "trust lists match upstream"
+
+      # The soft binding algorithm list is the same kind of snapshot, and drift
+      # means an algorithm someone registered upstream reads as unlisted here —
+      # and the WRITER refuses it outright. See softbindings/README.md.
+      - name: Soft-binding algorithm list drift
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/c2pa-org/softbinding-algorithm-list/main/softbinding-algorithm-list.json -o /tmp/sbal.json
+          if ! diff -q softbindings/softbinding-algorithm-list.json /tmp/sbal.json; then
+            echo "::error::the embedded soft binding algorithm list has drifted from c2pa-org/softbinding-algorithm-list — refresh softbindings/ (see its README)"
+            exit 1
+          fi
+          echo "soft binding algorithm list matches upstream"

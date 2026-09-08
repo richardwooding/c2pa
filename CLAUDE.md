@@ -29,7 +29,8 @@ one file:
   `bmff.go`, `riff.go`, `tiff.go`, `gif.go`, `mp3.go`, `svg.go`, `pdf.go`
 - **JUMBF** (parse the store): `boxes.go`
 - **validation**: `validate.go`, `cose_verify.go`, `chain.go`, `trust.go`, `revocation.go`,
-  `timestamp.go`, `ingredient.go`, `statuscodes.go`
+  `timestamp.go`, `ingredient.go`, `statuscodes.go`, `softbindingalgs.go` (the embedded C2PA soft
+  binding algorithm list)
 - **hard bindings**: `hashbinding.go` (dispatch + `c2pa.hash.data`), `bmffhash.go` (BMFF and
   Merkle — everything one file can settle), `fragmented.go` (`ValidateFragmented` — Merkle across an
   initialization segment and separate fragment files), `boxmap.go` + `boxeshash.go`
@@ -755,6 +756,18 @@ makes (`countingContext`) and asserting the contract at each point. The rules th
   given**, never sorted. Two deliberate divergences from c2pa-rs: the APP11 run must be contiguous,
   and boxes the assertion never names are `assertion.boxesHash.unknownBox` rather than silently
   unbound — c2pa-rs stops when its own list runs out, which leaves an appended trailer unchecked.
+- **The C2PA soft binding algorithm list is embedded too** (`go:embed
+  softbindings/softbinding-algorithm-list.json`, read through `SoftBindingAlgorithms()` /
+  `LookupSoftBindingAlgorithm()` behind a `sync.Once`, the `trust.go` shape). It exists so a report can
+  tell **"a registered algorithm we cannot compute"** from **"an identifier nobody registered"** — this
+  library implements no soft binding algorithm. Unlike the trust lists, staleness here degrades a
+  reported FIELD rather than a verdict: an unlisted algorithm is informational, never a failure,
+  because the list grows by third-party pull request and the spec's own worked example uses
+  `"alg": "phash"`, which is not in it. The asymmetry that follows is intentional — the writer refuses
+  an algorithm the snapshot does not name, the reader only notes it. `entryMetadata.contact` is
+  deliberately not parsed (a personal address, no validation use). Weekly drift check in `corpus.yml`,
+  counts pinned by `TestSoftBindingRegistry`, provenance in `softbindings/README.md`. The snapshot date
+  is public (`SoftBindingListSnapshot`) because "unlisted" is only meaningful alongside it.
 - **Trust lists are embedded via `go:embed trustlists/*.pem`.** `C2PA-TRUST-LIST.pem` (signing
   anchors) and `C2PA-TSA-TRUST-LIST.pem` (TSA anchors) are the official C2PA conformance lists; they
   go stale — refresh from `c2pa-org/conformance-public`. Callers override via `WithSigningTrust` /
