@@ -433,14 +433,22 @@ func TestIdentityUnevaluatedFields(t *testing.T) {
 	}
 }
 
-func TestIdentityClaimsAggregationRecognised(t *testing.T) {
+func TestIdentityClaimsAggregationEvaluated(t *testing.T) {
+	// An X.509-shaped signature labelled as an aggregation credential is now
+	// evaluated as one — and fails as one: no application/vc content type, no
+	// embedded credential. Its structural checks still run first.
 	claimSB, idSB := identitySigners(t)
 	asset := identityAsset(t, claimSB, idSB, idSigType(identitySigTypeICA))
 	res := runCorpus(t, JPEG, asset, claimSB, WithIdentityTrust(idSB.roots))
-	if !res.Valid {
-		t.Fatalf("an unevaluated credential is informational, not a failure: %v", codes(res))
+	if res.Valid {
+		t.Fatalf("a credential that is not a verifiable credential must fail: %v", codes(res))
 	}
-	if !hasAt(res, StatusUnsupported, identityURI) || hasAt(res, StatusIdentityWellFormed, identityURI) || hasAt(res, StatusIdentitySigTypeUnknown, identityURI) {
+	for _, want := range []StatusCode{StatusICAInvalidContentType, StatusICAInvalidVerifiableCredential} {
+		if !hasAt(res, want, identityURI) {
+			t.Errorf("missing %s: %v", want, codes(res))
+		}
+	}
+	if hasAt(res, StatusIdentityWellFormed, identityURI) || hasAt(res, StatusICACredentialValid, identityURI) || hasAt(res, StatusIdentitySigTypeUnknown, identityURI) {
 		t.Errorf("statuses: %v", codes(res))
 	}
 	if len(res.Identities) != 1 || res.Identities[0].Valid || res.Identities[0].SigType != identitySigTypeICA || len(res.Identities[0].Chain) != 0 {

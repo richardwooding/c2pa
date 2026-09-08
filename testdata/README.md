@@ -148,3 +148,17 @@ Its bytes also pin the wire order c2pa-rs uses for the assertion (`signer_payloa
 `pad1`, `pad2`; `referenced_assertions`, `sig_type`, `role`; `url`, `hash`) —
 `TestCAWGFixtureEncodingParity` re-encodes it and requires equality, because c2patool re-serialises
 `signer_payload` in that order before verifying an identity signature.
+
+## cawg_ica.jpg
+
+`success.jpg` from [contentauth/c2pa-rs](https://github.com/contentauth/c2pa-rs)'s identity
+claims aggregation fixtures (`sdk/src/identity/tests/fixtures/claim_aggregation/ica_validation/`),
+licensed under Apache-2.0 / MIT (the c2pa-rs dual license). A 1.x claim (`c2pa.claim`,
+`make_test_images/0.33.1`) whose `cawg.identity` assertion carries an **identity claims
+aggregation credential** (`sig_type: cawg.identity_claims_aggregation`): a tagged COSE_Sign1,
+protected `alg` EdDSA and content type `application/vc`, embedded VC 2.0 JSON with four
+`verifiedIdentities` (a document verification, an affiliation, a social-media account and a crypto
+wallet), issuer `did:jwk:…` (an Ed25519 key in the identifier — resolved offline), `validFrom` in
+2025, no `validUntil`, no time-stamp. Its `c2paAsset.referenced_assertions[].hash` is a JSON array
+of the ASCII bytes of a base64 string — the c2pa-rs shape the parser accepts alongside a plain
+base64 string. The claim signer is the c2pa-rs test PKI, untrusted here.

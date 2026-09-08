@@ -222,6 +222,23 @@ func checkTimestampToken(der, tbs []byte) (timestampCheck, error) {
 // verifyTSAChain builds and validates the TSA certificate chain to the trusted
 // timestamp pool, requiring the id-kp-timeStamping EKU.
 func (v *validator) verifyTSAChain(signer *x509.Certificate, certs []*x509.Certificate, genTime time.Time, uri string) bool {
+	if err := v.tsaChainOK(signer, certs, genTime); err != nil {
+		var te *timestampError
+		if errors.As(err, &te) {
+			v.add(StatusTimeStampUntrusted, uri, te.explanation, te.cause)
+		} else {
+			v.add(StatusTimeStampUntrusted, uri, "timestamp authority not trusted", err)
+		}
+		return false
+	}
+	return true
+}
+
+// tsaChainOK is the trust half of a time-stamp check without the status: the
+// signer chains to the timestamp pool at genTime and carries the timestamping
+// EKU. The C2PA path records timeStamp.untrusted on error; the CAWG aggregation
+// path records its own code.
+func (v *validator) tsaChainOK(signer *x509.Certificate, certs []*x509.Certificate, genTime time.Time) error {
 	inter := x509.NewCertPool()
 	for _, c := range certs {
 		if c != signer {
@@ -234,14 +251,12 @@ func (v *validator) verifyTSAChain(signer *x509.Certificate, certs []*x509.Certi
 		CurrentTime:   genTime,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageTimeStamping},
 	}); err != nil {
-		v.add(StatusTimeStampUntrusted, uri, "timestamp authority not trusted", err)
-		return false
+		return &timestampError{explanation: "timestamp authority not trusted", cause: err, untrusted: true}
 	}
 	if !timestampEKUOK(signer) {
-		v.add(StatusTimeStampUntrusted, uri, "timestamp signer lacks id-kp-timeStamping EKU", nil)
-		return false
+		return &timestampError{explanation: "timestamp signer lacks id-kp-timeStamping EKU", untrusted: true}
 	}
-	return true
+	return nil
 }
 
 // cmsSignedData is the subset of a CMS SignedData the timestamp verifier needs.

@@ -15,7 +15,10 @@ import (
 // spec asks for the identity assertion's own URL, and keeping them off the
 // manifest's URI is what leaves VerifiedSigner's reading of the claim signer
 // untouched.
-func (v *validator) verifyIdentities(m *parsedManifest, uri string, depth int) {
+//
+// manifestSignedAt is the manifest's OWN trusted time-stamp (zero when it has
+// none): an aggregation credential's validity window is compared with it.
+func (v *validator) verifyIdentities(m *parsedManifest, uri string, depth int, manifestSignedAt time.Time) {
 	var entries []claimAssertionEntry
 	for _, a := range m.assertions {
 		if !isIdentityLabel(a.label) {
@@ -27,7 +30,7 @@ func (v *validator) verifyIdentities(m *parsedManifest, uri string, depth int) {
 		if entries == nil {
 			entries = claimAssertionEntries(m.claim)
 		}
-		id := v.verifyIdentity(m, a, entries, uri+"/"+a.label)
+		id := v.verifyIdentity(m, a, entries, uri+"/"+a.label, manifestSignedAt)
 		if depth == 0 {
 			v.res.Identities = append(v.res.Identities, id)
 		}
@@ -39,10 +42,10 @@ func (v *validator) verifyIdentities(m *parsedManifest, uri string, depth int) {
 // hashed-uri entries (assertion.mismatch / .duplicate / hard_binding_missing),
 // then the credential named by sig_type. An X.509 credential gets the C2PA
 // signature, time-stamp, chain and revocation checks at the identity's URI
-// (§8.2.2); an aggregator credential is reported as not evaluated. Only an
-// assertion with no failure of its own is well-formed, and trusted on top of
-// that when its chain reaches an identity anchor (§7.2.1, §9.3).
-func (v *validator) verifyIdentity(m *parsedManifest, a rawAssertion, entries []claimAssertionEntry, iuri string) Identity {
+// (§8.2.2); an aggregation credential gets the §8.1.5 checks (cawgica.go).
+// Only an assertion with no failure of its own is well-formed, and trusted on
+// top of that when its chain reaches an identity anchor (§7.2.1, §9.3).
+func (v *validator) verifyIdentity(m *parsedManifest, a rawAssertion, entries []claimAssertionEntry, iuri string, manifestSignedAt time.Time) Identity {
 	id := Identity{Label: a.label, URI: iuri}
 	start := len(v.res.Statuses)
 	if a.tbox != "cbor" {
@@ -69,8 +72,16 @@ func (v *validator) verifyIdentity(m *parsedManifest, a rawAssertion, entries []
 	case identitySigTypeX509:
 		id.Chain, id.SignedAt, trusted = v.verifyIdentityX509(ia, iuri)
 	case identitySigTypeICA:
-		v.add(StatusUnsupported, iuri,
-			"identity claims aggregation credential not evaluated (verifiable credential and DID resolution not implemented)", nil)
+		out := v.verifyIdentityICA(ia, sp, iuri, manifestSignedAt)
+		id.Issuer, id.VerifiedIdentities, id.SignedAt = out.issuer, out.identities, out.signedAt
+		if v.failedSince(start) {
+			return id
+		}
+		// No issuer trust list exists yet (the CAWG has published none), so
+		// a valid credential is well-formed, never trusted.
+		v.add(StatusICACredentialValid, iuri, "identity claims aggregation credential is valid", nil)
+		id.Valid = true
+		v.add(StatusIdentityWellFormed, iuri, "aggregation credential valid; issuer trust is not evaluated", nil)
 		return id
 	default:
 		v.add(StatusIdentitySigTypeUnknown, iuri, fmt.Sprintf("unrecognised sig_type %q", sp.SigType), nil)

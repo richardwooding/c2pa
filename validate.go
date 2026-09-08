@@ -535,7 +535,11 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 	// CAWG identity assertions: a named actor's own signature over some of
 	// those assertions. After the hashes, because that is what proves the
 	// identity bytes are the ones the claim signed (CAWG §7.1).
-	v.verifyIdentities(m, uri, depth)
+	manifestSignedAt := time.Time{}
+	if trusted {
+		manifestSignedAt = genTime
+	}
+	v.verifyIdentities(m, uri, depth, manifestSignedAt)
 	// Hard binding: the asset content hash must match. Only the active
 	// manifest's binding covers the asset being validated — an ingredient
 	// manifest's hard binding refers to the ingredient's ORIGINAL bytes, which
