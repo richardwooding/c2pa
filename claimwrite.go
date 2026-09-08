@@ -223,6 +223,9 @@ func bmffStandardSegment(ctx context.Context, data []byte) (bmffSegment, error) 
 		return bmffSegment{}, errors.New("standard BMFF exclusions did not decode")
 	}
 	seg, ok := newBMFFSegment(ctx, data, excl)
+	if err := ctx.Err(); err != nil {
+		return bmffSegment{}, err // a cut-short parse is not a malformed file
+	}
 	if !ok {
 		return bmffSegment{}, errors.New("no BMFF box structure to hash")
 	}
@@ -242,7 +245,9 @@ func bmffHashDigest(ctx context.Context, alg string, data []byte) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
-	hashBMFFTopLevel(ctx, seg.data, seg.top, seg.ranges, h)
+	if err := hashBMFFTopLevel(ctx, seg.data, seg.top, seg.ranges, h); err != nil {
+		return nil, err
+	}
 	return h.Sum(nil), nil
 }
 

@@ -74,6 +74,9 @@ func (v *validator) verifyBoxesHash(a *rawAssertion, uri, defaultAlg string) {
 		return
 	}
 	source, ok := assetBoxMap(v.ctx, v.container, v.data)
+	if v.cancelled(subj, "while mapping the asset's boxes") {
+		return // a cut-short map is not a missing one
+	}
 	if !ok {
 		v.add(StatusUnsupported, subj,
 			"box-hash verification is defined for JPEG, PNG and GIF; this container has no box map", nil)
@@ -94,6 +97,9 @@ func (v *validator) verifyBoxesHash(a *rawAssertion, uri, defaultAlg string) {
 
 	additional := false
 	for _, e := range entries {
+		if v.cancelled(subj, "while checking box hashes") {
+			return
+		}
 		if len(e.names) == 0 {
 			v.add(StatusAssertionBoxesHashMalformed, subj, "box-hash entry names no boxes", nil)
 			return
@@ -156,7 +162,10 @@ func (v *validator) verifyBoxesHash(a *rawAssertion, uri, defaultAlg string) {
 			v.add(StatusAlgorithmUnsupported, subj, "unsupported box-hash algorithm", nil)
 			return
 		}
-		writeGaps(v.data, spanStart, spanEnd, excl, h)
+		if writeGaps(v.ctx, v.data, spanStart, spanEnd, excl, h) != nil {
+			v.cancelled(subj, "while hashing a box") // a truncated digest is not a mismatch
+			return
+		}
 		if subtle.ConstantTimeCompare(h.Sum(nil), e.hash) != 1 {
 			v.add(StatusAssertionBoxesHashMismatch, subj,
 				"box hash does not match for "+quoteBoxName(boxes[0].name), nil)

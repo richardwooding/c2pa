@@ -70,7 +70,7 @@ func (s *Signer) SignFragmented(ctx context.Context, init io.Reader, fragments [
 	if err := validateManifest(m); err != nil {
 		return err
 	}
-	initData, err := readWholeAsset(init)
+	initData, err := readWholeAsset(ctx, init)
 	if err != nil {
 		return err
 	}
@@ -104,10 +104,16 @@ func (s *Signer) SignFragmented(ctx context.Context, init io.Reader, fragments [
 			return err
 		}
 		if leaves[i], err = bmffHashDigest(ctx, alg, prepared); err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr // a truncated digest is not a malformed fragment
+			}
 			return fmt.Errorf("fragment %d: %w: %v", i, ErrMalformedAsset, err)
 		}
 	}
-	layers := merkleLayers(alg, leaves)
+	layers, err := merkleLayers(ctx, alg, leaves)
+	if err != nil {
+		return err
+	}
 	src.leaf = leaves
 	src.box = func(location int) ([]byte, error) {
 		return merkleBoxBytes(merkleBoxSpec{uniqueID: 1, localID: 1, location: location, hashes: merkleProof(layers, location, rowIndex)}, padTo)
@@ -118,15 +124,26 @@ func (s *Signer) SignFragmented(ctx context.Context, init io.Reader, fragments [
 	// ValidateFragmented, regenerating each signed fragment on demand.
 	final, err := s.sign(ctx, BMFF, initData, m, &bmffMerkleBinding{alg: alg, count: n, row: layers[rowIndex], frags: src})
 	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr // whatever a lazy reader tripped over, the cancellation came first
+		}
 		if src.err != nil && errors.Is(err, ErrSelfCheckFailed) {
 			return src.err // a reader failing mid-check is the real error
 		}
 		return err
 	}
 
-	// Write: fragments first, the segment last.
+	// Write: fragments first, the segment last. This is the point of no return:
+	// a cancel that arrives before it is honoured with nothing written; one that
+	// arrives during it is not, because a set with half its fragments signed is
+	// worse than one finished late — so the fragments are regenerated under a
+	// context that no longer cancels.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	writeCtx := context.WithoutCancel(ctx)
 	for i := range fragments {
-		prepared, err := src.prepared(ctx, i)
+		prepared, err := src.prepared(writeCtx, i)
 		if err != nil {
 			return err
 		}
@@ -148,6 +165,9 @@ func (s *Signer) SignFragmented(ctx context.Context, init io.Reader, fragments [
 // outside the file once fragments are separate.
 func checkInitSegment(ctx context.Context, init []byte) error {
 	top := parseBMFFBoxes(ctx, init)
+	if err := ctx.Err(); err != nil {
+		return err // a cut-short parse is not a malformed segment
+	}
 	if len(top) == 0 {
 		return fmt.Errorf("%w: initialization segment has no BMFF box structure", ErrMalformedAsset)
 	}
@@ -194,11 +214,14 @@ type fragmentSource struct {
 }
 
 // read seeks fragment i back to its start and reads it under the scan cap.
-func (f *fragmentSource) read(i int) ([]byte, error) {
+func (f *fragmentSource) read(ctx context.Context, i int) ([]byte, error) {
 	if _, err := f.in[i].Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("%w: fragment %d: seek: %v", ErrFragmentSet, i, err)
 	}
-	data, err := io.ReadAll(io.LimitReader(f.in[i], int64(ValidateMaxScan)))
+	data, err := readAllCtx(ctx, f.in[i], ValidateMaxScan)
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, cerr
+	}
 	if err != nil {
 		return nil, fmt.Errorf("fragment %d: %w: %v", i, ErrMalformedAsset, err)
 	}
@@ -213,7 +236,7 @@ func (f *fragmentSource) read(i int) ([]byte, error) {
 
 // prepared is fragment i with its merkle box in place.
 func (f *fragmentSource) prepared(ctx context.Context, i int) ([]byte, error) {
-	data, err := f.read(i)
+	data, err := f.read(ctx, i)
 	if err != nil {
 		return nil, err
 	}
@@ -223,10 +246,16 @@ func (f *fragmentSource) prepared(ctx context.Context, i int) ([]byte, error) {
 	}
 	out, err := prepareFragment(ctx, data, box)
 	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
 		return nil, fmt.Errorf("fragment %d: %w", i, embedError(err))
 	}
 	if f.leaf != nil {
 		leaf, err := bmffHashDigest(ctx, f.alg, out)
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr // a truncated digest is not a changed fragment
+		}
 		if err != nil || !bytes.Equal(leaf, f.leaf[i]) {
 			return nil, fmt.Errorf("%w: fragment %d changed between passes", ErrFragmentSet, i)
 		}
@@ -235,10 +264,10 @@ func (f *fragmentSource) prepared(ctx context.Context, i int) ([]byte, error) {
 }
 
 // originals are the fragments as given, for validating the asset as found.
-func (f *fragmentSource) originals() []io.Reader {
+func (f *fragmentSource) originals(ctx context.Context) []io.Reader {
 	out := make([]io.Reader, len(f.in))
 	for i := range f.in {
-		out[i] = &lazyReader{src: f, gen: func() ([]byte, error) { return f.read(i) }}
+		out[i] = &lazyReader{src: f, gen: func() ([]byte, error) { return f.read(ctx, i) }}
 	}
 	return out
 }
@@ -311,7 +340,7 @@ func (bmffMerkleBinding) compareRanges(ctx context.Context, layout []byte, _ []b
 	return seg.ranges, nil
 }
 func (b *bmffMerkleBinding) validatePrior(ctx context.Context, asset []byte) ValidationResult {
-	return ValidateFragmented(ctx, bytes.NewReader(asset), b.frags.originals(), WithOnlineRevocation(false))
+	return ValidateFragmented(ctx, bytes.NewReader(asset), b.frags.originals(ctx), WithOnlineRevocation(false))
 }
 func (b *bmffMerkleBinding) validateOutput(ctx context.Context, final []byte, opts []ValidateOption) ValidationResult {
 	return ValidateFragmented(ctx, bytes.NewReader(final), b.frags.signed(ctx), opts...)

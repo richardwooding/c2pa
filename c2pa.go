@@ -33,9 +33,14 @@
 //
 // Read and Validate are best-effort and never panic: malformed or truncated
 // input yields zero values or failure statuses rather than an error. Every
-// input-scaled loop honours the supplied context.Context, so a cancelled call
-// surrenders promptly. Sign is the exception that returns an error — and it
-// writes nothing when it does.
+// input-scaled loop, every hash and every network request honours the supplied
+// context.Context, so a cancelled call surrenders promptly and says so: Read
+// and ReadAll return nothing (Info{} and nil), ExtractStore returns ctx.Err(),
+// Validate and ValidateFragmented record general.error carrying ctx.Err() — a
+// cancelled result is never Valid — and Sign and SignFragmented return an error
+// for which errors.Is(err, ctx.Err()) holds, having written nothing. Sign is
+// otherwise the exception that returns an error — and it writes nothing when it
+// does.
 package c2pa
 
 import (
@@ -180,14 +185,15 @@ var decMode = func() cbor.DecMode {
 // (Present=false) when there's no manifest. It never returns an error —
 // provenance is best-effort metadata, surfaced like EXIF.
 //
-// ctx is honoured at entry and inside the input-scaled scan loops, so a
-// cancelled call surrenders promptly mid-scan rather than parsing a full
-// adversarial header.
+// ctx is honoured throughout — the read, the input-scaled scan loops and the
+// manifest parse — and a cancelled call returns Info{} rather than whatever
+// had been parsed by then: a partial Info presented as complete would be the
+// read path's version of a false verdict.
 func Read(ctx context.Context, container Container, r io.Reader) Info {
 	if ctx.Err() != nil {
 		return Info{}
 	}
-	data, err := io.ReadAll(io.LimitReader(r, MaxScan))
+	data, err := readAllCtx(ctx, r, MaxScan)
 	if err != nil || len(data) == 0 {
 		return Info{}
 	}
@@ -223,6 +229,9 @@ func Read(ctx context.Context, container Container, r io.Reader) Info {
 	info := parseManifest(ctx, jumbf)
 	if info.Present {
 		info.Attribution = attribution
+	}
+	if ctx.Err() != nil {
+		return Info{} // the scan or the parse was cut short; nothing here is whole
 	}
 	return info
 }
@@ -319,6 +328,9 @@ func parseManifest(ctx context.Context, jumbf []byte) Info {
 		info.Format, _ = m.claim["dc:format"].(string)
 	}
 	for i := range m.assertions {
+		if ctx.Err() != nil {
+			return info
+		}
 		a := &m.assertions[i]
 		isActions := strings.HasSuffix(a.label, "c2pa.actions") || strings.Contains(a.label, "c2pa.actions.v")
 		if a.tbox != "cbor" || !isActions {
@@ -525,13 +537,13 @@ func ReadAll(ctx context.Context, container Container, r io.Reader) []Info {
 	if ctx.Err() != nil {
 		return nil
 	}
-	data, err := io.ReadAll(io.LimitReader(r, MaxScan))
+	data, err := readAllCtx(ctx, r, MaxScan)
 	if err != nil || len(data) == 0 {
 		return nil
 	}
 	if container != PDF {
 		info := parseManifest(ctx, extractJUMBF(ctx, container, data))
-		if !info.Present {
+		if !info.Present || ctx.Err() != nil {
 			return nil
 		}
 		info.Attribution = AttributionAsset
@@ -568,6 +580,9 @@ func ReadAll(ctx context.Context, container Container, r io.Reader) []Info {
 			add(store, AttributionUnknown)
 		}
 	}
+	if ctx.Err() != nil {
+		return nil // a shorter list is not the document's list
+	}
 	return out
 }
 
@@ -594,26 +609,33 @@ func pdfAttribution(src pdfStoreSource) Attribution {
 // store can sit at the very end of a large asset (a PDF's incremental update,
 // a BMFF box after mdat), and a viewer should find whatever Validate
 // validates. Read keeps its 16 MiB triage cap by design. A nil store is "none
-// found", not a failure — err is non-nil only when r itself errors.
+// found", not a failure — err is non-nil only when r itself errors or ctx ends,
+// in which case the store is nil too: a truncated box tree is not the store.
 func ExtractStore(ctx context.Context, container Container, r io.Reader) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(io.LimitReader(r, ValidateMaxScan))
+	data, err := readAllCtx(ctx, r, ValidateMaxScan)
 	if err != nil {
 		return nil, err
 	}
 	if len(data) == 0 {
 		return nil, nil
 	}
-	return extractJUMBF(ctx, container, data), nil
+	store := extractJUMBF(ctx, container, data)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return store, nil
 }
 
 // WalkBoxes recursively walks a JUMBF box tree, invoking fn(label, tbox,
 // content) for every leaf box. label is the nearest enclosing superbox's jumd
 // label, tbox is the 4-character box type, and content is the box payload.
 // Nesting is capped at an internal depth limit so adversarial input cannot
-// exhaust the stack; ctx is honoured at the top of every iteration.
+// exhaust the stack; ctx is honoured at the top of every iteration, and the
+// walk simply stops when it ends — check ctx.Err() afterwards to tell a
+// cancelled walk from a short store.
 //
 // This is a lower-level primitive — most callers want Read. It is exported for
 // advanced use (e.g. surfacing assertions Read does not model).

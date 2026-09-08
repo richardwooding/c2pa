@@ -157,7 +157,7 @@ func jpegBoxMap(ctx context.Context, data []byte) []assetBox {
 		size := 2 + ln
 		payload := data[i+4 : i+2+ln]
 		if m == 0xDA { // SOS: the box covers the entropy-coded scan too
-			n := jpegEntropySize(data[i+size:])
+			n := jpegEntropySize(ctx, data[i+size:])
 			if n < 0 {
 				return nil // the scan never reaches a terminating marker
 			}
@@ -250,8 +250,11 @@ func jpegMarkerName(m byte) string {
 // either stuffed (0xFF00) or a restart marker (0xFFD0…0xFFD7); anything else
 // ends it. Returns -1 when the scan runs off the end of the data, which means
 // the file is truncated and its box map cannot be trusted.
-func jpegEntropySize(rest []byte) int {
+func jpegEntropySize(ctx context.Context, rest []byte) int {
 	for i := 0; i < len(rest); {
+		if i&0xFFFF == 0 && ctx.Err() != nil {
+			return -1 // the scan can be the whole file
+		}
 		if rest[i] != 0xFF {
 			i++
 			continue

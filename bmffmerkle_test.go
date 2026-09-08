@@ -171,7 +171,7 @@ func TestBMFFMerkleRootRow(t *testing.T) {
 // NOT duplicated and hashed with itself.
 func TestBMFFMerkleUnpairedLeafIsCarriedUp(t *testing.T) {
 	leaves := [][]byte{{1}, {2}, {3}}
-	layers := merkleLayers("sha256", leaves)
+	layers := mustLayers("sha256", leaves)
 	if len(layers) != 3 {
 		t.Fatalf("got %d layers, want 3", len(layers))
 	}
@@ -288,7 +288,7 @@ func TestBMFFMerkleMalformed(t *testing.T) {
 // assertion's size into ours.
 func TestBMFFMerkleLeafCountIsCapped(t *testing.T) {
 	mdat := &bmffBox{typ: "mdat", start: 0, end: mdatBlockPrefix + (maxMerkleLeaves+1)*2}
-	_, status := merkleLeafRanges(mdat, merkleMap{
+	_, status := merkleLeafRanges(context.Background(), mdat, merkleMap{
 		count: 2, hasFixed: true, fixedBlockSize: 2,
 	})
 	if status != StatusAssertionBMFFHashMalformed {
@@ -333,7 +333,7 @@ func standardBMFFExclusions() ([]bmffExclusion, []any) {
 // merkleRow returns the row with n nodes of the sha256 tree over leaves.
 func merkleRow(t testing.TB, leaves [][]byte, n int) [][]byte {
 	t.Helper()
-	for _, layer := range merkleLayers("sha256", leaves) {
+	for _, layer := range mustLayers("sha256", leaves) {
 		if len(layer) == n {
 			return layer
 		}
@@ -348,7 +348,7 @@ func merkleRow(t testing.TB, leaves [][]byte, n int) [][]byte {
 // row itself is stored.
 func merkleProofFor(t testing.TB, leaves [][]byte, location, storedRowLen int) [][]byte {
 	t.Helper()
-	layers := merkleLayers("sha256", leaves)
+	layers := mustLayers("sha256", leaves)
 	for row, layer := range layers {
 		if len(layer) == storedRowLen {
 			return merkleProof(layers, location, row)
@@ -424,18 +424,18 @@ func fragmentedFlatAsset(t testing.TB, n, storedRowLen, uniqueID, localID int, m
 	if len(top) != 2+3*n {
 		t.Fatalf("laid out %d top-level boxes, want %d", len(top), 2+3*n)
 	}
-	ranges := bmffExclusionByteRanges(layout, top, excl)
+	ranges := bmffExclusionByteRanges(context.Background(), layout, top, excl)
 	ff := flatFragmented{leaves: make([][]byte, n), moovStart: len(ftyp), moofStart: make([]int, n), mdatStart: make([]int, n)}
 	for k := 0; k < n; k++ {
 		moof, mdat := top[2+3*k+1], top[2+3*k+2]
 		h := sha256.New()
-		hashBMFFTopLevel(ctx, layout, []*bmffBox{moof, mdat}, ranges, h)
+		_ = hashBMFFTopLevel(ctx, layout, []*bmffBox{moof, mdat}, ranges, h)
 		ff.leaves[k] = h.Sum(nil)
 		ff.moofStart[k], ff.mdatStart[k] = moof.start, mdat.start
 	}
 	firstMoof := ff.moofStart[0]
 	h := sha256.New()
-	hashBMFFTopLevel(ctx, layout, top, mergeRanges(append(append([]byteRange(nil), ranges...),
+	_ = hashBMFFTopLevel(ctx, layout, top, mergeRanges(append(append([]byteRange(nil), ranges...),
 		byteRange{start: firstMoof, length: len(layout) - firstMoof})), h)
 	initHash := h.Sum(nil)
 
@@ -490,7 +490,7 @@ func fragmentedFiles(t testing.TB, n, storedRowLen, uniqueID, localID int, o spl
 	sf.init = append(synthBox("ftyp", []byte("iso6")), synthBox("moov", bytes.Repeat([]byte{fill}, 24))...)
 	initTop := parseBMFFBoxes(ctx, sf.init)
 	h := sha256.New()
-	hashBMFFTopLevel(ctx, sf.init, initTop, bmffExclusionByteRanges(sf.init, initTop, excl), h)
+	_ = hashBMFFTopLevel(ctx, sf.init, initTop, bmffExclusionByteRanges(context.Background(), sf.init, initTop, excl), h)
 	initHash := h.Sum(nil)
 
 	fragment := func(k int, box []byte) []byte {
@@ -507,7 +507,7 @@ func fragmentedFiles(t testing.TB, n, storedRowLen, uniqueID, localID int, o spl
 	hashFragment := func(frag []byte) []byte {
 		top := parseBMFFBoxes(ctx, frag)
 		h := sha256.New()
-		hashBMFFTopLevel(ctx, frag, top, bmffExclusionByteRanges(frag, top, excl), h)
+		_ = hashBMFFTopLevel(ctx, frag, top, bmffExclusionByteRanges(context.Background(), frag, top, excl), h)
 		return h.Sum(nil)
 	}
 	for k := range sf.leaves {
@@ -766,7 +766,7 @@ func TestMerkleLayout(t *testing.T) {
 		for i := range leaves {
 			leaves[i] = []byte{byte(i)}
 		}
-		layers := merkleLayers("sha256", leaves)
+		layers := mustLayers("sha256", leaves)
 		widths := merkleLayout(n)
 		if len(widths) != len(layers) {
 			t.Fatalf("n=%d: layout has %d rows, tree has %d", n, len(widths), len(layers))
@@ -846,7 +846,7 @@ func TestBMFFChunks(t *testing.T) {
 	box := func(typ string) *bmffBox { return &bmffBox{typ: typ} }
 	top := []*bmffBox{box("ftyp"), box("moov"), box("uuid"), box("moof"), box("mdat"),
 		box("uuid"), box("moof"), box("mdat"), box("free")}
-	chunks := bmffChunks(top)
+	chunks := bmffChunks(context.Background(), top)
 	if len(chunks) != 2 {
 		t.Fatalf("got %d chunks, want 2", len(chunks))
 	}
@@ -856,10 +856,10 @@ func TestBMFFChunks(t *testing.T) {
 	if len(chunks[1]) != 3 || chunks[1][0] != top[6] || chunks[1][2] != top[8] {
 		t.Errorf("chunk 1 should run to the end of the file; got %d boxes", len(chunks[1]))
 	}
-	if got := bmffChunks([]*bmffBox{box("moof"), box("mdat")}); got != nil {
+	if got := bmffChunks(context.Background(), []*bmffBox{box("moof"), box("mdat")}); got != nil {
 		t.Errorf("a file that opens with 'moof' is a bare fragment, not fragmented content: %d chunks", len(got))
 	}
-	if got := bmffChunks([]*bmffBox{box("ftyp"), box("moov"), box("mdat")}); got != nil {
+	if got := bmffChunks(context.Background(), []*bmffBox{box("ftyp"), box("moov"), box("mdat")}); got != nil {
 		t.Errorf("a file with no 'moof' has no chunks: %d", len(got))
 	}
 }
@@ -917,7 +917,7 @@ func TestBMFFMerkleWithFlatHash(t *testing.T) {
 	asset, _ := merkleAsset(t, payload)
 	top := parseBMFFBoxes(context.Background(), asset)
 	h := sha256.New()
-	hashBMFFTopLevel(context.Background(), asset, top, nil, h)
+	_ = hashBMFFTopLevel(context.Background(), asset, top, nil, h)
 	flat := h.Sum(nil)
 	leaves := leafDigests(t, payload, []int{30, 30})
 

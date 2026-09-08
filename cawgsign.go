@@ -149,7 +149,7 @@ func (s *Signer) signIdentity(ctx context.Context, sp identitySignerPayload, cos
 		}
 		token, err := s.fetchTimestamp(ctx, tbs)
 		if err != nil {
-			return nil, nil, fmt.Errorf("%w: identity: %v", ErrTimestamp, err)
+			return nil, nil, fmt.Errorf("%w: identity: %w", ErrTimestamp, err)
 		}
 		attachSigTst2(msg, token)
 		if sd, ok := parseCMSSignedData(token); ok {

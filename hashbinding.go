@@ -1,6 +1,7 @@
 package c2pa
 
 import (
+	"context"
 	"crypto"
 	"crypto/subtle"
 	"hash"
@@ -25,6 +26,9 @@ func (v *validator) verifyAssertionHashes(m *parsedManifest, uri string) {
 	}
 	defaultAlg, _ := m.claim["alg"].(string)
 	for _, e := range entries {
+		if v.cancelled(uri, "while checking assertion hashes") {
+			return
+		}
 		label := assertionLabelFromURL(e.url)
 		a, ok := byLabel[label]
 		if !ok {
@@ -40,7 +44,10 @@ func (v *validator) verifyAssertionHashes(m *parsedManifest, uri string) {
 			v.add(StatusAlgorithmUnsupported, e.url, "unsupported assertion hash algorithm", nil)
 			continue
 		}
-		h.Write(a.boxContent)
+		if hashWrite(v.ctx, h, a.boxContent) != nil {
+			v.cancelled(e.url, "while hashing an assertion") // a truncated digest is not a mismatch
+			return
+		}
 		if subtle.ConstantTimeCompare(h.Sum(nil), e.hash) == 1 {
 			v.add(StatusAssertionHashedURIMatch, e.url, "assertion hash matches", nil)
 		} else {
@@ -149,7 +156,10 @@ func (v *validator) verifyDataHash(a *rawAssertion, uri string) {
 		return
 	}
 
-	hashWithExclusions(v.data, h, ranges)
+	if hashWithExclusions(v.ctx, v.data, h, ranges) != nil {
+		v.cancelled(subj, "while hashing the asset") // a truncated digest is not a mismatch
+		return
+	}
 	if subtle.ConstantTimeCompare(h.Sum(nil), want) == 1 {
 		v.add(StatusAssertionDataHashMatch, subj, "asset data hash matches", nil)
 	} else {
@@ -206,20 +216,24 @@ func mergeRanges(rs []byteRange) []byteRange {
 }
 
 // hashWithExclusions writes the asset to h, skipping the (sorted, merged,
-// in-bounds) excluded ranges.
-func hashWithExclusions(data []byte, h hash.Hash, ranges []byteRange) {
+// in-bounds) excluded ranges. It returns the context's error when cancelled
+// mid-way, and h is then not to be compared with anything.
+func hashWithExclusions(ctx context.Context, data []byte, h hash.Hash, ranges []byteRange) error {
 	cur := 0
 	for _, r := range ranges {
 		if r.start > cur {
-			h.Write(data[cur:r.start])
+			if err := hashWrite(ctx, h, data[cur:r.start]); err != nil {
+				return err
+			}
 		}
 		if end := r.start + r.length; end > cur {
 			cur = end
 		}
 	}
 	if cur < len(data) {
-		h.Write(data[cur:])
+		return hashWrite(ctx, h, data[cur:])
 	}
+	return ctx.Err()
 }
 
 // claimAssertionEntry is one entry of the claim's assertions[] array.

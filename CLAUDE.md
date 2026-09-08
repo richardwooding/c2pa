@@ -345,8 +345,11 @@ empty for that whole generation of files.
 - **`maxJUMBFDepth` (64) caps recursion.** JUMBF `jumb` superboxes nest, and a chain of nested boxes
   (each stripping only an 8-byte header) could otherwise nest ~MaxScan/8 levels and blow the stack on
   adversarial input. Real manifests nest ~4 deep. Don't remove the cap.
-- **Everything is best-effort and must never panic.** Malformed/truncated/cancelled input returns
-  zero values. The RFC 3161 ASN.1 descent (`rfc3161GenTime`) is deliberately defensive at every
+- **Everything is best-effort and must never panic.** Malformed/truncated input returns zero values
+  or failure statuses; a CANCELLED call returns the cancellation, never a partial result presented as
+  complete — `Read`/`ReadAll` → nothing, `ExtractStore` → `ctx.Err()`, `Validate` → `general.error`
+  with `Err: ctx.Err()` and `Valid=false`, `Sign` → `errors.Is(err, ctx.Err())` (see "Cancellation"
+  under the validation gotchas). The RFC 3161 ASN.1 descent (`rfc3161GenTime`) is deliberately defensive at every
   `asn1.Unmarshal` step. This contract is enforced by the fuzz targets — keep them green.
 - **`pdf.go` finds objects lexically, then resolves the document the way a reader does.** The store
   is an embedded file whose file specification carries `/AFRelationship /C2PA_Manifest`, referenced
@@ -444,6 +447,61 @@ empty for that whole generation of files.
   `TSTInfo.genTime`. The walk handles both a full `TimeStampResp` and a bare `ContentInfo`. **Read
   both headers**: a `c2pa.claim.v2` signature carries its timestamp only in `sigTst2`, so looking at
   `sigTst` alone leaves `SignedAt` zero for every 2.x file.
+
+### Cancellation
+
+The contract (package doc, `c2pa.go`): a cancelled or expired context stops the work promptly and is
+REPORTED as a cancellation — never as a mismatch, a malformed asset, a missing manifest or a partial
+result presented as complete. `cancel_test.go` proves it by cancelling at every context check a call
+makes (`countingContext`) and asserting the contract at each point. The rules that make it hold:
+
+- **Every input-sized loop and every recursion checks the context**: per iteration when an iteration
+  does real work (a decode, a hash, an HTTP request); every 4096 iterations in tight byte/entry/node
+  loops (`i&0xFFF == 0 && ctx.Err() != nil`, the `pdf.go` idiom — `stco` tables, xref rows, merkle rows,
+  the JPEG entropy scan every 64 KiB). Small-constant loops (≤ 64 hops, a chain, `merkleProve`'s ~20
+  rows) need none. `pdfObjects` carries the scan's ctx (`o.cancelled()`) for the walks over `order` and
+  the inflater, which have none of their own.
+- **A best-effort parser's empty or partial result is interpreted only after a ctx check.** `parseBMFFBoxes`,
+  `parseBoxTree`, `extractJUMBF`, `hashBMFFTopLevel` return early on cancel; every consumer asks
+  `ctx.Err()` BEFORE calling the result malformed, missing or a mismatch (`run` after `extractJUMBF` and
+  after `storeWithPriorSections` — a partial store can change which manifest is "active";
+  `bmffEmbedder.embed`, `checkInitSegment`, `prepareFragment`, `bmffStandardSegment`, `priorManifests`,
+  `fragmentSource.prepared`'s changed-between-passes check).
+- **Hashing goes through `hashWrite(ctx, h, b)`** (`ctx.go`, 1 MiB slices) — `hashWithExclusions`,
+  `writeGaps`, `verifyAssertionHashes`, `checkMerkleTree`'s leaves — and `hashBMFFTopLevel`/`writeGaps`/
+  `hashWithExclusions`/`merkleLayers` RETURN the ctx error, so a truncated digest is never compared.
+  **Reading goes through `readAllCtx(ctx, r, limit)`** (1 MiB steps) everywhere `io.ReadAll(io.LimitReader(…))`
+  used to be, including OCSP/CRL bodies. **OCSP and CRL requests carry `v.ctx`** (`http.NewRequestWithContext`),
+  as the TSA request always did.
+- **Inside `Validate`, cancellation is `general.error` — a FAILURE — recorded ONCE** by
+  `v.cancelled(uri, what)` (`cancelReported`), at the URI of the step, with `Err: ctx.Err()`. `finish()` is
+  the safety net: a context that ended before the report was complete adds the entry if no step did, so
+  `Valid` is false for every cancelled call whatever path it took — including a cancel that lands after
+  the last step, the price of a rule simple enough to hold everywhere. Dedup is by flag, never by
+  `errors.Is(e.Err, context.Canceled)`: a caller's reader can return its own. The merkle paths return a
+  `merkleVerdict` (ok / failed / cancelled) so a cancel is never read as a mismatch; the fragment loop
+  RETURNS on a cancelled read (the fragments after it are never opened — `mustNotRead` in
+  `TestValidateFragmentedCancelled`). The old `merkleCancelled` reported an INFORMATIONAL, which let a
+  cancelled merkle hash come out `Valid=true` with a validated signature and nothing bound.
+- **`Read` returns `Info{}` and `ReadAll` returns `nil`** when the context is cancelled at any point, not
+  only at entry — a partial `Info{Present: true}` is the read path's false verdict. **`ExtractStore`
+  returns `(nil, ctx.Err())`** even after a partial extraction. **`WalkBoxes`** has no error channel: it
+  stops; callers check `ctx.Err()` afterwards.
+- **`Sign`/`SignFragmented` return an error for which `errors.Is(err, ctx.Err())` holds** wherever the
+  cancel intervened: checks after `priorManifests` and between phases, `readWholeAsset(ctx, …)`, the
+  embedder/digest/compare errors are mapped to `ctx.Err()` first, `SignFragmented` prefers `ctx.Err()`
+  over a lazy reader's error, both TSA wrappers (`sign.go`, `cawgsign.go`) wrap the cause with `%w` so
+  `ErrTimestamp` AND the context error match, and a cancel during the self-check returns
+  `"cancelled during the self-check: %w"` — NOT `ErrSelfCheckFailed`, which is not what happened.
+  **`SignFragmented` has a point of no return**: the cancel is honoured, with nothing written, up to the
+  moment the set has passed the self-check; the write phase then runs under `context.WithoutCancel`,
+  because a set with half its fragments signed is worse than one finished late.
+- **Tests**: `countingContext` counts `Err()` calls (atomically — transports call it from their
+  goroutines) and cancels its parent at the n-th; a dry run gives the total T, then a sample of n in 1..T
+  asserts the contract (`Validate` ≤ 300 points per asset, `Sign` ≤ 40 — a `Sign` under `-race` costs
+  30–80 ms and CI runs the package under `-timeout 120s`; `C2PA_CANCEL_SWEEP=1` runs every point).
+  Liveness is asserted without wall-clock: the OCSP responder blocks on `r.Context().Done()` and the
+  test cancels when the request arrives.
 
 ### Validation-specific gotchas
 
