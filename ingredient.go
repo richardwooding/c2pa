@@ -165,6 +165,7 @@ func (v *validator) rejectUpdateManifest(code StatusCode, uri, explanation strin
 	v.add(StatusHardBindingMissing, uri,
 		"update manifest rejected, so the parentOf manifest that binds the asset "+
 			"was never evaluated", nil)
+	v.bind(BindingNone)
 }
 
 // parentIngredients returns the manifest URLs of every ingredient whose

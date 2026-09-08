@@ -56,6 +56,10 @@ type ValidationResult struct {
 	// whether the actor is Trusted; identities in ingredient manifests are
 	// validated (their statuses carry their URIs) but not listed.
 	Identities []Identity
+	// Binding says what the ACTIVE manifest's hard binding proved about THESE
+	// bytes: verified, failed, unevaluated, or none. It is the question "were
+	// these the signed bytes?" answered directly; see BindingState.
+	Binding BindingState
 }
 
 // VerifiedSigner returns the signer's identity — the leaf certificate's Subject
@@ -225,6 +229,10 @@ type validator struct {
 	// cancelReported records that the context's cancellation has been written
 	// into Statuses once, so finish's safety net does not add a second entry.
 	cancelReported bool
+	// binding is the hard-binding verdict as recorded at the decision point
+	// (bind); bindingSet says whether one was recorded.
+	binding    BindingState
+	bindingSet bool
 }
 
 // cancelled reports whether the context has ended and, the first time, records
@@ -260,7 +268,14 @@ func (v *validator) finish() ValidationResult {
 	// was complete fails the report, whatever the steps managed to record —
 	// including a cancel that lands after the last step, which is the price of
 	// the rule being simple enough to hold everywhere.
-	v.cancelled("", "before the report was complete")
+	// One context check serves both: the report's failure status and the
+	// binding's verdict, so a cancel landing exactly here cannot be recorded by
+	// one and missed by the other.
+	if v.cancelled("", "before the report was complete") && !v.bindingSet {
+		// Whatever no step decided, a cancel did not decide either.
+		v.bind(BindingUnevaluated)
+	}
+	v.res.Binding = v.binding
 	v.res.Valid = true
 	for i := range v.res.Statuses {
 		if v.res.Statuses[i].Severity == SeverityFailure {

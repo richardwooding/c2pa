@@ -78,6 +78,7 @@ func (v *validator) verifyHardBinding(m *parsedManifest, uri string) {
 	if v.attribution == AttributionEmbedded {
 		v.add(StatusUnsupported, uri, "manifest records an embedded object's provenance "+
 			"(§A.4.3); its hard binding covers that object's bytes, which are not evaluated", nil)
+		v.bind(BindingUnevaluated)
 		return
 	}
 	var dataHash, bmffHash, boxesHash *rawAssertion
@@ -100,27 +101,35 @@ func (v *validator) verifyHardBinding(m *parsedManifest, uri string) {
 		// leaving every fragment unbound.
 		v.add(StatusHardBindingMissing, uri,
 			"no c2pa.hash.bmff.v2/.v3 assertion binds the supplied fragments", nil)
+		v.bind(BindingNone)
 		return
 	}
+	start := len(v.res.Statuses)
 	switch {
 	case bmffHash != nil && v.container == BMFF:
 		v.verifyBMFFHash(bmffHash, uri)
+		v.bindFromStep(start, StatusAssertionBMFFHashMatch)
 	case dataHash != nil:
 		v.verifyDataHash(dataHash, uri)
+		v.bindFromStep(start, StatusAssertionDataHashMatch)
 	case bmffHash != nil:
 		// A BMFF binding cannot bind a non-BMFF asset: treating it as merely
 		// "unsupported" would let a bmff-only manifest wrapped around, say,
 		// tampered JPEG bytes validate with no hard binding checked at all.
 		v.add(StatusHardBindingMissing, uri+"/"+bmffHash.label,
 			"BMFF hard binding cannot bind a non-BMFF asset", nil)
+		v.bind(BindingNone)
 	case boxesHash != nil:
 		defaultAlg, _ := m.claim["alg"].(string)
 		v.verifyBoxesHash(boxesHash, uri, defaultAlg)
+		v.bindFromStep(start, StatusAssertionBoxesHashMatch)
 	case bmffV1:
 		v.add(StatusHardBindingMissing, uri,
 			"manifest's only hard binding is a v1 c2pa.hash.bmff assertion, which validators must ignore", nil)
+		v.bind(BindingNone)
 	default:
 		v.add(StatusHardBindingMissing, uri, "manifest has no hard-binding hash assertion", nil)
+		v.bind(BindingNone)
 	}
 }
 

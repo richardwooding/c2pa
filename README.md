@@ -161,7 +161,12 @@ What it verifies:
   under purpose `original` and both are read as one.
 - **Ingredients** — recursive validation of nested manifests, with cycle detection.
 
-`r.Valid` is true exactly when no failure-severity status was recorded. Like `Read`, `Validate`
+`r.Valid` is true exactly when no failure-severity status was recorded. `r.Binding` answers the
+narrower question "were these the signed bytes?" directly — `verified`, `failed`, `unevaluated` (a
+binding exists but this call did not evaluate it against these bytes: an object-level PDF manifest,
+an asset past the scan cap, a fragmented asset with fragments missing, a cancelled call) or `none`
+(nothing bound the asset) — so a consumer need not enumerate status codes to ask it, and "unevaluated"
+never collapses into "failed" or "passed". Like `Read`, `Validate`
 never returns an error and never panics — malformed or untrusted input is reported as failure
 statuses. It reads up to `c2pa.ValidateMaxScan` (256 MiB) so it can hash the whole asset; an asset
 larger than the cap reports an informational status rather than a false hash mismatch. A cancelled or
@@ -234,7 +239,7 @@ for _, p := range paths {
     frags = append(frags, f)
 }
 r := c2pa.ValidateFragmented(ctx, init, frags)
-fmt.Println(r.Valid, r.Has(c2pa.StatusAssertionBMFFHashMatch)) // bound only if every fragment was supplied and verified
+fmt.Println(r.Valid, r.Binding) // "verified" only if every fragment was supplied and verified; "unevaluated" for a subset
 for _, s := range r.Statuses {
     fmt.Println(s.Code, s.URI, s.Explanation) // a fragment failure's URI ends in "#fragment=<i>"
 }
@@ -441,7 +446,7 @@ chain reached a trust anchor. `Info.SignedBy` is only what the file claims.
 r := c2pa.Validate(ctx, c2pa.PDF, f)
 fmt.Println("valid:", r.Valid)                                        // true
 fmt.Println("verified signer:", r.VerifiedSigner())                   // OpenAI Media Service
-fmt.Println("content hash bound:", r.Has(c2pa.StatusAssertionDataHashMatch)) // true
+fmt.Println("binding:", r.Binding)                          // verified
 // This document carries no RFC 3161 timestamp, so the signing time is
 // unproven and r.SignedAt stays zero.
 fmt.Println("trusted timestamp:", !r.Has(c2pa.StatusTimeStampMissing)) // false
