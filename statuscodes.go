@@ -37,6 +37,11 @@ const (
 	// credential reaches an identity trust anchor (WithIdentityTrust). The named
 	// actor is proven. Recorded at "<manifest label>/<assertion label>".
 	StatusIdentityTrusted StatusCode = "cawg.identity.trusted"
+	// StatusICACredentialValid reports an identity claims aggregation
+	// credential (CAWG §8.1) that passed every check this validator makes;
+	// StatusICATimeStampValidated its verified sigTst2 time-stamp.
+	StatusICACredentialValid    StatusCode = "cawg.ica.credential_valid"
+	StatusICATimeStampValidated StatusCode = "cawg.ica.time_stamp.validated"
 	// StatusIdentityWellFormed reports a CAWG identity assertion that checks in
 	// every way except that no identity trust anchor vouches for its credential
 	// (CAWG spec §7.2.1): the signature is genuine, the actor is unproven.
@@ -104,6 +109,26 @@ const (
 	StatusIdentitySigTypeUnknown     StatusCode = "cawg.identity.sig_type.unknown"
 	StatusIdentityPadInvalid         StatusCode = "cawg.identity.pad.invalid"
 	StatusIdentityCredentialRevoked  StatusCode = "cawg.identity.credential_revoked"
+
+	// Identity claims aggregation failures (CAWG §8.1.5.6), at the identity
+	// assertion's URI. Not declared, having no emission site: did_unavailable
+	// (no DID is resolved over the network), untrusted_issuer (no issuer trust
+	// list yet), and the revocation codes.
+	StatusICAInvalidCOSESign1            StatusCode = "cawg.ica.invalid_cose_sign1"
+	StatusICAInvalidAlg                  StatusCode = "cawg.ica.invalid_alg"
+	StatusICAInvalidContentType          StatusCode = "cawg.ica.invalid_content_type"
+	StatusICAInvalidVerifiableCredential StatusCode = "cawg.ica.invalid_verifiable_credential"
+	StatusICAInvalidIssuer               StatusCode = "cawg.ica.invalid_issuer"
+	StatusICADIDUnsupportedMethod        StatusCode = "cawg.ica.did_unsupported_method"
+	StatusICAInvalidDIDDocument          StatusCode = "cawg.ica.invalid_did_document"
+	StatusICASignatureMismatch           StatusCode = "cawg.ica.signature_mismatch"
+	StatusICATimeStampInvalid            StatusCode = "cawg.ica.time_stamp.invalid"
+	StatusICAValidFromMissing            StatusCode = "cawg.ica.valid_from.missing"
+	StatusICAValidFromInvalid            StatusCode = "cawg.ica.valid_from.invalid"
+	StatusICAValidUntilInvalid           StatusCode = "cawg.ica.valid_until.invalid"
+	StatusICASignerPayloadMismatch       StatusCode = "cawg.ica.signer_payload.mismatch"
+	StatusICAVerifiedIdentitiesMissing   StatusCode = "cawg.ica.verified_identities.missing"
+	StatusICAVerifiedIdentitiesInvalid   StatusCode = "cawg.ica.verified_identities.invalid"
 )
 
 // Informational status codes.
@@ -132,41 +157,58 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusIngredientManifestValidated: SeveritySuccess,
 	StatusIdentityTrusted:             SeveritySuccess,
 	StatusIdentityWellFormed:          SeveritySuccess,
+	StatusICACredentialValid:          SeveritySuccess,
+	StatusICATimeStampValidated:       SeveritySuccess,
 
-	StatusClaimMissing:                 SeverityFailure,
-	StatusClaimRequiredMissing:         SeverityFailure,
-	StatusClaimMultiple:                SeverityFailure,
-	StatusClaimSignatureMissing:        SeverityFailure,
-	StatusClaimSignatureMismatch:       SeverityFailure,
-	StatusSigningCredentialUntrusted:   SeverityFailure,
-	StatusSigningCredentialInvalid:     SeverityFailure,
-	StatusSigningCredentialRevoked:     SeverityFailure,
-	StatusSigningCredentialExpired:     SeverityFailure,
-	StatusTimeStampMismatch:            SeverityFailure,
-	StatusTimeStampUntrusted:           SeverityFailure,
-	StatusTimeStampOutsideValidity:     SeverityFailure,
-	StatusAssertionHashedURIMismatch:   SeverityFailure,
-	StatusAssertionDataHashMismatch:    SeverityFailure,
-	StatusAssertionBoxesHashMismatch:   SeverityFailure,
-	StatusAssertionBoxesHashUnknownBox: SeverityFailure,
-	StatusAssertionBoxesHashMalformed:  SeverityFailure,
-	StatusManifestUpdateInvalid:        SeverityFailure,
-	StatusManifestUpdateWrongParents:   SeverityFailure,
-	StatusManifestMultipleParents:      SeverityFailure,
-	StatusAssertionBMFFHashMismatch:    SeverityFailure,
-	StatusAssertionBMFFHashMalformed:   SeverityFailure,
-	StatusAssertionMissing:             SeverityFailure,
-	StatusHardBindingMissing:           SeverityFailure,
-	StatusAlgorithmUnsupported:         SeverityFailure,
-	StatusIngredientManifestMismatch:   SeverityFailure,
-	StatusGeneralError:                 SeverityFailure,
-	StatusIdentityCBORInvalid:          SeverityFailure,
-	StatusIdentityAssertionMismatch:    SeverityFailure,
-	StatusIdentityAssertionDuplicate:   SeverityFailure,
-	StatusIdentityHardBindingMissing:   SeverityFailure,
-	StatusIdentitySigTypeUnknown:       SeverityFailure,
-	StatusIdentityPadInvalid:           SeverityFailure,
-	StatusIdentityCredentialRevoked:    SeverityFailure,
+	StatusClaimMissing:                   SeverityFailure,
+	StatusClaimRequiredMissing:           SeverityFailure,
+	StatusClaimMultiple:                  SeverityFailure,
+	StatusClaimSignatureMissing:          SeverityFailure,
+	StatusClaimSignatureMismatch:         SeverityFailure,
+	StatusSigningCredentialUntrusted:     SeverityFailure,
+	StatusSigningCredentialInvalid:       SeverityFailure,
+	StatusSigningCredentialRevoked:       SeverityFailure,
+	StatusSigningCredentialExpired:       SeverityFailure,
+	StatusTimeStampMismatch:              SeverityFailure,
+	StatusTimeStampUntrusted:             SeverityFailure,
+	StatusTimeStampOutsideValidity:       SeverityFailure,
+	StatusAssertionHashedURIMismatch:     SeverityFailure,
+	StatusAssertionDataHashMismatch:      SeverityFailure,
+	StatusAssertionBoxesHashMismatch:     SeverityFailure,
+	StatusAssertionBoxesHashUnknownBox:   SeverityFailure,
+	StatusAssertionBoxesHashMalformed:    SeverityFailure,
+	StatusManifestUpdateInvalid:          SeverityFailure,
+	StatusManifestUpdateWrongParents:     SeverityFailure,
+	StatusManifestMultipleParents:        SeverityFailure,
+	StatusAssertionBMFFHashMismatch:      SeverityFailure,
+	StatusAssertionBMFFHashMalformed:     SeverityFailure,
+	StatusAssertionMissing:               SeverityFailure,
+	StatusHardBindingMissing:             SeverityFailure,
+	StatusAlgorithmUnsupported:           SeverityFailure,
+	StatusIngredientManifestMismatch:     SeverityFailure,
+	StatusGeneralError:                   SeverityFailure,
+	StatusIdentityCBORInvalid:            SeverityFailure,
+	StatusIdentityAssertionMismatch:      SeverityFailure,
+	StatusIdentityAssertionDuplicate:     SeverityFailure,
+	StatusIdentityHardBindingMissing:     SeverityFailure,
+	StatusIdentitySigTypeUnknown:         SeverityFailure,
+	StatusIdentityPadInvalid:             SeverityFailure,
+	StatusIdentityCredentialRevoked:      SeverityFailure,
+	StatusICAInvalidCOSESign1:            SeverityFailure,
+	StatusICAInvalidAlg:                  SeverityFailure,
+	StatusICAInvalidContentType:          SeverityFailure,
+	StatusICAInvalidVerifiableCredential: SeverityFailure,
+	StatusICAInvalidIssuer:               SeverityFailure,
+	StatusICADIDUnsupportedMethod:        SeverityFailure,
+	StatusICAInvalidDIDDocument:          SeverityFailure,
+	StatusICASignatureMismatch:           SeverityFailure,
+	StatusICATimeStampInvalid:            SeverityFailure,
+	StatusICAValidFromMissing:            SeverityFailure,
+	StatusICAValidFromInvalid:            SeverityFailure,
+	StatusICAValidUntilInvalid:           SeverityFailure,
+	StatusICASignerPayloadMismatch:       SeverityFailure,
+	StatusICAVerifiedIdentitiesMissing:   SeverityFailure,
+	StatusICAVerifiedIdentitiesInvalid:   SeverityFailure,
 
 	StatusRevocationUnknown: SeverityInformational,
 	StatusTimeStampMissing:  SeverityInformational,

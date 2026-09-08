@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -179,7 +180,7 @@ func FuzzIdentityAssertion(f *testing.F) {
 		v := &validator{cfg: defaultConfig(), res: ValidationResult{}}
 		m := &parsedManifest{label: "urn:uuid:fuzz", claim: map[string]any{"alg": "sha256"}}
 		a := rawAssertion{label: identityLabel, tbox: "cbor", data: data}
-		id := v.verifyIdentity(m, a, entries, "urn:uuid:fuzz/cawg.identity")
+		id := v.verifyIdentity(m, a, entries, "urn:uuid:fuzz/cawg.identity", time.Time{})
 		if id.Valid && !v.res.Statuses[len(v.res.Statuses)-1].Code.isIdentitySuccess() {
 			t.Fatalf("Valid identity without a success code: %v", v.res.Statuses)
 		}

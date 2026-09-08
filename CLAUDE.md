@@ -554,9 +554,32 @@ makes (`countingContext`) and asserting the contract at each point. The rules th
     URLs too, but only ones naming THIS manifest. References are compared to the CLAIM's entries
     (§7.1: "the same entry exists in created/gathered/assertions"), which `verifyAssertionHashes` has
     already proven against the boxes — hence the call order in `validateManifest`.
-  - **Recognised but not evaluated → informational, never silent.** `cawg.identity_claims_aggregation`
-    credentials (W3C VC + DID resolution) and the `expected_*` payload fields get `general.unsupported`
-    at the identity URI and `Identity.Valid` stays false for ICA; an unknown `sig_type` is the failure
+  - **Identity claims aggregation (`cawgica.go`, spec §8.1) is verified for `did:jwk` issuers.** The
+    credential is the EMBEDDED payload of a TAGGED COSE_Sign1 (go-cose's `UnmarshalCBOR` requires the
+    tag; an untagged one is `cawg.ica.invalid_cose_sign1`), protected `alg` from the spec's set (every
+    one we allow — c2pa-rs takes Ed25519 only), protected content type (label 3) exactly the text
+    `application/vc`, a stray `x5chain` ignored. The VC JSON must carry both `@context` IRIs and both
+    `type`s (spec §8.1.3; c2pa-rs never checks them); `issuer` is a string or `{id}`; `validFrom|
+    issuanceDate`, `validUntil|expirationDate`; `credentialSubject` an object or a one-element array;
+    `c2paAsset.referenced_assertions[].hash` is a base64 STRING per the VC, but c2pa-rs writes a JSON
+    ARRAY of the ASCII bytes of the base64 — `icaHash` accepts both (and raw bytes). The issuer DID is
+    resolved only for `did:jwk` (the JWK is base64url in the identifier — OKP/Ed25519, EC P-256/384/521
+    via `ecdsa.ParseUncompressedPublicKey`, RSA — stdlib only); `did:web` and others are
+    `cawg.ica.did_unsupported_method` (the spec's code; c2pa-rs says `invalid_issuer`). The credential's
+    `sigTst2` IS checked through `checkTimestampToken` + `tsaChainOK` (`timestamp.go`, the code-free half
+    of `verifyTSAChain`) → `cawg.ica.time_stamp.validated`/`.invalid` (an untrusted TSA is `invalid`;
+    the spec has no third code); a v1 `sigTst` is IGNORED, as §8.1.5.2.5 says — unlike the X.509 path,
+    where the spec makes v1 invalid. `validFrom`/`validUntil` are compared with now, the credential's
+    time-stamp AND the manifest's own trusted time-stamp (`manifestSignedAt`, threaded from
+    `validateManifest`'s local `genTime` — never `v.res.SignedAt`, which at depth > 0 is the ACTIVE
+    manifest's); the spec asks for the last, c2pa-rs has it as a TODO. No issuer trust list exists
+    (follow-up: `WithIdentityIssuers`), so a valid credential is `cawg.identity.well-formed`, never
+    trusted, and `Identity.Trusted` is false; `Issuer` and `VerifiedIdentities` are as PRESENTED.
+    Fixture `testdata/cawg_ica.jpg` (c2pa-rs `success.jpg`) verifies offline; the corpus builds
+    credentials in `cawgica_test.go` (`icaAssertionBytes`, Ed25519 or ES256 `did:jwk`, every failure
+    code).
+  - **Recognised but not evaluated → informational, never silent.** The `expected_*` payload fields get
+    `general.unsupported` at the identity URI; an unknown `sig_type` is the failure
     `cawg.identity.sig_type.unknown`. Unknown keys are ignored (§7.1). Duplicate map keys are
     `cawg.identity.cbor.invalid` (`identityDecMode`, `DupMapKeyEnforcedAPF`): fxamacker keeps the LAST
     duplicate for a map target and the FIRST for a struct target, so without it the two decode stages

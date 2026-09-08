@@ -144,8 +144,15 @@ What it verifies:
   full signature, time-stamp, certificate-profile and revocation treatment at the identity's own
   URI. Identity anchors are separate from the claim signer's and there is no default list, so a
   genuine identity is `cawg.identity.well-formed` until `WithIdentityTrust` names a CA that vouches
-  for it, and `cawg.identity.trusted` after. Aggregator credentials
-  (`cawg.identity_claims_aggregation`) are recognised, not evaluated.
+  for it, and `cawg.identity.trusted` after. An aggregator's credential
+  (`cawg.identity_claims_aggregation` — a W3C Verifiable Credential listing the identity signals an
+  aggregator verified) is checked in full when its issuer is a `did:jwk`: the tagged COSE_Sign1, its
+  `application/vc` content type, the credential's context and type, the issuer's key, the signature,
+  the time-stamp, the validity window (against now, the credential's own time-stamp and the
+  manifest's), the verified identities and the match with the assertion's payload
+  (`cawg.ica.credential_valid` or the `cawg.ica.*` failure). `did:web` issuers, which need the network,
+  are reported as an unsupported method; there is no issuer trust list yet, so an aggregation
+  credential is well-formed, never trusted.
 - **Update manifests** — a manifest that adds assertions without changing the content (spec
   §11.2.3) carries no hard binding of its own, so one is not demanded of it. What binds the content
   is the manifest it updates, reached through its single `parentOf` ingredient, and that binding is
@@ -195,7 +202,9 @@ informational / failure).
 `r.Identities` lists the active manifest's CAWG identity assertions — one per named actor who signed
 over the content. Each says whether the assertion is `Valid` (genuine signature, references intact)
 and whether the actor is `Trusted` (the credential reaches an anchor given with `WithIdentityTrust`);
-`Name()` is the actor's certificate name only when proven, like `VerifiedSigner`.
+`Name()` is the actor's certificate name only when proven, like `VerifiedSigner`. An aggregation
+credential fills `Issuer` (the aggregator's DID) and `VerifiedIdentities` (the signals it vouched
+for: type, name, account, provider, when) — as the aggregator presented them.
 
 ```go
 r := c2pa.Validate(ctx, c2pa.JPEG, f, c2pa.WithIdentityTrust(identityCAs))

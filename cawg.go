@@ -222,7 +222,7 @@ type Identity struct {
 	URI string
 	// SigType is signer_payload.sig_type: "cawg.x509.cose" for an X.509
 	// credential, "cawg.identity_claims_aggregation" for an aggregator's
-	// verifiable credential (recognised, not evaluated).
+	// verifiable credential.
 	SigType string
 	// Roles are the named actor's declared roles (e.g. "cawg.creator"), as
 	// PRESENTED.
@@ -233,14 +233,23 @@ type Identity struct {
 	// Chain is the actor's certificate chain as PRESENTED (X.509 only), leaf
 	// first, populated whether or not it verified — like SignerChain.
 	Chain []*x509.Certificate
+	// Issuer is the aggregator's DID (identity claims aggregation only), as
+	// PRESENTED — e.g. "did:jwk:…". Only did:jwk is resolved and verified.
+	Issuer string
+	// VerifiedIdentities are the identity signals an aggregator vouched for
+	// (identity claims aggregation only), as PRESENTED by the aggregator.
+	VerifiedIdentities []VerifiedIdentity
 	// SignedAt is the signing time from a TRUSTED timestamp on the identity
 	// signature, or zero — like ValidationResult.SignedAt.
 	SignedAt time.Time
 	// Valid: the assertion is well-formed and its signature verifies
-	// (cawg.identity.well-formed or cawg.identity.trusted was recorded).
+	// (cawg.identity.well-formed or cawg.identity.trusted was recorded). For an
+	// aggregation credential: the credential is cawg.ica.credential_valid.
 	Valid bool
-	// Trusted: Valid, and the chain reaches an identity trust anchor
-	// (WithIdentityTrust). Only then is the actor proven.
+	// Trusted: Valid, and the credential reaches a root of trust — an X.509
+	// chain anchored by WithIdentityTrust. No issuer trust list exists for
+	// aggregation credentials yet, so those are never Trusted. Only then is
+	// the actor proven.
 	Trusted bool
 }
 
