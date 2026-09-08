@@ -144,7 +144,8 @@ What it verifies:
   full signature, time-stamp, certificate-profile and revocation treatment at the identity's own
   URI. Identity anchors are separate from the claim signer's and there is no default list, so a
   genuine identity is `cawg.identity.well-formed` until `WithIdentityTrust` names a CA that vouches
-  for it, and `cawg.identity.trusted` after. An aggregator's credential
+  for it, and `cawg.identity.trusted` after; `WithIdentityIssuers` does the same job for an
+  aggregator's DID. An aggregator's credential
   (`cawg.identity_claims_aggregation` — a W3C Verifiable Credential listing the identity signals an
   aggregator verified) is checked in full when its issuer is a `did:jwk`: the tagged COSE_Sign1, its
   `application/vc` content type, the credential's context and type, the issuer's key, the signature,
@@ -186,7 +187,8 @@ periodically. Supply your own anchors and tune behaviour with options:
 r := c2pa.Validate(ctx, c2pa.JPEG, f,
     c2pa.WithSigningTrust(myPool),       // override signing-anchor *x509.CertPool
     c2pa.WithTimestampTrust(myTSAPool),  // override TSA-anchor pool
-    c2pa.WithIdentityTrust(identityCAs), // CAWG identity anchors (none by default)
+    c2pa.WithIdentityTrust(identityCAs), // CAWG X.509 identity anchors (none by default)
+    c2pa.WithIdentityIssuers(dids...),   // aggregator DIDs to believe (none by default)
     c2pa.WithOnlineRevocation(true),     // enable OCSP/CRL (network; default off)
     c2pa.WithClock(func() time.Time { return now }), // signing-time fallback
     c2pa.WithMaxIngredientDepth(16),     // bound nested-manifest recursion
@@ -206,10 +208,20 @@ informational / failure).
 
 `r.Identities` lists the active manifest's CAWG identity assertions — one per named actor who signed
 over the content. Each says whether the assertion is `Valid` (genuine signature, references intact)
-and whether the actor is `Trusted` (the credential reaches an anchor given with `WithIdentityTrust`);
-`Name()` is the actor's certificate name only when proven, like `VerifiedSigner`. An aggregation
-credential fills `Issuer` (the aggregator's DID) and `VerifiedIdentities` (the signals it vouched
-for: type, name, account, provider, when) — as the aggregator presented them.
+and whether the actor is `Trusted` — the credential reaches an anchor given with
+`WithIdentityTrust` (X.509) or names an aggregator listed in `WithIdentityIssuers` (an aggregation
+credential). `Name()` answers only when proven, like `VerifiedSigner`. An aggregation credential
+fills `Issuer` (the aggregator's DID) and `VerifiedIdentities` (the signals it vouched for: type,
+name, account, provider, when) — as the aggregator presented them.
+
+Neither trust list has a default, because CAWG publishes neither. Name the aggregators you believe
+and a credential from one becomes `cawg.identity.trusted`, while a credential from anyone else is
+`cawg.ica.untrusted_issuer` — a failure, as the spec asks. Say nothing and a genuine credential stays
+`cawg.identity.well-formed`: real, and from an aggregator you have expressed no opinion about.
+
+```go
+r := c2pa.Validate(ctx, c2pa.JPEG, f, c2pa.WithIdentityIssuers("did:jwk:eyJrdHkiOi…"))
+```
 
 ```go
 r := c2pa.Validate(ctx, c2pa.JPEG, f, c2pa.WithIdentityTrust(identityCAs))

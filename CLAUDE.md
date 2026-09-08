@@ -59,7 +59,8 @@ Public surface:
   carries, or about something nothing could place.
 - `Validate` / `ValidationResult` / `StatusEntry` / `StatusCode` / `Severity` — the verifier and its
   result. `ValidateOption` (`WithSigningTrust`, `WithTimestampTrust`, `WithIdentityTrust`,
-  `WithOnlineRevocation`, `WithClock`, `WithMaxIngredientDepth`, `WithMaxScan`, `WithHTTPClient`).
+  `WithIdentityIssuers`, `WithOnlineRevocation`, `WithClock`, `WithMaxIngredientDepth`,
+  `WithMaxScan`, `WithHTTPClient`).
   `ValidationResult.Binding BindingState` (`BindingNone` / `BindingVerified` / `BindingFailed` /
   `BindingUnevaluated`, `String()`) is "were these the signed bytes?" answered without status codes —
   RECORDED at the decision point (`bind`, first-wins, `bindFromStep` over the statuses one hard-binding
@@ -712,9 +713,25 @@ makes (`countingContext`) and asserting the contract at each point. The rules th
     where the spec makes v1 invalid. `validFrom`/`validUntil` are compared with now, the credential's
     time-stamp AND the manifest's own trusted time-stamp (`manifestSignedAt`, threaded from
     `validateManifest`'s local `genTime` — never `v.res.SignedAt`, which at depth > 0 is the ACTIVE
-    manifest's); the spec asks for the last, c2pa-rs has it as a TODO. No issuer trust list exists
-    (follow-up: `WithIdentityIssuers`), so a valid credential is `cawg.identity.well-formed`, never
-    trusted, and `Identity.Trusted` is false; `Issuer` and `VerifiedIdentities` are as PRESENTED.
+    manifest's); the spec asks for the last, c2pa-rs has it as a TODO.
+    **Issuer trust is `WithIdentityIssuers(dids...)`** (#57), the aggregation counterpart of
+    `WithIdentityTrust`: CAWG §9.3 tells a consumer to keep such a list per credential type and
+    publishes none itself. On the list → `cawg.identity.trusted` and `Identity.Trusted`; absent →
+    `cawg.ica.untrusted_issuer`, a FAILURE per §8.1.5.2.3, with NO `well-formed` and
+    `Identity.Valid` false, so `Valid` keeps one meaning across both sig types ("well-formed or
+    trusted was recorded") rather than two. Option absent → today's behaviour, `well-formed` and
+    unproven. Three details that are easy to get wrong: the option always builds a **non-nil map**,
+    because Go hands a variadic function a nil slice for zero arguments and
+    `WithIdentityIssuers()` must mean "trust nobody" rather than "not configured"; entries and
+    issuers are compared through `didIdentifier`, which drops a **DID URL fragment** (`…#0`, which
+    `icaIssuerKey` already tolerated) and trims space but does NOT lowercase, since a `did:jwk`'s
+    method-specific id is case-sensitive base64url; and `cawg.ica.credential_valid` is still
+    recorded for an untrusted issuer, because the credential really did verify — only the
+    aggregator's standing is in question. `Issuer` and `VerifiedIdentities` are as PRESENTED, and
+    `Identity.Name()` falls back to the first `VerifiedIdentities` entry carrying a `Name` or
+    `Username` — the aggregator's word, proven only as far as the aggregator is trusted.
+    `did:web` (what Adobe's aggregator uses) stays `cawg.ica.did_unsupported_method`: resolving it
+    is network I/O inside `Validate`, which is a separate decision.
     Fixture `testdata/cawg_ica.jpg` (c2pa-rs `success.jpg`) verifies offline; the corpus builds
     credentials in `cawgica_test.go` (`icaAssertionBytes`, Ed25519 or ES256 `did:jwk`, every failure
     code).

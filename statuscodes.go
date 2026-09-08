@@ -128,16 +128,22 @@ const (
 	StatusICAInvalidContentType          StatusCode = "cawg.ica.invalid_content_type"
 	StatusICAInvalidVerifiableCredential StatusCode = "cawg.ica.invalid_verifiable_credential"
 	StatusICAInvalidIssuer               StatusCode = "cawg.ica.invalid_issuer"
-	StatusICADIDUnsupportedMethod        StatusCode = "cawg.ica.did_unsupported_method"
-	StatusICAInvalidDIDDocument          StatusCode = "cawg.ica.invalid_did_document"
-	StatusICASignatureMismatch           StatusCode = "cawg.ica.signature_mismatch"
-	StatusICATimeStampInvalid            StatusCode = "cawg.ica.time_stamp.invalid"
-	StatusICAValidFromMissing            StatusCode = "cawg.ica.valid_from.missing"
-	StatusICAValidFromInvalid            StatusCode = "cawg.ica.valid_from.invalid"
-	StatusICAValidUntilInvalid           StatusCode = "cawg.ica.valid_until.invalid"
-	StatusICASignerPayloadMismatch       StatusCode = "cawg.ica.signer_payload.mismatch"
-	StatusICAVerifiedIdentitiesMissing   StatusCode = "cawg.ica.verified_identities.missing"
-	StatusICAVerifiedIdentitiesInvalid   StatusCode = "cawg.ica.verified_identities.invalid"
+	// StatusICAUntrustedIssuer is CAWG §8.1.5.2.3's "a DID issued from an
+	// untrusted source": the aggregation credential verified, but its issuer
+	// is not on the list the caller passed to WithIdentityIssuers. Recorded
+	// only when that option is given — with no list there is nothing to be
+	// untrusted against, and the identity is reported well-formed instead.
+	StatusICAUntrustedIssuer           StatusCode = "cawg.ica.untrusted_issuer"
+	StatusICADIDUnsupportedMethod      StatusCode = "cawg.ica.did_unsupported_method"
+	StatusICAInvalidDIDDocument        StatusCode = "cawg.ica.invalid_did_document"
+	StatusICASignatureMismatch         StatusCode = "cawg.ica.signature_mismatch"
+	StatusICATimeStampInvalid          StatusCode = "cawg.ica.time_stamp.invalid"
+	StatusICAValidFromMissing          StatusCode = "cawg.ica.valid_from.missing"
+	StatusICAValidFromInvalid          StatusCode = "cawg.ica.valid_from.invalid"
+	StatusICAValidUntilInvalid         StatusCode = "cawg.ica.valid_until.invalid"
+	StatusICASignerPayloadMismatch     StatusCode = "cawg.ica.signer_payload.mismatch"
+	StatusICAVerifiedIdentitiesMissing StatusCode = "cawg.ica.verified_identities.missing"
+	StatusICAVerifiedIdentitiesInvalid StatusCode = "cawg.ica.verified_identities.invalid"
 )
 
 // Informational status codes.
@@ -225,6 +231,7 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusICAInvalidContentType:          SeverityFailure,
 	StatusICAInvalidVerifiableCredential: SeverityFailure,
 	StatusICAInvalidIssuer:               SeverityFailure,
+	StatusICAUntrustedIssuer:             SeverityFailure,
 	StatusICADIDUnsupportedMethod:        SeverityFailure,
 	StatusICAInvalidDIDDocument:          SeverityFailure,
 	StatusICASignatureMismatch:           SeverityFailure,

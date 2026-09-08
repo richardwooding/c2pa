@@ -140,6 +140,7 @@ type validateConfig struct {
 	signingTrust       *x509.CertPool
 	timestampTrust     *x509.CertPool
 	identityTrust      *x509.CertPool
+	identityIssuers    map[string]bool // nil: not configured; empty: trust no issuer
 	onlineRevocation   bool
 	clock              func() time.Time
 	maxIngredientDepth int
@@ -170,6 +171,40 @@ func WithTimestampTrust(pool *x509.CertPool) ValidateOption {
 // never cawg.identity.trusted.
 func WithIdentityTrust(pool *x509.CertPool) ValidateOption {
 	return func(c *validateConfig) { c.identityTrust = pool }
+}
+
+// WithIdentityIssuers sets the identity claims aggregators a consumer trusts,
+// by DID — the aggregation-credential counterpart of WithIdentityTrust, which
+// anchors X.509 identities. CAWG §9.3 says a consumer SHOULD keep such a list
+// per credential type and publishes none itself, having "not provided guidance
+// about which identity claims aggregators to consider trusted".
+//
+// With this option, an aggregation credential whose issuer is on the list makes
+// the identity cawg.identity.trusted and Identity.Trusted true; one whose
+// issuer is absent is cawg.ica.untrusted_issuer, a FAILURE per §8.1.5.2.3, and
+// is neither well-formed nor Valid. Without it — the default — a valid
+// credential stays cawg.identity.well-formed: a genuine credential from an
+// aggregator this caller has expressed no opinion about.
+//
+// Entries and issuers are compared after dropping any DID URL fragment, so
+// "did:jwk:eyJ…" and "did:jwk:eyJ…#0" name the same aggregator, and after
+// trimming surrounding space. Nothing else is normalised: a did:jwk's
+// method-specific id is base64url and case-sensitive.
+//
+// Calling it with no DIDs is meaningful and means "trust no aggregator": every
+// aggregation credential then fails with cawg.ica.untrusted_issuer. Only not
+// calling it leaves issuer trust unevaluated.
+func WithIdentityIssuers(dids ...string) ValidateOption {
+	// Always a non-nil map, so WithIdentityIssuers() is "configured, trusting
+	// nobody" rather than indistinguishable from the option being absent —
+	// Go hands a variadic function a nil slice for zero arguments.
+	set := make(map[string]bool, len(dids))
+	for _, did := range dids {
+		if did = didIdentifier(did); did != "" {
+			set[did] = true
+		}
+	}
+	return func(c *validateConfig) { c.identityIssuers = set }
 }
 
 // WithOnlineRevocation enables OCSP/CRL revocation checking, which makes
