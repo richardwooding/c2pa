@@ -447,6 +447,17 @@ empty for that whole generation of files.
 
 ### Validation-specific gotchas
 
+- **The `c2sh` salt is a jumd PRIVATE FIELD, not a sibling of the data box.** c2pa-rs writes a 16-byte
+  salt box into some assertions so identical assertions hash differently — INSIDE the `jumd` description
+  box, flagged by toggle bit `0x10` (its jumd toggles read `0x13`; ours read `0x03`). `parseJumd` honours
+  the jumd's own `lbox`, so the salt is consumed with the description and `dataChild` sees the data box.
+  Arithmetic on `c2pa_signed.jpg` at offset 99900: jumd `lbox` 78 = 8 header + 16 UUID + 1 toggles + 29
+  label + 24 salt box. Six fixtures carry salts (both JPEGs, the OpenAI PNG — including its `c2pa.actions.v2`
+  and `c2pa.hash.data` — both MP4s, `dashinit.mp4`) and all decoded before anyone noticed, which is how
+  issue #41 came to assume the salt was a sibling. `dataChild` now ALSO skips a sibling `c2sh` (the spec
+  tolerates that shape; nothing we have seen writes it), for claim, signature and assertions alike; the
+  hashed_uri is unaffected either way because it covers the whole superbox payload. The corpus writes both
+  shapes (`saltAll` in-jumd via `jumdBoxSalted`, `siblingSaltAll`); our own signer stays salt-free.
 - **CAWG identity assertions (`cawg.go`, `cawgverify.go`).** A `cawg.identity` assertion (Creator
   Assertions Working Group, Identity Assertion 1.1 — a separate spec from C2PA's) is a named actor's
   COSE_Sign1 over a CBOR `signer_payload` that names some of the manifest's assertions by hashed_uri,
