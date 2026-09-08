@@ -235,6 +235,19 @@
 .gl-footer a:hover { color: var(--gl-fg); }
 .gl-fnav { display: flex; flex-wrap: wrap; gap: 18px; }
 
+/* ---- sponsor link (opt-in) ---- */
+/* gloam ships the style, never the link: paste the anchor into your own footer
+   (see components.md), so a scheduled asset sync can never change what a page
+   says or who it asks for. One accent, no brand pink — a footer note, not a
+   banner: the text keeps the footer's muted colour and only the heart is
+   accented. Colouring the TEXT would need `.gl-footer a.gl-sponsor`, since
+   `.gl-footer a` outranks a bare class; the icon rule targets the svg element
+   directly, so inheritance never competes. */
+.gl-sponsor { display: inline-flex; align-items: center; gap: 6px; }
+.gl-sponsor svg { width: 14px; height: 14px; flex: none; color: var(--gl-accent); }
+.gl-sponsor:hover svg { color: var(--gl-accent-2); }
+.gl-sponsor:focus-visible { outline: 2px solid var(--gl-accent); outline-offset: 3px; border-radius: 6px; }
+
 /* ---- mobile nav ---- */
 @media (max-width: 680px) {
   .gl-nav nav { display: none; }
