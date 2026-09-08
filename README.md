@@ -475,9 +475,16 @@ registry entry for ISCC defines none. The raw digest is used because the CDDL as
 where a text identifier would have wanted a `tstr`, because the Resolution API base64s the value,
 and because `alg` plus the length already say what the bytes are — with the canonical string carried
 in `Name` so nothing is lost. It is unverified against any third-party resolver, there being none to
-verify against. `c2pa-mcp` does this end to end if you would rather not. The hard binding is
-still written, as §9.1 requires. c2patool reads the result and its verdict is unchanged, which the
-interop suite asserts.
+verify against. The hard binding is still written, as §9.1 requires. c2patool reads the result and
+its verdict is unchanged, which the interop suite asserts.
+
+That recipe is worth more than the sum of its parts: the
+same image as a PNG, as a JPEG at quality 75, as a JPEG at quality 40 and as a palette GIF all
+produce the identical `ISCC:` code, while every one of those files has a different hard binding.
+That is what a soft binding buys. If you would rather not assemble it yourself,
+[`c2pa-mcp`](https://github.com/richardwooding/c2pa-mcp) runs it end to end —
+`c2pa-mcp sign photo.jpg out.jpg --soft-binding iscc` — and reports the soft bindings it finds on
+`verify`, with the same report-don't-verify caveat this library attaches to them.
 
 **Limits.** No soft binding algorithm is implemented, so a value must come from the caller and
 `Validate` reports the ones it finds without checking them (see above); encrypted (`/Encrypt`) or

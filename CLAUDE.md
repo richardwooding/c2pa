@@ -641,7 +641,13 @@ makes (`countingContext`) and asserting the contract at each point. The rules th
     context, since `alg` names the algorithm and the length gives the bit width. Putting the
     canonical string in `name` means a human or a tool reading the manifest still sees
     `ISCC:EEA4GQZQTY6J5DTH`. **Unverified against any third-party resolver** — there is nothing to
-    verify it against yet.
+    verify it against yet. The recipe in the README was written from reading `iscc-lib`'s source and
+    is now COMPILED and run in `c2pa-mcp` (`--soft-binding iscc`): `GenImageCodeV0(pixels, 64)` →
+    `code.Iscc`, `IsccDecode(code.Iscc).Digest`, 8 bytes at 64 bits, and
+    `testdata/iscc_demo.{png,jpg}` in `fingerprint` both give `ISCC:EEA4GQZQTY6J5DTH`. Measured
+    there too: one image as PNG, JPEG q75, JPEG q40 and a palette GIF produce the IDENTICAL code, so
+    the thing the assertion is for demonstrably works. Nothing here needs a dependency on either
+    module — the recipe stays a recipe, and the runnable capability lives in `c2pa-mcp`.
   - **The self-check counts them.** `res.Valid` alone would not notice a soft binding dropped from
     the store or one whose value encoded as something the reader refuses — the output would be
     perfectly valid without it. So `sign()` requires `len(res.SoftBindings)` to equal what it wrote
