@@ -260,6 +260,10 @@ type validator struct {
 	// against THIS asset — an update manifest's parent, whose binding covers
 	// these bytes even though the ingredient walk reaches it at depth > 0.
 	hardBound map[string]bool
+	// updateSeen records that an update manifest (§11.2.3) was encountered on
+	// the way to the hard binding, which is what makes §15.12.1.1's exclusion
+	// adjustment apply: the store grew after the binding manifest signed it.
+	updateSeen bool
 	// attribution is what the container said the store is a claim about, kept
 	// until parseManifest has built the Info it belongs on.
 	attribution Attribution

@@ -183,6 +183,20 @@ func gifPlan(ctx context.Context, data []byte) (preambleEnd int, cuts []edit, er
 	return 0, nil, fmt.Errorf("%w: GIF has no trailer", errCarrierMalformed)
 }
 
+// gifStoreRanges is the GIF side of storeRanges: each C2PA application
+// extension, introducer through block terminator — what gifEmbedder excludes.
+func gifStoreRanges(ctx context.Context, data []byte) []byteRange {
+	_, cuts, err := gifPlan(ctx, data)
+	if err != nil {
+		return nil
+	}
+	var rs []byteRange
+	for _, c := range cuts {
+		rs = append(rs, byteRange{start: c.at, length: c.remove})
+	}
+	return rs
+}
+
 func (gifEmbedder) embed(ctx context.Context, asset, store []byte) ([]byte, []byteRange, error) {
 	preambleEnd, cuts, err := gifPlan(ctx, asset)
 	if err != nil {

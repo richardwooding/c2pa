@@ -65,6 +65,37 @@ func embedderFor(c Container) (embedder, bool) {
 	return nil, false
 }
 
+// storeRanges returns the byte ranges of data that a c2pa.hash.data written
+// for the manifest store AS IT CURRENTLY SITS in data would exclude — the same
+// ranges the container's embedder returns when it writes one, found wherever
+// the store is rather than at the canonical position. It is what §15.12.1.1
+// means by "the current length of the entire C2PA Manifest Store plus any file
+// format specific extras": the verifier's side of each embedder's exclusion
+// convention, which is why every locator lives beside its embedder and
+// TestStoreRangesMatchEmbedder holds the two to one another. nil when the
+// container has no in-place store to measure (BMFF binds with c2pa.hash.bmff,
+// whose /uuid exclusion is length-agnostic; a PDF update is a new section,
+// not a longer store) or none is found.
+func storeRanges(ctx context.Context, c Container, data []byte) []byteRange {
+	switch c {
+	case JPEG:
+		return jpegStoreRanges(ctx, data)
+	case PNG:
+		return pngStoreRanges(ctx, data)
+	case GIF:
+		return gifStoreRanges(ctx, data)
+	case RIFF:
+		return riffStoreRanges(ctx, data)
+	case TIFF:
+		return tiffStoreRanges(ctx, data)
+	case MP3:
+		return mp3StoreRanges(ctx, data)
+	case SVG:
+		return svgStoreRanges(ctx, data)
+	}
+	return nil
+}
+
 // checkStore refuses anything that is not a "c2pa" JUMBF superbox of a size
 // every carrier can hold. The first four bytes of the type UUID must read
 // "c2pa": that is how c2pa-rs (and this package's JPEG box map) recognise the
@@ -287,6 +318,22 @@ func (jpegEmbedder) embed(ctx context.Context, asset, store []byte) ([]byte, []b
 	return out, []byteRange{{start: placed[len(edits)-1], length: len(run)}}, nil
 }
 
+// jpegStoreRanges is the JPEG side of storeRanges: the APP11 run (every
+// segment, marker through payload) as it currently sits in data, which is the
+// whole run jpegEmbedder excludes. Adjacent segments merge into one range; a
+// run split by another segment is reported as it lies.
+func jpegStoreRanges(ctx context.Context, data []byte) []byteRange {
+	cuts, _, err := jpegPlan(ctx, data)
+	if err != nil || len(cuts) == 0 {
+		return nil
+	}
+	rs := make([]byteRange, 0, len(cuts))
+	for _, c := range cuts {
+		rs = append(rs, byteRange{start: c.at, length: c.remove})
+	}
+	return mergeRanges(rs)
+}
+
 // jpegAPP11Run splits a JUMBF box across APP11 segments the way c2pa-rs does:
 // 64000 store bytes per segment, CI "JP", En 0x0211, Z counting from 1, and
 // the box's 8-byte LBox+TBox repeated in every continuation segment (the
@@ -374,6 +421,22 @@ func (pngEmbedder) embed(ctx context.Context, asset, store []byte) ([]byte, []by
 		return nil, nil, err
 	}
 	return out, []byteRange{{start: placed[len(edits)-1], length: len(chunk)}}, nil
+}
+
+// pngStoreRanges is the PNG side of storeRanges: every caBX chunk, length
+// field through CRC, which is the whole chunk pngEmbedder excludes.
+func pngStoreRanges(ctx context.Context, data []byte) []byteRange {
+	chunks, err := pngChunkList(ctx, data)
+	if err != nil {
+		return nil
+	}
+	var rs []byteRange
+	for _, c := range chunks {
+		if c.typ == "caBX" {
+			rs = append(rs, byteRange{start: c.start, length: c.end - c.start})
+		}
+	}
+	return rs
 }
 
 // pngChunk frames data as a PNG chunk: big-endian length, type, data, and a

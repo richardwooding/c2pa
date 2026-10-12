@@ -151,6 +151,10 @@ func (v *validator) verifyUpdateManifest(m *parsedManifest, store *parsedStore, 
 		v.hardBound = map[string]bool{}
 	}
 	v.hardBound[parent.label] = true
+	// The update was appended to the store after the parent signed it, so the
+	// parent's data-hash exclusion describes a shorter store than the one in
+	// the file; §15.12.1.1 has the verifier extend it (verifyDataHash).
+	v.updateSeen = true
 	v.verifyHardBinding(parent, parent.label)
 }
 

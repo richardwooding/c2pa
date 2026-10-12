@@ -12,6 +12,23 @@ c2pa-rs/0.33.1`, title `CA.jpg`, a COSE_Sign1 signature whose leaf certificate
 subject CN is `C2PA Signer`, and an RFC 3161 timestamp of
 `2024-08-06T21:53:37Z`. It is an *edited* image, not AI-generated.
 
+## update_manifest.jpg
+
+`update_manifest.jpg` from [contentauth/c2pa-rs](https://github.com/contentauth/c2pa-rs)'s test
+assets (`sdk/tests/fixtures/`), licensed under Apache-2.0 / MIT (the c2pa-rs dual license). The
+only fixture here whose active manifest is an **update manifest** (§11.2.3) written by a real
+producer: a standard manifest (`adobe:urn:uuid:6a6b4dbe-…`, 1.x claim, `c2pa.hash.data`) signed
+first, then an update manifest (`urn:c2pa:d9702464-…:update_manifest_vendor`, a `c2pa.claim.v2`
+with a `parentOf` ingredient naming it) appended to the same APP11 store.
+
+Its value is the stale exclusion that appending leaves behind: the parent's `c2pa.hash.data`
+records `{start 9964, length 18874}` while the store now spans `{9964, 43607}`, which is exactly the
+case spec §15.12.1.1 addresses ("treated as the current length of the entire C2PA Manifest Store")
+and the file issue #72 was reported on. Both manifests are signed by the c2pa-rs test PKI (leaf
+`C2PA Signer` → `Intermediate CA`, valid to 2030), no timestamp. `TestUpdateManifestFixture`
+anchors at the chain the file carries and requires `assertion.dataHash.match` on the parent and a
+verified binding.
+
 ## c2pa_signed_video.mp4, video_no_manifest.mp4, legacy_bmff_v1.mp4
 
 BMFF fixtures from [contentauth/c2pa-rs](https://github.com/contentauth/c2pa-rs)'s

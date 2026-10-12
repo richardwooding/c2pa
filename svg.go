@@ -79,6 +79,10 @@ type svgDoc struct {
 	metaSelfClosing    bool   //
 	metaQName          string //
 	cuts               []edit // existing c2pa:manifest elements, at any depth
+	// texts are the character-data spans inside those elements, one per cut:
+	// from the end of the start tag to the start of the end tag — the base64
+	// text, which is what the embedder's exclusion covers.
+	texts []byteRange
 }
 
 // svgLayout tokenizes strictly and records the spans the writer edits. A root
@@ -89,7 +93,7 @@ func svgLayout(ctx context.Context, data []byte) (svgDoc, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	depth := 0
 	seenRoot := false
-	var manifestStart int
+	var manifestStart, manifestText int
 	manifestDepth := -1
 	for tokens := 0; tokens < maxSVGTokens; tokens++ {
 		if err := ctx.Err(); err != nil {
@@ -128,13 +132,14 @@ func svgLayout(ctx context.Context, data []byte) (svgDoc, error) {
 				doc.metaQName = xmlQName(data[prev:end])
 			}
 			if t.Name.Space == svgManifestNS && t.Name.Local == svgManifestLocal && manifestDepth < 0 {
-				manifestStart, manifestDepth = prev, depth
+				manifestStart, manifestText, manifestDepth = prev, end, depth
 			}
 			depth++
 		case xml.EndElement:
 			depth--
 			if manifestDepth == depth {
 				doc.cuts = append(doc.cuts, edit{at: manifestStart, remove: end - manifestStart})
+				doc.texts = append(doc.texts, byteRange{start: manifestText, length: max(prev-manifestText, 0)})
 				manifestDepth = -1
 			}
 			if depth == 0 {
@@ -156,6 +161,18 @@ func xmlQName(tag []byte) string {
 		i++
 	}
 	return string(tag[1:i])
+}
+
+// svgStoreRanges is the SVG side of storeRanges: the character data of each
+// c2pa:manifest element, which is the base64 text svgEmbedder excludes. A
+// document the strict tokenizer refuses yields nil, as it would refuse to
+// write into it.
+func svgStoreRanges(ctx context.Context, data []byte) []byteRange {
+	doc, err := svgLayout(ctx, data)
+	if err != nil {
+		return nil
+	}
+	return doc.texts
 }
 
 func (svgEmbedder) embed(ctx context.Context, asset, store []byte) ([]byte, []byteRange, error) {

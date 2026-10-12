@@ -99,6 +99,22 @@ func riffPlan(ctx context.Context, data []byte) (form string, riffEnd int, child
 	return form, riffEnd, children, nil
 }
 
+// riffStoreRanges is the RIFF side of storeRanges: each C2PA chunk's header
+// and body, without the pad byte — what riffEmbedder excludes.
+func riffStoreRanges(ctx context.Context, data []byte) []byteRange {
+	_, _, children, err := riffPlan(ctx, data)
+	if err != nil {
+		return nil
+	}
+	var rs []byteRange
+	for _, c := range children {
+		if c.id == riffC2PAChunk {
+			rs = append(rs, byteRange{start: c.start, length: 8 + c.size})
+		}
+	}
+	return rs
+}
+
 func (riffEmbedder) embed(ctx context.Context, asset, store []byte) ([]byte, []byteRange, error) {
 	form, riffEnd, children, err := riffPlan(ctx, asset)
 	if err != nil {

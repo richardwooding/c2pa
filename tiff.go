@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sort"
 )
 
 const (
@@ -235,6 +236,46 @@ func (l tiffLayout) ifds(ctx context.Context, data []byte) ([]tiffIFD, error) {
 		return nil, fmt.Errorf("%w: TIFF has no IFD", errCarrierMalformed)
 	}
 	return out, nil
+}
+
+// tiffStoreRanges is the TIFF side of storeRanges: for each 0xCD41 UNDEFINED
+// entry, its count field and the store bytes it addresses (inline in the
+// value field, or at the offset it names) — the two ranges tiffEmbedder
+// excludes, in file order. The walk mirrors tiffJUMBF's.
+func tiffStoreRanges(ctx context.Context, data []byte) []byteRange {
+	l, err := parseTIFFLayout(data)
+	if err != nil {
+		return nil
+	}
+	chain, err := l.ifds(ctx, data)
+	if err != nil {
+		return nil
+	}
+	var rs []byteRange
+	for _, ifd := range chain {
+		for e := 0; e < ifd.count; e++ {
+			at := ifd.entriesAt + e*l.entryLen
+			if int(l.bo.Uint16(data[at:at+2])) != tiffC2PATag || int(l.bo.Uint16(data[at+2:at+4])) != tiffUndefined {
+				continue
+			}
+			size := l.readW(data[at+4:at+4+l.entryCountW], l.entryCountW)
+			if size <= 0 {
+				continue
+			}
+			valAt := at + 4 + l.entryCountW
+			store := byteRange{start: valAt, length: int(size)}
+			if size > int64(l.offW) {
+				off := l.readW(data[valAt:valAt+l.offW], l.offW)
+				if off < 8 || off+size < off || off+size > int64(len(data)) {
+					continue
+				}
+				store = byteRange{start: int(off), length: int(size)}
+			}
+			rs = append(rs, byteRange{start: at + 4, length: l.entryCountW}, store)
+		}
+	}
+	sort.Slice(rs, func(i, j int) bool { return rs[i].start < rs[j].start })
+	return rs
 }
 
 func (tiffEmbedder) embed(ctx context.Context, asset, store []byte) ([]byte, []byteRange, error) {

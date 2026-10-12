@@ -491,6 +491,29 @@ empty for that whole generation of files.
   **The four allowed actions are a deliberate divergence**:
   c2pa-rs's own status-code doc describes ANY actions assertion in an update manifest as invalid,
   which would reject files §11.2.3 permits — the spec text is followed here.
+  **The parent's `c2pa.hash.data` exclusion is STALE by construction and §15.12.1.1 says to extend
+  it** (issue #72): the update was appended to the store AFTER the parent signed, so the exclusion
+  the parent recorded covers the store as it WAS — c2pa-rs's `update_manifest.jpg` records
+  `{9964, 18874}` over a run that now spans `{9964, 43607}` — and hashing with it is a false
+  `assertion.dataHash.mismatch`. `verifyUpdateManifest` sets `v.updateSeen` before handing the
+  parent to `verifyHardBinding`, and `verifyDataHash` then runs `adjustExclusionsForUpdate`: the
+  recorded exclusion whose START equals the current store's start takes the store's current length
+  and every exclusion after it shifts by the growth (c2pa-rs's `verify_hash_binding` does the same;
+  only growth is applied, a shrunk store is left to the hash). "The current length of the entire
+  C2PA Manifest Store plus any file format specific extras" is `storeRanges(ctx, container, data)`
+  (`embed.go`): per container, the ranges the EMBEDDER would exclude for the store where it
+  currently sits — `jpegStoreRanges` (the APP11 run, merged), `pngStoreRanges` (the caBX chunk),
+  `gifStoreRanges`, `riffStoreRanges`, `tiffStoreRanges` (count field AND store),
+  `mp3StoreRanges` (object bytes, in FILE offsets — nil under unsynchronisation), `svgStoreRanges`
+  (the element's character data, recorded by `svgLayout`); BMFF and PDF return nil. Each locator
+  lives beside its embedder and `TestStoreRangesMatchEmbedder` holds them equal, while
+  `TestStoreRangesMatchRealProducers` checks the convention against c2pa-rs's and OpenAI's own
+  exclusions. The gate matters: `TestStoreGrowthWithoutUpdateIsAMismatch` pins that a store which
+  grew with no update manifest in it is still a mismatch. **RIFF and MP3 cannot verify an in-place
+  update at all**, and `TestUpdateManifestAppendedAfterSigning` pins that too: the growth rewrites
+  a hashed size field outside the store (the RIFF header size and pad byte; the ID3 tag and GEOB
+  frame sizes), which no exclusion rule reaches — the exclusion convention is c2pa-rs's, so it
+  fails there the same way.
 - **BMFF purpose decides which store is active** (§A.5.3). Ordinarily one box has purpose
   `manifest`; once the asset is updated the store being updated is relabelled `original` and a new
   `update` box is appended as the LAST box of the file, and the update store is then active.

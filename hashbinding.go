@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/subtle"
 	"hash"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -164,11 +165,30 @@ func (v *validator) verifyDataHash(a *rawAssertion, uri string) {
 		return
 	}
 
-	ranges, ok := exclusionRanges(assertion["exclusions"], len(v.data))
+	raw, ok := decodeExclusions(assertion["exclusions"], len(v.data))
 	if !ok {
 		v.add(StatusAssertionDataHashMismatch, subj, "data-hash exclusion out of range", nil)
 		return
 	}
+	// §15.12.1.1: when an update manifest was encountered, the store grew after
+	// this manifest was signed, so the exclusion that starts where the store
+	// starts is treated as the store's CURRENT length and later exclusions
+	// shift by the difference. The container says where the store sits and
+	// how much framing a writer excludes with it; the adjusted ranges are
+	// bounds-checked again because the shift is derived, not declared.
+	explain := "asset data hash matches"
+	if v.updateSeen {
+		if adjusted, changed := adjustExclusionsForUpdate(raw, storeRanges(v.ctx, v.container, v.data)); changed {
+			if !rangesInBounds(adjusted, len(v.data)) {
+				v.add(StatusAssertionDataHashMismatch, subj,
+					"data-hash exclusion adjusted for the update manifest falls outside the asset", nil)
+				return
+			}
+			raw = adjusted
+			explain += " (exclusion extended to the manifest store's current length, §15.12.1.1)"
+		}
+	}
+	ranges := mergeRanges(raw)
 	// MaxScan truncation: if the asset filled the scan cap it may have been cut
 	// short, so the data hash cannot be computed reliably. Report informationally
 	// — never a false mismatch.
@@ -182,10 +202,56 @@ func (v *validator) verifyDataHash(a *rawAssertion, uri string) {
 		return
 	}
 	if subtle.ConstantTimeCompare(h.Sum(nil), want) == 1 {
-		v.add(StatusAssertionDataHashMatch, subj, "asset data hash matches", nil)
+		v.add(StatusAssertionDataHashMatch, subj, explain, nil)
 	} else {
 		v.add(StatusAssertionDataHashMismatch, subj, "asset data hash does not match", nil)
 	}
+}
+
+// adjustExclusionsForUpdate applies spec §15.12.1.1 to the exclusions a
+// standard manifest recorded: "if any update manifests were encountered then
+// the length value of the exclusion range whose start value is the offset of
+// the start of the entire C2PA Manifest Store shall be treated as the current
+// length of the entire C2PA Manifest Store plus any file format specific
+// extras", with every exclusion that starts after it shifted by the growth.
+//
+// An update manifest is appended to the store AFTER the standard manifest
+// signed it, so the exclusion that manifest recorded describes the store as it
+// was, not as it is — c2pa-rs's update_manifest.jpg records {9964, 18874} over
+// a run that now spans {9964, 43607}, and hashing with the stale range is a
+// false assertion.dataHash.mismatch (issue #72). current is what the container
+// says a writer would exclude for the store as it sits now (storeRanges), so a
+// recorded exclusion is matched to it by start, as c2pa-rs does. Only growth
+// is applied: a store that did not grow needs no adjustment, and one that
+// shrank is not what an update leaves behind, so the recorded ranges stand and
+// the hash decides. The result is a copy; changed says whether anything moved.
+func adjustExclusionsForUpdate(recorded, current []byteRange) (out []byteRange, changed bool) {
+	out = append([]byteRange(nil), recorded...)
+	for _, s := range current {
+		i := slices.IndexFunc(out, func(r byteRange) bool { return r.start == s.start })
+		if i < 0 || s.length <= out[i].length {
+			continue
+		}
+		delta := s.length - out[i].length
+		out[i].length = s.length
+		for j := range out {
+			if j != i && out[j].start > s.start {
+				out[j].start += delta
+			}
+		}
+		changed = true
+	}
+	return out, changed
+}
+
+// rangesInBounds reports whether every range lies within an n-byte asset.
+func rangesInBounds(rs []byteRange, n int) bool {
+	for _, r := range rs {
+		if r.start < 0 || r.length < 0 || r.start > n || r.length > n-r.start {
+			return false
+		}
+	}
+	return true
 }
 
 // byteRange is a [start, start+length) exclusion in the asset.
@@ -195,6 +261,18 @@ type byteRange struct{ start, length int }
 // sorted, merged, in-bounds ranges. It returns ok=false if any range is out of
 // range or numerically invalid (an indication of a malformed/forged assertion).
 func exclusionRanges(v any, n int) ([]byteRange, bool) {
+	raw, ok := decodeExclusions(v, n)
+	if !ok {
+		return nil, false
+	}
+	return mergeRanges(raw), true
+}
+
+// decodeExclusions decodes a c2pa.hash.data exclusions array into in-bounds
+// ranges in the order and shape the assertion gives them — unsorted and
+// unmerged, which is what the §15.12.1.1 adjustment needs to match an entry
+// by its start. ok=false means a range is out of range or numerically invalid.
+func decodeExclusions(v any, n int) ([]byteRange, bool) {
 	list, ok := v.([]any)
 	if !ok {
 		return nil, true // no exclusions: hash the whole asset
@@ -212,7 +290,7 @@ func exclusionRanges(v any, n int) ([]byteRange, bool) {
 		}
 		out = append(out, byteRange{start, length})
 	}
-	return mergeRanges(out), true
+	return out, true
 }
 
 // mergeRanges sorts ranges by start and merges overlapping/adjacent ones so the

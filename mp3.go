@@ -105,36 +105,48 @@ func id3DeUnsync(ctx context.Context, b []byte) []byte {
 // id3GEOBStore returns the object bytes of a GEOB frame body when its MIME type
 // marks it as a C2PA manifest store, or nil otherwise.
 func id3GEOBStore(body []byte) []byte {
-	if len(body) < 2 {
+	at := id3GEOBObjectAt(body)
+	if at < 0 {
 		return nil
 	}
+	return body[at:]
+}
+
+// id3GEOBObjectAt returns the offset within a GEOB frame body at which the
+// encapsulated object — the manifest store — begins, or -1 when the frame is
+// not a C2PA one or its header does not parse. The offset is what the MP3 side
+// of storeRanges needs; id3GEOBStore is the slice from it.
+func id3GEOBObjectAt(body []byte) int {
+	if len(body) < 2 {
+		return -1
+	}
 	encoding := body[0]
-	rest := body[1:]
+	pos := 1
 
 	// The MIME type is ISO-8859-1 and NUL-terminated whatever the encoding byte
 	// says — only filename and description follow the declared encoding.
-	i := bytes.IndexByte(rest, 0)
+	i := bytes.IndexByte(body[pos:], 0)
 	if i < 0 {
-		return nil
+		return -1
 	}
-	mime := string(rest[:i])
+	mime := string(body[pos : pos+i])
 	if mime != id3C2PAMime && mime != id3C2PAMimeDeprecated {
-		return nil
+		return -1
 	}
-	rest = rest[i+1:]
+	pos += i + 1
 
 	for range 2 { // filename, then description
 		n := id3TerminatorLen(encoding)
-		j := id3IndexTerminator(rest, n)
+		j := id3IndexTerminator(body[pos:], n)
 		if j < 0 {
-			return nil
+			return -1
 		}
-		rest = rest[j+n:]
+		pos += j + n
 	}
-	if len(rest) == 0 {
-		return nil
+	if pos >= len(body) {
+		return -1
 	}
-	return rest
+	return pos
 }
 
 // id3TerminatorLen is 2 for the UTF-16 encodings, whose NUL is two bytes.
@@ -295,6 +307,75 @@ func id3C2PAGEOB(major byte, store []byte) (frame []byte, objectAt int) {
 	}
 	frame = append(frame, 0, 0)
 	return append(frame, body...), objectAt
+}
+
+// mp3StoreRanges is the MP3 side of storeRanges: the object bytes of the C2PA
+// GEOB frame at their offsets in the FILE — what mp3Embedder excludes. The
+// walk is mp3JUMBF's, kept in file offsets rather than over a decoded body,
+// which is why a tag or frame written with unsynchronisation yields nil: the
+// object's bytes are then not contiguous in the file and no single range
+// describes them (this writer never unsynchronises, and c2pa-rs's id3 crate
+// does not either).
+func mp3StoreRanges(ctx context.Context, data []byte) []byteRange {
+	if len(data) < 10 || string(data[:3]) != "ID3" {
+		return nil
+	}
+	major, flags := data[3], data[5]
+	if major < 3 || major > 4 || (major == 3 && flags&0x80 != 0) {
+		return nil
+	}
+	size := id3Synchsafe(data[6:10])
+	end := min(10+size, len(data))
+	pos := 10
+	if flags&0x40 != 0 {
+		if pos+4 > end {
+			return nil
+		}
+		extSize := id3Synchsafe(data[pos : pos+4])
+		if major == 3 {
+			extSize = int(binary.BigEndian.Uint32(data[pos:pos+4])) + 4
+		}
+		if extSize < 0 {
+			return nil
+		}
+		pos += extSize
+	}
+	for frames := 0; frames < maxID3Frames && pos >= 0 && pos+10 <= end; frames++ {
+		if ctx.Err() != nil {
+			return nil
+		}
+		id := string(data[pos : pos+4])
+		if id == "\x00\x00\x00\x00" {
+			return nil // padding: the frames are done
+		}
+		frameSize := int(binary.BigEndian.Uint32(data[pos+4 : pos+8]))
+		if major == 4 {
+			frameSize = id3Synchsafe(data[pos+4 : pos+8])
+		}
+		frameFlags := data[pos+9]
+		start := pos + 10
+		if frameSize <= 0 || start+frameSize > end {
+			return nil
+		}
+		if id == "GEOB" {
+			body := start
+			if major == 4 {
+				if frameFlags&0x02 != 0 {
+					return nil // unsynchronised frame: not one contiguous range
+				}
+				if frameFlags&0x01 != 0 {
+					body += 4 // data length indicator
+				}
+			}
+			if body <= start+frameSize {
+				if at := id3GEOBObjectAt(data[body : start+frameSize]); at >= 0 {
+					return []byteRange{{start: body + at, length: start + frameSize - body - at}}
+				}
+			}
+		}
+		pos = start + frameSize
+	}
+	return nil
 }
 
 func (mp3Embedder) embed(ctx context.Context, asset, store []byte) ([]byte, []byteRange, error) {
