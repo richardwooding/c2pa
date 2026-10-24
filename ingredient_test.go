@@ -74,8 +74,8 @@ func TestValidate_IngredientMissing(t *testing.T) {
 
 	v := testValidator(false, nil)
 	v.validateIngredients(mA, store, 0)
-	if !v.res.Has(StatusIngredientManifestMismatch) {
-		t.Errorf("expected ingredient.manifest.mismatch; got %v", codes(v.res))
+	if !v.res.Has(StatusIngredientManifestMismatch) || !v.res.Has(StatusIngredientManifestMissing) {
+		t.Errorf("expected ingredient.manifest.mismatch and .missing; got %v", codes(v.res))
 	}
 }
 
