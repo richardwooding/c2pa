@@ -250,6 +250,22 @@ func TestCorpusNegatives(t *testing.T) {
 			want: StatusClaimRequiredMissing,
 		},
 		{
+			name:      "claim missing a required field",
+			container: JPEG,
+			spec: func(sb *signerBundle) manifestSpec {
+				return manifestSpec{signer: sb, claimExtra: map[string]any{"instanceID": nil}}
+			},
+			want: StatusClaimMalformed,
+		},
+		{
+			name:      "claim signature URI does not resolve",
+			container: JPEG,
+			spec: func(sb *signerBundle) manifestSpec {
+				return manifestSpec{signer: sb, claimExtra: map[string]any{"signature": "self#jumbf=c2pa.wrong-signature-label"}}
+			},
+			want: StatusClaimSignatureMissing,
+		},
+		{
 			name:      "manifest with two claim boxes",
 			container: JPEG,
 			spec: func(sb *signerBundle) manifestSpec {
@@ -285,6 +301,9 @@ func TestCorpusNegatives(t *testing.T) {
 				if !res.Has(StatusClaimSignatureOutsideValidity) || res.Has(StatusClaimSignatureValidated) {
 					t.Errorf("expired credential: want claimSignature.outsideValidity and no claimSignature.validated; got %v", codes(res))
 				}
+			}
+			if tc.want == StatusClaimMultiple && (res.Has(StatusClaimSignatureValidated) || res.Has(StatusSigningCredentialTrusted)) {
+				t.Errorf("claim.multiple: signature/credential must not be reported as validated/trusted; got %v", codes(res))
 			}
 			if res.Valid != tc.wantValid {
 				t.Errorf("Valid = %v, want %v (statuses %v)", res.Valid, tc.wantValid, codes(res))
