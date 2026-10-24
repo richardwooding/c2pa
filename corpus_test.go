@@ -159,6 +159,18 @@ func TestCorpusNegatives(t *testing.T) {
 			want:      StatusSigningCredentialInvalid,
 		},
 		{
+			name:      "leaf without keyUsage",
+			container: JPEG,
+			certOpts:  []certOpt{certNoKeyUsage()},
+			want:      StatusSigningCredentialInvalid,
+		},
+		{
+			name:      "leaf with keyCertSign",
+			container: JPEG,
+			certOpts:  []certOpt{certKeyCertSign()},
+			want:      StatusSigningCredentialInvalid,
+		},
+		{
 			name:      "leaf with anyExtendedKeyUsage",
 			container: JPEG,
 			certOpts:  []certOpt{certAnyEKU()},
@@ -265,6 +277,9 @@ func TestCorpusNegatives(t *testing.T) {
 			res := runCorpus(t, tc.container, asset, sb, extra...)
 			if !res.Has(tc.want) {
 				t.Fatalf("want %s; got %v", tc.want, codes(res))
+			}
+			if tc.want == StatusSigningCredentialInvalid && res.Has(StatusClaimSignatureValidated) {
+				t.Errorf("claimSignature.validated recorded beside signingCredential.invalid: %v", codes(res))
 			}
 			if res.Valid != tc.wantValid {
 				t.Errorf("Valid = %v, want %v (statuses %v)", res.Valid, tc.wantValid, codes(res))

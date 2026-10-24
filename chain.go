@@ -179,6 +179,13 @@ func (v *validator) checkCertProfile(path []*x509.Certificate, leaf *x509.Certif
 	for _, msg := range violations {
 		v.add(StatusSigningCredentialInvalid, uri, msg, nil)
 	}
+	if len(violations) > 0 {
+		// A credential outside the C2PA profile cannot vouch for the claim, so
+		// the signature is not reported as validated even though the bytes
+		// verify: claimSignature.validated would otherwise sit beside the
+		// failure that voids it.
+		v.dropStatus(uri, StatusClaimSignatureValidated)
+	}
 	return len(violations) == 0
 }
 
@@ -188,8 +195,11 @@ func (v *validator) checkCertProfile(path []*x509.Certificate, leaf *x509.Certif
 // algorithms / short RSA keys anywhere in the path. Empty means it conforms.
 func certProfileViolations(path []*x509.Certificate, leaf *x509.Certificate, ekuOK func(*x509.Certificate) bool) []string {
 	var out []string
-	if leaf.KeyUsage != 0 && leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+	if leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
 		out = append(out, "leaf keyUsage lacks digitalSignature")
+	}
+	if leaf.KeyUsage&(x509.KeyUsageCertSign|x509.KeyUsageCRLSign) != 0 {
+		out = append(out, "leaf keyUsage includes keyCertSign or cRLSign")
 	}
 	if leafHasAnyEKU(leaf) {
 		out = append(out, "leaf EKU includes anyExtendedKeyUsage")

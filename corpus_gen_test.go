@@ -93,6 +93,17 @@ func certNoDigitalSignature() certOpt {
 	return func(p *certProfile) { p.keyUsage = x509.KeyUsageKeyEncipherment; p.omitKeyUse = false }
 }
 
+func certNoKeyUsage() certOpt {
+	return func(p *certProfile) { p.keyUsage = 0 }
+}
+
+func certKeyCertSign() certOpt {
+	return func(p *certProfile) {
+		p.keyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign
+		p.omitKeyUse = false
+	}
+}
+
 func certAnyEKU() certOpt {
 	return func(p *certProfile) { p.ekus = []x509.ExtKeyUsage{x509.ExtKeyUsageAny} }
 }
