@@ -29,6 +29,9 @@ func TestCorpusTimestampPositive(t *testing.T) {
 			if !res.Has(StatusTimeStampValidated) {
 				t.Fatalf("want %s; got %v", StatusTimeStampValidated, codes(res))
 			}
+			if !res.Has(StatusTimeStampTrusted) || !res.Has(StatusClaimSignatureInsideValidity) {
+				t.Errorf("want timeStamp.trusted and claimSignature.insideValidity; got %v", codes(res))
+			}
 			if !res.Valid {
 				t.Errorf("expected valid; got %v", codes(res))
 			}

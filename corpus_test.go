@@ -281,6 +281,11 @@ func TestCorpusNegatives(t *testing.T) {
 			if tc.want == StatusSigningCredentialInvalid && res.Has(StatusClaimSignatureValidated) {
 				t.Errorf("claimSignature.validated recorded beside signingCredential.invalid: %v", codes(res))
 			}
+			if tc.want == StatusSigningCredentialExpired {
+				if !res.Has(StatusClaimSignatureOutsideValidity) || res.Has(StatusClaimSignatureValidated) {
+					t.Errorf("expired credential: want claimSignature.outsideValidity and no claimSignature.validated; got %v", codes(res))
+				}
+			}
 			if res.Valid != tc.wantValid {
 				t.Errorf("Valid = %v, want %v (statuses %v)", res.Valid, tc.wantValid, codes(res))
 			}
