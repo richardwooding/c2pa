@@ -82,7 +82,7 @@ func (v *validator) verifyHardBinding(m *parsedManifest, uri string) {
 		v.bind(BindingUnevaluated)
 		return
 	}
-	var dataHash, bmffHash, boxesHash *rawAssertion
+	var dataHash, bmffHash, boxesHash, multiAsset *rawAssertion
 	bmffV1 := false
 	for i := range m.assertions {
 		switch m.assertions[i].label {
@@ -94,6 +94,8 @@ func (v *validator) verifyHardBinding(m *parsedManifest, uri string) {
 			bmffHash = &m.assertions[i]
 		case "c2pa.hash.boxes":
 			boxesHash = &m.assertions[i]
+		case "c2pa.hash.multi-asset":
+			multiAsset = &m.assertions[i]
 		}
 	}
 	if v.fragments != nil && bmffHash == nil {
@@ -112,7 +114,15 @@ func (v *validator) verifyHardBinding(m *parsedManifest, uri string) {
 		v.bindFromStep(start, StatusAssertionBMFFHashMatch)
 	case dataHash != nil:
 		v.verifyDataHash(dataHash, uri)
-		v.bindFromStep(start, StatusAssertionDataHashMatch)
+		match := StatusAssertionDataHashMatch
+		if multiAsset != nil && v.has(uri+"/c2pa.hash.data", StatusAssertionDataHashMismatch) {
+			// The whole-asset hash failed, but the asset may be a multi-asset
+			// file that lost optional parts: the parts that remain decide.
+			v.dropStatus(uri+"/c2pa.hash.data", StatusAssertionDataHashMismatch)
+			v.verifyMultiAssetHash(m, multiAsset, uri)
+			match = StatusMultiAssetHashMatch
+		}
+		v.bindFromStep(start, match)
 	case bmffHash != nil:
 		// A BMFF binding cannot bind a non-BMFF asset: treating it as merely
 		// "unsupported" would let a bmff-only manifest wrapped around, say,
