@@ -24,3 +24,18 @@ func TestSigningEKUOK(t *testing.T) {
 		}
 	}
 }
+
+func TestClaimSigningEKUOK(t *testing.T) {
+	if !claimSigningEKUOK(&x509.Certificate{UnknownExtKeyUsage: []asn1.ObjectIdentifier{oidEKUClaimSigning}}) {
+		t.Error("c2pa-kp-claimSigning must be accepted")
+	}
+	for name, c := range map[string]x509.Certificate{
+		"emailProtection": {ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection}},
+		"documentSigning": {UnknownExtKeyUsage: []asn1.ObjectIdentifier{oidEKUDocumentSigning}},
+		"no EKU":          {},
+	} {
+		if claimSigningEKUOK(&c) {
+			t.Errorf("%s alone must be rejected in strict mode", name)
+		}
+	}
+}

@@ -240,6 +240,17 @@ func signingEKUOK(leaf *x509.Certificate) bool {
 	return false
 }
 
+// claimSigningEKUOK is the strict form of signingEKUOK: only a leaf carrying
+// c2pa-kp-claimSigning is acceptable (see WithRequireClaimSigningEKU).
+func claimSigningEKUOK(leaf *x509.Certificate) bool {
+	for _, oid := range leaf.UnknownExtKeyUsage {
+		if oid.Equal(oidEKUClaimSigning) {
+			return true
+		}
+	}
+	return false
+}
+
 // timestampEKUOK accepts a TSA leaf: it must include id-kp-timeStamping.
 func timestampEKUOK(leaf *x509.Certificate) bool {
 	for _, e := range leaf.ExtKeyUsage {

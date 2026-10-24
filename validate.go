@@ -142,6 +142,7 @@ type validateConfig struct {
 	identityTrust      *x509.CertPool
 	identityIssuers    map[string]bool // nil: not configured; empty: trust no issuer
 	onlineRevocation   bool
+	strictSigningEKU   bool
 	clock              func() time.Time
 	maxIngredientDepth int
 	maxScan            int
@@ -155,6 +156,16 @@ type ValidateOption func(*validateConfig)
 // to validate the claim signer's certificate chain.
 func WithSigningTrust(pool *x509.CertPool) ValidateOption {
 	return func(c *validateConfig) { c.signingTrust = pool }
+}
+
+// WithRequireClaimSigningEKU makes the claim signer's leaf certificate carry
+// the c2pa-kp-claimSigning EKU (1.3.6.1.4.1.62558.2.1), as the current C2PA
+// certificate profile requires. By default a leaf with only one of the earlier
+// emailProtection, codeSigning or documentSigning purposes is still accepted,
+// so credentials issued under the earlier profile keep validating. CAWG
+// identity credentials are not affected.
+func WithRequireClaimSigningEKU() ValidateOption {
+	return func(c *validateConfig) { c.strictSigningEKU = true }
 }
 
 // WithTimestampTrust overrides the embedded C2PA timestamp-authority trust pool
@@ -593,7 +604,11 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 		if depth == 0 {
 			v.res.SignerChain = chain
 		}
-		v.verifyChain(chain, v.signingTrustPool(), verifyTime, signingEKUOK, uri)
+		ekuOK := signingEKUOK
+		if v.cfg.strictSigningEKU {
+			ekuOK = claimSigningEKUOK
+		}
+		v.verifyChain(chain, v.signingTrustPool(), verifyTime, ekuOK, uri)
 		v.checkRevocation(chain, uri, StatusSigningCredentialRevoked)
 	}
 

@@ -332,3 +332,18 @@ func TestCorpusAttachedPayloadMatchingClaim(t *testing.T) {
 		t.Errorf("missing %s; got %v", StatusClaimSignatureValidated, codes(res))
 	}
 }
+
+// TestCorpusRequireClaimSigningEKU: the corpus leaf carries only the earlier
+// emailProtection purpose, which validates by default and is rejected once
+// WithRequireClaimSigningEKU asks for c2pa-kp-claimSigning.
+func TestCorpusRequireClaimSigningEKU(t *testing.T) {
+	sb := newCorpusSigner(t, cose.AlgorithmES256)
+	asset := buildAsset(t, JPEG, manifestSpec{signer: sb})
+	if res := runCorpus(t, JPEG, asset, sb); !res.Valid {
+		t.Fatalf("default: want valid; got %v", codes(res))
+	}
+	res := runCorpus(t, JPEG, asset, sb, WithRequireClaimSigningEKU())
+	if res.Valid || !res.Has(StatusSigningCredentialInvalid) {
+		t.Errorf("strict: want signingCredential.invalid; got valid=%v %v", res.Valid, codes(res))
+	}
+}
