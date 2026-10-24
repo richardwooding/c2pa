@@ -2,6 +2,7 @@ package c2pa
 
 import (
 	"crypto/x509"
+	"slices"
 	"time"
 
 	cose "github.com/veraison/go-cose"
@@ -74,22 +75,11 @@ func (v *validator) checkStapledOCSP(m *parsedManifest, chain []*x509.Certificat
 	}
 	leaf, issuer := path[0], path[1]
 	for _, der := range responses {
-		resp, err := ocsp.ParseResponseForCert(der, leaf, issuer)
-		if err != nil {
-			continue // wrong certificate, bad signature, or unauthorised responder
-		}
-		if resp.ThisUpdate.After(now) || (!resp.NextUpdate.IsZero() && resp.NextUpdate.Before(at)) {
-			continue
-		}
-		switch resp.Status {
-		case ocsp.Good:
+		switch verdict := judgeStapledOCSP(der, leaf, issuer, now, at, signedAt); verdict {
+		case ocspGood:
 			v.add(StatusOCSPNotRevoked, uri, "stapled OCSP response: not revoked", nil)
 			return true
-		case ocsp.Revoked:
-			if !signedAt.IsZero() && resp.RevokedAt.After(signedAt) {
-				v.add(StatusOCSPNotRevoked, uri, "stapled OCSP response: revoked only after signing", nil)
-				return true
-			}
+		case ocspRevoked:
 			v.add(StatusOCSPRevoked, uri, "stapled OCSP response: signing certificate revoked", nil)
 			v.add(StatusSigningCredentialRevoked, uri, "signing certificate revoked (stapled OCSP)", nil)
 			v.dropStatus(uri, StatusClaimSignatureValidated)
@@ -99,4 +89,41 @@ func (v *validator) checkStapledOCSP(m *parsedManifest, chain []*x509.Certificat
 	}
 	v.add(StatusOCSPSkipped, uri, "no usable stapled OCSP response for the signing certificate", nil)
 	return false
+}
+
+type ocspVerdict int
+
+const (
+	ocspUnusable ocspVerdict = iota
+	ocspGood
+	ocspRevoked
+)
+
+// judgeStapledOCSP decides what one stapled response says about leaf. It is
+// unusable when it is for another certificate, badly signed, from a delegated
+// responder that is not authorised to sign OCSP (no id-kp-OCSPSigning), not
+// yet valid at the validation clock now, or past nextUpdate at the time it is
+// judged (at: signing time when known, else now).
+func judgeStapledOCSP(der []byte, leaf, issuer *x509.Certificate, now, at, signedAt time.Time) ocspVerdict {
+	resp, err := ocsp.ParseResponseForCert(der, leaf, issuer)
+	if err != nil {
+		return ocspUnusable
+	}
+	if resp.Certificate != nil && !resp.Certificate.Equal(issuer) &&
+		!slices.Contains(resp.Certificate.ExtKeyUsage, x509.ExtKeyUsageOCSPSigning) {
+		return ocspUnusable
+	}
+	if resp.ThisUpdate.After(now) || (!resp.NextUpdate.IsZero() && resp.NextUpdate.Before(at)) {
+		return ocspUnusable
+	}
+	switch resp.Status {
+	case ocsp.Good:
+		return ocspGood
+	case ocsp.Revoked:
+		if !signedAt.IsZero() && resp.RevokedAt.After(signedAt) {
+			return ocspGood // revoked only after the claim was signed
+		}
+		return ocspRevoked
+	}
+	return ocspUnusable
 }
