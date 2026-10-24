@@ -121,11 +121,16 @@ func (v *validator) verifyChain(certs []*x509.Certificate, roots *x509.CertPool,
 	if err != nil {
 		code, explanation := chainErrorStatus(err)
 		v.add(code, uri, explanation, err)
+		if code == StatusSigningCredentialExpired {
+			v.add(StatusClaimSignatureOutsideValidity, uri, explanation, err)
+			v.dropStatus(uri, StatusClaimSignatureValidated)
+		}
 		return false
 	}
 	if !v.checkCertProfile(path, certs[0], ekuOK, uri) {
 		return false
 	}
+	v.add(StatusClaimSignatureInsideValidity, uri, "signing credential valid at signing time", nil)
 	v.add(StatusSigningCredentialTrusted, uri, "certificate chain validated", nil)
 	return true
 }

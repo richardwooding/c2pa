@@ -24,14 +24,20 @@ const (
 
 // Success status codes.
 const (
-	StatusClaimSignatureValidated     StatusCode = "claimSignature.validated"
-	StatusSigningCredentialTrusted    StatusCode = "signingCredential.trusted"
-	StatusTimeStampValidated          StatusCode = "timeStamp.validated"
-	StatusAssertionHashedURIMatch     StatusCode = "assertion.hashedURI.match"
-	StatusAssertionDataHashMatch      StatusCode = "assertion.dataHash.match"
-	StatusAssertionBoxesHashMatch     StatusCode = "assertion.boxesHash.match"
-	StatusAssertionBMFFHashMatch      StatusCode = "assertion.bmffHash.match"
-	StatusIngredientManifestValidated StatusCode = "ingredient.manifest.validated"
+	StatusClaimSignatureValidated  StatusCode = "claimSignature.validated"
+	StatusSigningCredentialTrusted StatusCode = "signingCredential.trusted"
+	StatusTimeStampValidated       StatusCode = "timeStamp.validated"
+	// StatusTimeStampTrusted is recorded beside timeStamp.validated when the
+	// time-stamp authority's chain reached a trusted anchor.
+	StatusTimeStampTrusted StatusCode = "timeStamp.trusted"
+	// StatusClaimSignatureInsideValidity: the signing credential chain was valid at
+	// the time the claim was signed (the trusted time-stamp, else the clock).
+	StatusClaimSignatureInsideValidity StatusCode = "claimSignature.insideValidity"
+	StatusAssertionHashedURIMatch      StatusCode = "assertion.hashedURI.match"
+	StatusAssertionDataHashMatch       StatusCode = "assertion.dataHash.match"
+	StatusAssertionBoxesHashMatch      StatusCode = "assertion.boxesHash.match"
+	StatusAssertionBMFFHashMatch       StatusCode = "assertion.bmffHash.match"
+	StatusIngredientManifestValidated  StatusCode = "ingredient.manifest.validated"
 	// StatusIdentityTrusted reports a CAWG identity assertion (cawg.identity)
 	// whose signature, references and padding all check and whose signing
 	// credential reaches an identity trust anchor (WithIdentityTrust). The named
@@ -73,12 +79,16 @@ const (
 	StatusSigningCredentialInvalid   StatusCode = "signingCredential.invalid"
 	StatusSigningCredentialRevoked   StatusCode = "signingCredential.revoked"
 	StatusSigningCredentialExpired   StatusCode = "signingCredential.expired"
-	StatusTimeStampMismatch          StatusCode = "timeStamp.mismatch"
-	StatusTimeStampUntrusted         StatusCode = "timeStamp.untrusted"
-	StatusTimeStampOutsideValidity   StatusCode = "timeStamp.outsideValidity"
-	StatusAssertionHashedURIMismatch StatusCode = "assertion.hashedURI.mismatch"
-	StatusAssertionDataHashMismatch  StatusCode = "assertion.dataHash.mismatch"
-	StatusAssertionBoxesHashMismatch StatusCode = "assertion.boxesHash.mismatch"
+	// StatusClaimSignatureOutsideValidity: a certificate in the signing chain was
+	// outside its validity period at signing time. Recorded beside
+	// signingCredential.expired.
+	StatusClaimSignatureOutsideValidity StatusCode = "claimSignature.outsideValidity"
+	StatusTimeStampMismatch             StatusCode = "timeStamp.mismatch"
+	StatusTimeStampUntrusted            StatusCode = "timeStamp.untrusted"
+	StatusTimeStampOutsideValidity      StatusCode = "timeStamp.outsideValidity"
+	StatusAssertionHashedURIMismatch    StatusCode = "assertion.hashedURI.mismatch"
+	StatusAssertionDataHashMismatch     StatusCode = "assertion.dataHash.mismatch"
+	StatusAssertionBoxesHashMismatch    StatusCode = "assertion.boxesHash.mismatch"
 	// StatusAssertionBoxesHashUnknownBox reports that the asset's box structure
 	// does not line up with the boxes[] the assertion describes — a name that
 	// does not match the next box in file order, or a box the assertion leaves
@@ -176,18 +186,20 @@ const (
 // statusSeverity maps every known StatusCode to its Severity. Codes absent from
 // the table are treated as SeverityInformational by Severity().
 var statusSeverity = map[StatusCode]Severity{
-	StatusClaimSignatureValidated:     SeveritySuccess,
-	StatusSigningCredentialTrusted:    SeveritySuccess,
-	StatusTimeStampValidated:          SeveritySuccess,
-	StatusAssertionHashedURIMatch:     SeveritySuccess,
-	StatusAssertionDataHashMatch:      SeveritySuccess,
-	StatusAssertionBoxesHashMatch:     SeveritySuccess,
-	StatusAssertionBMFFHashMatch:      SeveritySuccess,
-	StatusIngredientManifestValidated: SeveritySuccess,
-	StatusIdentityTrusted:             SeveritySuccess,
-	StatusIdentityWellFormed:          SeveritySuccess,
-	StatusICACredentialValid:          SeveritySuccess,
-	StatusICATimeStampValidated:       SeveritySuccess,
+	StatusClaimSignatureValidated:      SeveritySuccess,
+	StatusSigningCredentialTrusted:     SeveritySuccess,
+	StatusTimeStampValidated:           SeveritySuccess,
+	StatusTimeStampTrusted:             SeveritySuccess,
+	StatusClaimSignatureInsideValidity: SeveritySuccess,
+	StatusAssertionHashedURIMatch:      SeveritySuccess,
+	StatusAssertionDataHashMatch:       SeveritySuccess,
+	StatusAssertionBoxesHashMatch:      SeveritySuccess,
+	StatusAssertionBMFFHashMatch:       SeveritySuccess,
+	StatusIngredientManifestValidated:  SeveritySuccess,
+	StatusIdentityTrusted:              SeveritySuccess,
+	StatusIdentityWellFormed:           SeveritySuccess,
+	StatusICACredentialValid:           SeveritySuccess,
+	StatusICATimeStampValidated:        SeveritySuccess,
 
 	StatusClaimMissing:                   SeverityFailure,
 	StatusClaimRequiredMissing:           SeverityFailure,
@@ -198,6 +210,7 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusSigningCredentialInvalid:       SeverityFailure,
 	StatusSigningCredentialRevoked:       SeverityFailure,
 	StatusSigningCredentialExpired:       SeverityFailure,
+	StatusClaimSignatureOutsideValidity:  SeverityFailure,
 	StatusTimeStampMismatch:              SeverityFailure,
 	StatusTimeStampUntrusted:             SeverityFailure,
 	StatusTimeStampOutsideValidity:       SeverityFailure,

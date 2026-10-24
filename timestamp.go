@@ -89,6 +89,7 @@ func (v *validator) verifyTimestampOf(envelope, payload []byte, uri string, allo
 		return gt, false
 	}
 	v.add(StatusTimeStampValidated, uri, "timestamp verified", nil)
+	v.add(StatusTimeStampTrusted, uri, "timestamp authority chain trusted", nil)
 	return gt, true
 }
 
