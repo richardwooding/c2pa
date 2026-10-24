@@ -160,7 +160,7 @@ func buildTrustedPath(certs []*x509.Certificate, roots *x509.CertPool, verifyTim
 }
 
 // chainErrorStatus maps an x509 path-building error to the C2PA status it is:
-// no anchor reached is untrusted, a validity-window miss is expired, anything
+// no anchor reached (or none permitted by the CA constraints) is untrusted, a validity-window miss is expired, anything
 // else is an invalid credential.
 func chainErrorStatus(err error) (StatusCode, string) {
 	var unknownAuth x509.UnknownAuthorityError
@@ -170,6 +170,11 @@ func chainErrorStatus(err error) (StatusCode, string) {
 		return StatusSigningCredentialUntrusted, "chain does not reach a trust anchor"
 	case errors.As(err, &invalid) && invalid.Reason == x509.Expired:
 		return StatusSigningCredentialExpired, "certificate not valid at signing time"
+	case errors.As(err, &invalid) && (invalid.Reason == x509.TooManyIntermediates || invalid.Reason == x509.NotAuthorizedToSign):
+		// A CA's pathLenConstraint (or basicConstraints) forbids the path: no
+		// path to an anchor exists, which is untrusted rather than a defect in
+		// the credential itself.
+		return StatusSigningCredentialUntrusted, "no permitted path to a trust anchor (pathLenConstraint or CA constraints)"
 	default:
 		return StatusSigningCredentialInvalid, "certificate chain verification failed"
 	}
