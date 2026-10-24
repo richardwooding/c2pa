@@ -215,8 +215,6 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusSigningCredentialExpired:       SeverityFailure,
 	StatusClaimSignatureOutsideValidity:  SeverityFailure,
 	StatusTimeStampMismatch:              SeverityFailure,
-	StatusTimeStampUntrusted:             SeverityFailure,
-	StatusTimeStampOutsideValidity:       SeverityFailure,
 	StatusAssertionHashedURIMismatch:     SeverityFailure,
 	StatusAssertionDataHashMismatch:      SeverityFailure,
 	StatusAssertionBoxesHashMismatch:     SeverityFailure,
@@ -262,7 +260,11 @@ var statusSeverity = map[StatusCode]Severity{
 
 	StatusRevocationUnknown: SeverityInformational,
 	StatusTimeStampMissing:  SeverityInformational,
-	StatusUnsupported:       SeverityInformational,
+	// An untrusted time-stamp is not evidence of anything: it is ignored, and the
+	// credential is judged at the validation clock instead.
+	StatusTimeStampUntrusted:       SeverityInformational,
+	StatusTimeStampOutsideValidity: SeverityInformational,
+	StatusUnsupported:              SeverityInformational,
 
 	StatusSoftBindingUnevaluated: SeverityInformational,
 	StatusSoftBindingAlgUnlisted: SeverityInformational,

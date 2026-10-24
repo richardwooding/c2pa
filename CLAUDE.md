@@ -922,7 +922,7 @@ Go's `x509.Verify` accepts a leaf that is itself in the root pool, so a one-cert
 and sign `video_no_manifest.mp4` / re-sign `c2pa_chatgpt.pdf` into buffers — nothing lands in
 `testdata/`. The re-sign example is the PDF and not `c2pa_signed.jpg` on purpose: the ingredient
 only reports `ingredient.manifest.validated` when its own validation adds no failure, and the JPEG
-fixture's DigiCert timestamp is `timeStamp.untrusted` (a FAILURE) against the embedded TSA list,
+fixture's DigiCert timestamp is `timeStamp.untrusted` against the embedded TSA list,
 which `WithSigningTrust` does not touch; the ChatGPT PDF has no timestamp at all. **The README's PDF section is the same three examples**, with each
 checked value repeated as an inline `// comment` — so those values are verified in `example_test.go`
 and hand-copied in `README.md`. Change one and change the other; nothing catches the README.

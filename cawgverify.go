@@ -199,15 +199,15 @@ func (v *validator) verifyIdentityX509(ia identityAssertion, iuri string) (chain
 	if tsTrusted {
 		signedAt = genTime
 	}
-	if !genTime.IsZero() {
-		// As for the claim: an attested genTime pins the validity window even
-		// when its TSA is unanchored (timeStamp.untrusted already stands).
+	if tsTrusted && !genTime.IsZero() {
+		// As for the claim: only a trusted time-stamp pins the validity window;
+		// an unanchored one (timeStamp.untrusted, informational) is ignored.
 		verifyTime = genTime
 	}
 	if len(chain) == 0 {
 		return nil, signedAt, false // verifySign1 reported why
 	}
-	if leaf := chain[0]; !genTime.IsZero() &&
+	if leaf := chain[0]; tsTrusted && !genTime.IsZero() &&
 		(genTime.Before(leaf.NotBefore) || genTime.After(leaf.NotAfter)) {
 		v.add(StatusTimeStampOutsideValidity, iuri,
 			"timestamp genTime is outside the identity certificate's validity period", nil)
