@@ -31,6 +31,8 @@ func (v *validator) validateIngredients(m *parsedManifest, store *parsedStore, d
 			// (§A.4.2.1), update sections and object-level manifests included,
 			// so a reference that lands nowhere is a real finding rather than
 			// something this extractor merely failed to look at.
+			v.add(StatusIngredientManifestMissing, a.label, "ingredient references a manifest not present in the store", nil)
+			// Kept beside the more specific code for callers that match on it.
 			v.add(StatusIngredientManifestMismatch, a.label, "ingredient references a manifest not present in the store", nil)
 			continue
 		}
@@ -139,6 +141,8 @@ func (v *validator) verifyUpdateManifest(m *parsedManifest, store *parsedStore, 
 	}
 	parent := resolveManifest(parents[0], store.byLabel())
 	if parent == nil {
+		v.add(StatusIngredientManifestMissing, uri,
+			"update manifest's parentOf ingredient names a manifest not present in the store", nil)
 		v.rejectUpdateManifest(StatusIngredientManifestMismatch, uri,
 			"update manifest's parentOf ingredient names a manifest not present in the store")
 		return
