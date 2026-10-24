@@ -657,7 +657,7 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 		if trusted {
 			stapledAt = genTime
 		}
-		if !v.checkStapledOCSP(m, chain, uri, stapledAt) {
+		if !v.checkStapledOCSP(m, chain, uri, stapledAt, verifyTime) {
 			v.checkRevocation(chain, uri, StatusSigningCredentialRevoked)
 		}
 	}
