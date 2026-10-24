@@ -653,7 +653,13 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 			ekuOK = claimSigningEKUOK
 		}
 		v.verifyChain(chain, v.signingTrustPool(), verifyTime, ekuOK, uri)
-		v.checkRevocation(chain, uri, StatusSigningCredentialRevoked)
+		var stapledAt time.Time
+		if trusted {
+			stapledAt = genTime
+		}
+		if !v.checkStapledOCSP(m, chain, uri, stapledAt) {
+			v.checkRevocation(chain, uri, StatusSigningCredentialRevoked)
+		}
 	}
 
 	if m.multipleClaims {
