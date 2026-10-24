@@ -230,6 +230,12 @@ func (v *validator) verifyTSAChain(signer *x509.Certificate, certs []*x509.Certi
 		} else {
 			v.add(StatusTimeStampUntrusted, uri, "timestamp authority not trusted", err)
 		}
+		var invalid x509.CertificateInvalidError
+		if errors.As(err, &invalid) && invalid.Reason == x509.Expired {
+			// The time the TSA attests lies outside its own certificate's validity.
+			v.add(StatusTimeStampOutsideValidity, uri,
+				"timestamp genTime is outside the time-stamp authority's validity period", nil)
+		}
 		return false
 	}
 	return true

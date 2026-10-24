@@ -58,8 +58,6 @@ func TestCorpusTimestampNegatives(t *testing.T) {
 		{"contentType is not id-ct-TSTInfo", 1, []tsTokenOpt{tsBadContentType()}, nil, StatusTimeStampMismatch},
 		{"corrupt CMS signature", 1, []tsTokenOpt{tsCorruptSignature()}, nil, StatusTimeStampMismatch},
 		{"two signers", 1, []tsTokenOpt{tsTwoSigners()}, nil, StatusTimeStampMismatch},
-		{"signer certificate absent", 1, []tsTokenOpt{tsOmitCerts()}, nil, StatusTimeStampUntrusted},
-		{"TSA leaf with anyExtendedKeyUsage", 1, nil, []tsaOpt{tsaAnyEKU()}, StatusTimeStampUntrusted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sb := newCorpusSigner(t, cose.AlgorithmES256)
@@ -73,6 +71,34 @@ func TestCorpusTimestampNegatives(t *testing.T) {
 			}
 			if res.Valid {
 				t.Errorf("expected invalid; got %v", codes(res))
+			}
+		})
+	}
+}
+
+// TestCorpusTimestampIgnored covers a time-stamp that cannot be anchored (no
+// signer certificate, or a TSA leaf with anyExtendedKeyUsage): it is reported
+// as timeStamp.untrusted, informationally, and ignored — the asset's validity
+// then rests on the credential alone.
+func TestCorpusTimestampIgnored(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []tsTokenOpt
+		tsa  []tsaOpt
+	}{
+		{"signer certificate absent", []tsTokenOpt{tsOmitCerts()}, nil},
+		{"TSA leaf with anyExtendedKeyUsage", nil, []tsaOpt{tsaAnyEKU()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := newCorpusSigner(t, cose.AlgorithmES256)
+			ta := newTestTSA(t, tc.tsa...)
+			asset := buildAsset(t, JPEG, manifestSpec{signer: sb, tsKind: 1, tsa: ta, tsOpts: tc.opts})
+			res := runCorpus(t, JPEG, asset, sb, WithTimestampTrust(ta.pool()))
+			if !res.Has(StatusTimeStampUntrusted) {
+				t.Fatalf("want timeStamp.untrusted; got %v", codes(res))
+			}
+			if !res.Valid || !res.SignedAt.IsZero() {
+				t.Errorf("an ignored time-stamp neither fails the asset nor sets SignedAt; got valid=%v signedAt=%v %v", res.Valid, res.SignedAt, codes(res))
 			}
 		})
 	}
@@ -117,23 +143,17 @@ func TestCorpusTimestampPinsSigningWindow(t *testing.T) {
 		t.Errorf("expected valid; got %v", codes(withTS))
 	}
 
-	// An UNTRUSTED TSA still pins the window: the token is cryptographically
-	// bound to this signature, so the signing time is attested even though the
-	// authority does not anchor. The trust failure stands and keeps the asset
-	// from ever being Valid — but it must not be compounded into a manufactured
-	// signingCredential.expired, which would misfile a legitimately old file as
-	// structurally broken rather than merely unanchored.
+	// An UNTRUSTED TSA does not pin the window: its genTime is not something
+	// the validator can rely on, so timeStamp.untrusted is informational and
+	// the credential is judged at the validation clock — expired here.
 	noTS := runCorpus(t, JPEG, asset, sb,
 		WithTimestampTrust(emptyPool()),
 		WithClock(func() time.Time { return longAfter }))
-	if noTS.Has(StatusSigningCredentialExpired) {
-		t.Errorf("an attested genTime must pin the cert window even when the TSA is untrusted; got %v", codes(noTS))
+	if !noTS.Has(StatusSigningCredentialExpired) {
+		t.Errorf("an untrusted genTime must not pin the cert window; got %v", codes(noTS))
 	}
-	if !noTS.Has(StatusTimeStampUntrusted) {
-		t.Errorf("the trust failure must stand; got %v", codes(noTS))
-	}
-	if noTS.Valid {
-		t.Error("an untrusted timestamp can never yield Valid")
+	if !noTS.Has(StatusTimeStampUntrusted) || noTS.Valid {
+		t.Errorf("want timeStamp.untrusted and an invalid result; got valid=%v %v", noTS.Valid, codes(noTS))
 	}
 	if !noTS.SignedAt.IsZero() {
 		t.Errorf("SignedAt is trusted-only; got %v from an untrusted TSA", noTS.SignedAt)

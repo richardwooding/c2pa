@@ -474,16 +474,18 @@ func TestIdentityTimestamp(t *testing.T) {
 		t.Errorf("claim SignedAt = %v; %v", res.SignedAt, codes(res))
 	}
 
-	// An unanchored TSA: the token still pins the identity certificate's
-	// validity window but is a failure, and SignedAt stays zero.
+	// An unanchored TSA: the token is ignored (timeStamp.untrusted is
+	// informational, as for the claim), so SignedAt stays zero.
 	res = runCorpus(t, JPEG, asset, claimSB, WithTimestampTrust(emptyPool()), WithIdentityTrust(idSB.roots))
-	if res.Valid || !hasAt(res, StatusTimeStampUntrusted, identityURI) || res.Identities[0].Valid || !res.Identities[0].SignedAt.IsZero() {
+	if !res.Valid || !hasAt(res, StatusTimeStampUntrusted, identityURI) || !res.Identities[0].Valid || !res.Identities[0].SignedAt.IsZero() {
 		t.Errorf("untrusted TSA: valid=%v id=%+v %v", res.Valid, res.Identities[0], codes(res))
 	}
 
 	// A genTime outside the identity certificate's validity is its own failure.
-	asset = identityAsset(t, claimSB, idSB, idTimestampAt(2, ta, corpusEpoch.Add(3*365*24*time.Hour)))
-	res = runCorpus(t, JPEG, asset, claimSB, WithTimestampTrust(ta.pool()), WithIdentityTrust(idSB.roots))
+	// (The TSA must itself be valid then, or its time-stamp is ignored.)
+	lateTA := newTestTSA(t, tsaValidity(corpusEpoch.Add(-24*time.Hour), corpusEpoch.Add(4*365*24*time.Hour)))
+	asset = identityAsset(t, claimSB, idSB, idTimestampAt(2, lateTA, corpusEpoch.Add(3*365*24*time.Hour)))
+	res = runCorpus(t, JPEG, asset, claimSB, WithTimestampTrust(lateTA.pool()), WithIdentityTrust(idSB.roots))
 	if res.Valid || !hasAt(res, StatusTimeStampOutsideValidity, identityURI) {
 		t.Errorf("genTime outside validity: valid=%v %v", res.Valid, codes(res))
 	}
