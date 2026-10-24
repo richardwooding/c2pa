@@ -13,6 +13,10 @@ import (
 // in Certificate.UnknownExtKeyUsage instead of ExtKeyUsage.
 var oidEKUDocumentSigning = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 36}
 
+// oidEKUClaimSigning is c2pa-kp-claimSigning (1.3.6.1.4.1.62558.2.1), the EKU
+// C2PA requires on a claim-signing leaf.
+var oidEKUClaimSigning = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 62558, 2, 1}
+
 // oidRSASSAPSS is id-RSASSA-PSS. C2PA RSA signing certificates commonly encode
 // their SubjectPublicKeyInfo with this algorithm OID rather than rsaEncryption.
 // Go's crypto/x509 does not parse such an SPKI into a usable key — it leaves
@@ -219,7 +223,9 @@ func leafHasAnyEKU(leaf *x509.Certificate) bool {
 }
 
 // signingEKUOK accepts a C2PA content-signing leaf: it must carry an EKU, and
-// it must include one of emailProtection, codeSigning, or id-kp-documentSigning.
+// it must include c2pa-kp-claimSigning (§14.5.1) or, for credentials issued
+// under the earlier profile, one of emailProtection, codeSigning, or
+// id-kp-documentSigning.
 func signingEKUOK(leaf *x509.Certificate) bool {
 	for _, e := range leaf.ExtKeyUsage {
 		if e == x509.ExtKeyUsageEmailProtection || e == x509.ExtKeyUsageCodeSigning {
@@ -227,7 +233,7 @@ func signingEKUOK(leaf *x509.Certificate) bool {
 		}
 	}
 	for _, oid := range leaf.UnknownExtKeyUsage {
-		if oid.Equal(oidEKUDocumentSigning) {
+		if oid.Equal(oidEKUDocumentSigning) || oid.Equal(oidEKUClaimSigning) {
 			return true
 		}
 	}
