@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -326,6 +327,28 @@ func (v *validator) add(code StatusCode, uri, explain string, err error) {
 	})
 }
 
+// has reports whether a status with the given code was recorded at uri.
+func (v *validator) has(uri string, code StatusCode) bool {
+	for _, e := range v.res.Statuses {
+		if e.Code == code && e.URI == uri {
+			return true
+		}
+	}
+	return false
+}
+
+// hardBindingTampered reports whether a hard-binding assertion failed its
+// hashed-URI check.
+func (v *validator) hardBindingTampered() bool {
+	for _, e := range v.res.Statuses {
+		if e.Code == StatusAssertionHashedURIMismatch &&
+			slices.Contains(hardBindingLabels, assertionLabelBase(assertionLabelFromURL(e.URI))) {
+			return true
+		}
+	}
+	return false
+}
+
 // dropStatus removes every recorded status with the given code and URI.
 func (v *validator) dropStatus(uri string, code StatusCode) {
 	kept := v.res.Statuses[:0]
@@ -571,7 +594,16 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 	if m.multipleClaims {
 		v.add(StatusClaimMultiple, uri, "manifest holds more than one claim box", nil)
 	}
-	if m.signature == nil {
+	hardBindingsOK := v.checkClaimStructure(m, uri)
+	if m.claim != nil {
+		// The claim names its signature box by URI; one that does not point at
+		// c2pa.signature leaves the claim without a signature to verify.
+		if s, ok := m.claim["signature"].(string); ok && !strings.HasSuffix(s, "c2pa.signature") {
+			v.add(StatusClaimSignatureMissing, uri, "claim's signature URI does not resolve to c2pa.signature", nil)
+			m.signature = nil
+		}
+	}
+	if m.signature == nil && !v.has(uri, StatusClaimSignatureMissing) {
 		v.add(StatusClaimSignatureMissing, uri, "manifest has no signature", nil)
 	}
 
@@ -624,6 +656,12 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 		v.checkRevocation(chain, uri, StatusSigningCredentialRevoked)
 	}
 
+	if m.multipleClaims {
+		// More than one claim leaves it unknown which one the signature covers.
+		v.dropStatus(uri, StatusClaimSignatureValidated)
+		v.dropStatus(uri, StatusSigningCredentialTrusted)
+	}
+
 	// Assertion integrity: each claimed assertion hash must match its box.
 	v.verifyAssertionHashes(m, uri)
 	// CAWG identity assertions: a named actor's own signature over some of
@@ -654,6 +692,14 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 		// parentOf ingredient — and that manifest describes THESE bytes, unlike
 		// an ordinary ingredient's.
 		v.verifyUpdateManifest(m, store, uri)
+	case depth == 0 && !hardBindingsOK:
+		v.bind(BindingNone)
+	case depth == 0 && v.hardBindingTampered():
+		// Either the claim does not cover a hard binding (already reported) or
+		// the one it covers was altered after signing (assertion.hashedURI
+		// mismatch): evaluating it against the asset would report a match for
+		// bytes the signature does not vouch for.
+		v.bind(BindingFailed)
 	case depth == 0:
 		v.verifyHardBinding(m, uri)
 	case !v.hardBound[m.label]:
