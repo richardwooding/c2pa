@@ -56,9 +56,15 @@ func stapledOCSPResponses(envelope []byte) [][]byte {
 // signing time when that is known, else at the validation clock. It reports
 // whether the stapled responses settled revocation (good or revoked); when they
 // did not, the caller falls back to the online check.
-func (v *validator) checkStapledOCSP(m *parsedManifest, chain []*x509.Certificate, uri string, signedAt time.Time) (settled bool) {
+func (v *validator) checkStapledOCSP(m *parsedManifest, chain []*x509.Certificate, uri string, signedAt, verifyTime time.Time) (settled bool) {
 	responses := stapledOCSPResponses(m.signature)
-	if len(responses) == 0 || len(chain) < 2 {
+	if len(responses) == 0 {
+		return false
+	}
+	// The issuer need not be in the presented chain (a leaf issued directly by
+	// a trust anchor presents only itself), so take it from the built path.
+	path, err := buildTrustedPath(chain, v.signingTrustPool(), verifyTime)
+	if err != nil || len(path) < 2 {
 		return false
 	}
 	now := v.cfg.clock()
@@ -66,7 +72,7 @@ func (v *validator) checkStapledOCSP(m *parsedManifest, chain []*x509.Certificat
 	if !signedAt.IsZero() {
 		at = signedAt
 	}
-	leaf, issuer := chain[0], chain[1]
+	leaf, issuer := path[0], path[1]
 	for _, der := range responses {
 		resp, err := ocsp.ParseResponseForCert(der, leaf, issuer)
 		if err != nil {
