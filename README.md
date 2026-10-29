@@ -192,6 +192,7 @@ r := c2pa.Validate(ctx, c2pa.JPEG, f,
     c2pa.WithIdentityTrust(identityCAs), // CAWG X.509 identity anchors (none by default)
     c2pa.WithIdentityIssuers(dids...),   // aggregator DIDs to believe (none by default)
     c2pa.WithOnlineRevocation(true),     // enable OCSP/CRL (network; default off)
+    c2pa.WithRequireClaimSigningEKU(),   // insist on the c2pa-kp-claimSigning EKU (default: legacy EKUs too)
     c2pa.WithClock(func() time.Time { return now }), // signing-time fallback
     c2pa.WithMaxIngredientDepth(16),     // bound nested-manifest recursion
     c2pa.WithMaxScan(64 << 20),          // cap bytes read

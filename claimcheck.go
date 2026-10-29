@@ -5,30 +5,17 @@ import (
 	"strings"
 )
 
-// Claim-structure status codes (§15.2): the shape of the claim box itself and
-// of the assertions it references, checked before any signature or hash is
-// trusted.
-const (
-	StatusClaimCBORInvalid           StatusCode = "claim.cbor.invalid"
-	StatusClaimMalformed             StatusCode = "claim.malformed"
-	StatusClaimHardBindingsMissing   StatusCode = "claim.hardBindings.missing"
-	StatusAssertionCBORInvalid       StatusCode = "assertion.cbor.invalid"
-	StatusAssertionIngredientMalform StatusCode = "assertion.ingredient.malformed"
-)
-
-func init() {
-	for _, c := range []StatusCode{
-		StatusClaimCBORInvalid, StatusClaimMalformed, StatusClaimHardBindingsMissing,
-		StatusAssertionCBORInvalid, StatusAssertionIngredientMalform,
-	} {
-		statusSeverity[c] = SeverityFailure
-	}
-}
+// Claim structure (§15.2): the shape of the claim box itself and of the
+// assertions it references, checked before any signature or hash is trusted.
+// The status codes live in statuscodes.go with the rest.
 
 // hardBindingLabels are the assertions that bind a claim to its asset's bytes.
+// c2pa.hash.multi-asset is deliberately absent: §18.9.2 says it "is not
+// considered a hard binding" — it modifies how the whole-asset binding is
+// judged (multiasset.go) and never stands in for one.
 var hardBindingLabels = []string{
 	"c2pa.hash.data", "c2pa.hash.boxes", "c2pa.hash.bmff",
-	"c2pa.hash.bmff.v2", "c2pa.hash.bmff.v3", "c2pa.hash.multi-asset",
+	"c2pa.hash.bmff.v2", "c2pa.hash.bmff.v3",
 }
 
 func isClaimV2(m *parsedManifest) bool {

@@ -38,6 +38,13 @@ const (
 	StatusAssertionBoxesHashMatch      StatusCode = "assertion.boxesHash.match"
 	StatusAssertionBMFFHashMatch       StatusCode = "assertion.bmffHash.match"
 	StatusIngredientManifestValidated  StatusCode = "ingredient.manifest.validated"
+	// StatusOCSPNotRevoked: a stapled OCSP response (COSE rVals.ocspVals) for the
+	// signing certificate said "good" as of the time it is judged (stapledocsp.go).
+	StatusOCSPNotRevoked StatusCode = "signingCredential.ocsp.notRevoked"
+	// StatusMultiAssetHashMatch: the whole-asset data hash did not hold, but the
+	// parts a c2pa.hash.multi-asset assertion (§18.9) describes all did, with
+	// every required part present (multiasset.go).
+	StatusMultiAssetHashMatch StatusCode = "assertion.multiAssetHash.match"
 	// StatusIdentityTrusted reports a CAWG identity assertion (cawg.identity)
 	// whose signature, references and padding all check and whose signing
 	// credential reaches an identity trust anchor (WithIdentityTrust). The named
@@ -110,6 +117,28 @@ const (
 	StatusIngredientManifestMissing StatusCode = "ingredient.manifest.missing"
 	StatusGeneralError              StatusCode = "general.error"
 
+	// Claim and assertion structure (§15.2, claimcheck.go).
+	StatusClaimCBORInvalid StatusCode = "claim.cbor.invalid"
+	StatusClaimMalformed   StatusCode = "claim.malformed"
+	// StatusClaimHardBindingsMissing: the store holds a hard-binding assertion
+	// the claim does not reference, so nothing the signature covers binds the
+	// asset; a manifest with no hard-binding assertion at all is
+	// hardBinding.missing instead.
+	StatusClaimHardBindingsMissing   StatusCode = "claim.hardBindings.missing"
+	StatusAssertionCBORInvalid       StatusCode = "assertion.cbor.invalid"
+	StatusAssertionIngredientMalform StatusCode = "assertion.ingredient.malformed"
+	// StatusOCSPRevoked: a stapled OCSP response said the signing certificate
+	// was revoked before the claim was signed (stapledocsp.go); recorded beside
+	// signingCredential.revoked.
+	StatusOCSPRevoked StatusCode = "signingCredential.ocsp.revoked"
+	// Multi-asset hash (§18.9, multiasset.go): a part's bytes or its hash
+	// assertion did not match, or data lies beyond the last present part
+	// (mismatch); the parts do not tile the asset or name an absent assertion
+	// (malformed); a required part is absent (missingPart).
+	StatusMultiAssetHashMismatch    StatusCode = "assertion.multiAssetHash.mismatch"
+	StatusMultiAssetHashMalformed   StatusCode = "assertion.multiAssetHash.malformed"
+	StatusMultiAssetHashMissingPart StatusCode = "assertion.multiAssetHash.missingPart"
+
 	// CAWG identity assertion failures (CAWG Identity Assertion spec §7.2.2),
 	// recorded at "<manifest label>/<assertion label>". Codes the C2PA core
 	// defines for the signature itself — claimSignature.*, signingCredential.*,
@@ -164,6 +193,11 @@ const (
 	StatusRevocationUnknown StatusCode = "signingCredential.revocation.unknown"
 	StatusTimeStampMissing  StatusCode = "timeStamp.missing"
 	StatusUnsupported       StatusCode = "general.unsupported"
+	// StatusOCSPSkipped: stapled OCSP responses were present but none was
+	// usable for the signing certificate (another serial, a bad signature, an
+	// unauthorised responder, not yet valid, or past nextUpdate); the online
+	// check, if enabled, runs as before.
+	StatusOCSPSkipped StatusCode = "signingCredential.ocsp.skipped"
 
 	// Soft binding informationals (spec §18.10), at the assertion's URI.
 	// softBinding.unevaluated is the verdict on every well-formed soft binding:
@@ -199,6 +233,8 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusAssertionBoxesHashMatch:      SeveritySuccess,
 	StatusAssertionBMFFHashMatch:       SeveritySuccess,
 	StatusIngredientManifestValidated:  SeveritySuccess,
+	StatusOCSPNotRevoked:               SeveritySuccess,
+	StatusMultiAssetHashMatch:          SeveritySuccess,
 	StatusIdentityTrusted:              SeveritySuccess,
 	StatusIdentityWellFormed:           SeveritySuccess,
 	StatusICACredentialValid:           SeveritySuccess,
@@ -231,6 +267,15 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusIngredientManifestMismatch:     SeverityFailure,
 	StatusIngredientManifestMissing:      SeverityFailure,
 	StatusGeneralError:                   SeverityFailure,
+	StatusClaimCBORInvalid:               SeverityFailure,
+	StatusClaimMalformed:                 SeverityFailure,
+	StatusClaimHardBindingsMissing:       SeverityFailure,
+	StatusAssertionCBORInvalid:           SeverityFailure,
+	StatusAssertionIngredientMalform:     SeverityFailure,
+	StatusOCSPRevoked:                    SeverityFailure,
+	StatusMultiAssetHashMismatch:         SeverityFailure,
+	StatusMultiAssetHashMalformed:        SeverityFailure,
+	StatusMultiAssetHashMissingPart:      SeverityFailure,
 	StatusIdentityCBORInvalid:            SeverityFailure,
 	StatusIdentityAssertionMismatch:      SeverityFailure,
 	StatusIdentityAssertionDuplicate:     SeverityFailure,
@@ -265,6 +310,7 @@ var statusSeverity = map[StatusCode]Severity{
 	StatusTimeStampUntrusted:       SeverityInformational,
 	StatusTimeStampOutsideValidity: SeverityInformational,
 	StatusUnsupported:              SeverityInformational,
+	StatusOCSPSkipped:              SeverityInformational,
 
 	StatusSoftBindingUnevaluated: SeverityInformational,
 	StatusSoftBindingAlgUnlisted: SeverityInformational,

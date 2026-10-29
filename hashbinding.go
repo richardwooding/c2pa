@@ -117,10 +117,14 @@ func (v *validator) verifyHardBinding(m *parsedManifest, uri string) {
 		match := StatusAssertionDataHashMatch
 		if multiAsset != nil && v.has(uri+"/c2pa.hash.data", StatusAssertionDataHashMismatch) {
 			// The whole-asset hash failed, but the asset may be a multi-asset
-			// file that lost optional parts: the parts that remain decide.
-			v.dropStatus(uri+"/c2pa.hash.data", StatusAssertionDataHashMismatch)
-			v.verifyMultiAssetHash(m, multiAsset, uri)
-			match = StatusMultiAssetHashMatch
+			// file that lost optional parts: the parts that remain decide — and
+			// only once they have actually been evaluated does their verdict
+			// replace the mismatch. A shape this verifier does not evaluate
+			// leaves the mismatch standing beside the informational.
+			if v.verifyMultiAssetHash(m, multiAsset, uri) {
+				v.dropStatus(uri+"/c2pa.hash.data", StatusAssertionDataHashMismatch)
+				match = StatusMultiAssetHashMatch
+			}
 		}
 		v.bindFromStep(start, match)
 	case bmffHash != nil:
