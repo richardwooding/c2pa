@@ -337,11 +337,11 @@ func (v *validator) has(uri string, code StatusCode) bool {
 	return false
 }
 
-// hardBindingTampered reports whether a hard-binding assertion failed its
-// hashed-URI check.
-func (v *validator) hardBindingTampered() bool {
+// hardBindingTampered reports whether one of THIS manifest's hard-binding
+// assertions failed its hashed-URI check (statuses at "<uri>/<label>").
+func (v *validator) hardBindingTampered(uri string) bool {
 	for _, e := range v.res.Statuses {
-		if e.Code == StatusAssertionHashedURIMismatch &&
+		if e.Code == StatusAssertionHashedURIMismatch && strings.HasPrefix(e.URI, uri+"/") &&
 			slices.Contains(hardBindingLabels, assertionLabelBase(assertionLabelFromURL(e.URI))) {
 			return true
 		}
@@ -697,7 +697,7 @@ func (v *validator) validateManifest(m *parsedManifest, store *parsedStore, dept
 		v.verifyUpdateManifest(m, store, uri)
 	case depth == 0 && !hardBindingsOK:
 		v.bind(BindingNone)
-	case depth == 0 && v.hardBindingTampered():
+	case depth == 0 && v.hardBindingTampered(uri):
 		// Either the claim does not cover a hard binding (already reported) or
 		// the one it covers was altered after signing (assertion.hashedURI
 		// mismatch): evaluating it against the asset would report a match for

@@ -28,7 +28,9 @@ one file:
 - **containers** (find and extract the JUMBF store): `c2pa.go` (JPEG + PNG, and the `Read` path),
   `bmff.go`, `riff.go`, `tiff.go`, `gif.go`, `mp3.go`, `svg.go`, `pdf.go`
 - **JUMBF** (parse the store): `boxes.go`
-- **validation**: `validate.go`, `cose_verify.go`, `chain.go`, `trust.go`, `revocation.go`,
+- **validation**: `validate.go`, `claimcheck.go` (claim and assertion structure), `cose_verify.go`,
+  `chain.go`, `trust.go`, `revocation.go`, `stapledocsp.go` (the COSE `rVals.ocspVals` responses),
+  `multiasset.go` (`c2pa.hash.multi-asset`),
   `timestamp.go`, `ingredient.go`, `statuscodes.go`, `softbinding.go` (the `c2pa.soft-binding`
   reader) + `softbindingalgs.go` (the embedded C2PA soft binding algorithm list)
 - **hard bindings**: `hashbinding.go` (dispatch + `c2pa.hash.data`), `bmffhash.go` (BMFF and
@@ -59,8 +61,8 @@ Public surface:
   carries, or about something nothing could place.
 - `Validate` / `ValidationResult` / `StatusEntry` / `StatusCode` / `Severity` — the verifier and its
   result. `ValidateOption` (`WithSigningTrust`, `WithTimestampTrust`, `WithIdentityTrust`,
-  `WithIdentityIssuers`, `WithOnlineRevocation`, `WithClock`, `WithMaxIngredientDepth`,
-  `WithMaxScan`, `WithHTTPClient`).
+  `WithIdentityIssuers`, `WithOnlineRevocation`, `WithRequireClaimSigningEKU`, `WithClock`,
+  `WithMaxIngredientDepth`, `WithMaxScan`, `WithHTTPClient`).
   `ValidationResult.Binding BindingState` (`BindingNone` / `BindingVerified` / `BindingFailed` /
   `BindingUnevaluated`, `String()`) is "were these the signed bytes?" answered without status codes —
   RECORDED at the decision point (`bind`, first-wins, `bindFromStep` over the statuses one hard-binding
@@ -784,10 +786,76 @@ makes (`countingContext`) and asserting the contract at each point. The rules th
   the certificate's own signature. Always parse chain certs via `parseCert`, never bare
   `x509.ParseCertificate`.
 - **`x509.Verify` does NOT enforce the C2PA cert profile.** `chain.go` manually checks: leaf
-  `KeyUsageDigitalSignature`; EKU present and constrained, **rejecting `ExtKeyUsageAny`** and missing
-  EKU (fixture EKU is `emailProtection`); leaf `IsCA == false`; no SHA-1/MD5 sig algs; RSA ≥ 2048. Use
-  the *verified* timestamp time as `CurrentTime` (so a cert valid at signing but now expired passes);
-  fall back to the clock only when no trusted timestamp exists.
+  `keyUsage` PRESENT with `digitalSignature` and without `keyCertSign`/`cRLSign` (a leaf with no
+  keyUsage extension used to pass); EKU present and constrained, **rejecting `ExtKeyUsageAny`** and
+  missing EKU — accepted purposes are `c2pa-kp-claimSigning` (`1.3.6.1.4.1.62558.2.1`, §14.5.1, what
+  every conformance-suite certificate carries) plus the earlier `emailProtection`, `codeSigning` and
+  `id-kp-documentSigning` (the fixture's is `emailProtection`), and `WithRequireClaimSigningEKU()` opts
+  into claimSigning ONLY — strict by default would break every legacy credential and most fixtures;
+  leaf `IsCA == false`; no SHA-1/MD5 sig algs; RSA ≥ 2048. A profile violation is
+  `signingCredential.invalid` AND drops `claimSignature.validated` for that manifest (`dropStatus`):
+  an out-of-profile credential cannot vouch for the claim even though the bytes verify. Use the
+  *trusted* timestamp time as `CurrentTime` (so a cert valid at signing but now expired passes); fall
+  back to the clock only when no trusted timestamp exists. A chain that validates records
+  `claimSignature.insideValidity` beside `signingCredential.trusted`; one outside its window records
+  `claimSignature.outsideValidity` beside `signingCredential.expired` (both kept for callers matching
+  on the old code) and no `claimSignature.validated`. `chainErrorStatus`: no anchor is `untrusted`,
+  a validity miss is `expired`, a path a CA's `pathLenConstraint`/`basicConstraints` forbids
+  (`TooManyIntermediates`/`NotAuthorizedToSign`) is `untrusted` too — no permitted path exists, which
+  is not a defect in the credential — and anything else is `invalid`.
+- **An untrusted time-stamp is informational and IGNORED** (`timeStamp.untrusted`,
+  `timeStamp.outsideValidity`): the 2.x spec treats a time-stamp that fails validation as absent and
+  judges the credential at the current time, c2patool reports it informationally, and the conformance
+  suite expects the same. Only a TRUSTED token sets the verification time (claim and CAWG identity
+  alike) and `SignedAt`; an expired signer with an untrusted token is therefore
+  `signingCredential.expired` at the clock, not a passing file on an unattested time. This reversed an
+  earlier deliberate choice (an unanchored genTime pinned the window and `timeStamp.untrusted` was a
+  failure) — `TestCorpusTimestampPinsSigningWindow` and `TestCorpusTimestampIgnored` pin the new rule.
+  A trusted token records `timeStamp.trusted` beside `timeStamp.validated`.
+- **Stapled OCSP (`stapledocsp.go`) is assessed before the online check.** The signer's responses
+  ride in the COSE unprotected `rVals.ocspVals`; for the LEAF only, judged at the trusted
+  time-stamp's genTime when there is one, else the clock: a good response is
+  `signingCredential.ocsp.notRevoked`; a revocation dated BEFORE that time is
+  `signingCredential.ocsp.revoked` + `signingCredential.revoked` and drops `claimSignature.validated`
+  and `signingCredential.trusted` (one dated after a trusted genTime is not-revoked: the claim predates
+  it); anything unusable — another certificate's response, a bad signature, a delegated responder
+  without `id-kp-OCSPSigning` (`ParseResponseForCert` does not check the EKU), `thisUpdate` after the
+  clock, `nextUpdate` before the judged time — is the informational `signingCredential.ocsp.skipped`,
+  after which `WithOnlineRevocation` runs as before. The issuer comes from the BUILT trust path, not
+  the presented chain: a leaf issued directly by an anchor presents no issuer.
+- **Claim structure is checked (`claimcheck.go`, §15.2)** before any hash is trusted: an undecodable
+  claim box is `claim.cbor.invalid`; missing required fields are `claim.malformed` (v2: `instanceID`,
+  `signature`, `claim_generator_info`, `created_assertions`; v1: `instanceID`, `signature`,
+  `assertions` — deliberately the minimum, since a false failure here fails a whole file); a `signature`
+  URI that does not name `c2pa.signature` is `claimSignature.missing`; an assertion whose CBOR does not
+  decode is `assertion.cbor.invalid`; a `c2pa.ingredient.v*` naming an `activeManifest` with no
+  `validationResults` is `assertion.ingredient.malformed`; and `claim.multiple` no longer also reports
+  `claimSignature.validated`/`signingCredential.trusted`. **The hard binding must be one the claim
+  references.** `verifyHardBinding` picks the hash assertion from the store's BOXES, so before this a
+  hash assertion the claim never listed — unsigned — was evaluated against the asset: a store holding
+  a hard-binding assertion the claim does not reference is now `claim.hardBindings.missing` with
+  `Binding = None`, and one the claim lists but whose box was altered (`assertion.hashedURI.mismatch`
+  on a hard-binding label, `hardBindingTampered`, scoped to THIS manifest's URIs) is `BindingFailed`
+  without ever being hashed against the asset. `hardBindingLabels` does NOT include
+  `c2pa.hash.multi-asset`: §18.9.2 says it "is not considered a hard binding".
+- **`c2pa.hash.multi-asset` (`multiasset.go`, §18.9) is consulted only when the whole-asset
+  `c2pa.hash.data` MISMATCHES** — an intact file keeps `assertion.dataHash.match`, as the suite
+  expects. Parts must tile the asset from 0 with no gap or overlap (else `malformed`); a part wholly
+  beyond EOF is absent — fine if `optional`, `missingPart` if not; a part cut short, mismatching its
+  `c2pa.hash.data.part*` assertion (hashed-URI AND content, exclusions relative to the part), or data
+  beyond the last present part is `mismatch`; all present parts good is `match`, and only THEN is the
+  whole-asset mismatch dropped (`verifyMultiAssetHash` returns whether it evaluated). The shapes
+  §18.9.2 permits but this verifier does not evaluate — a `bmffBox` locator, a boxes- or BMFF-hash
+  part — are the informational `general.unsupported` and leave the mismatch standing, so a shape we
+  did not check can never erase a hash failure. A cancelled part hash is `general.error`, never a
+  mismatch.
+- **`ingredient.manifest.missing`** is recorded beside `ingredient.manifest.mismatch` for an ingredient
+  (or an update manifest's `parentOf`) whose manifest is in no store; the old code is kept for callers.
+- **The conformance validator suite** (`c2pa-org/conformance#504`, `tests/validation/`, 108 cases) is
+  what drove the eleven bullets above (issue #87, PRs #77–#86 by @mrappard): 25 passed before, 102
+  after; FLAC/DOCX (4) have no container here, and 2 remain — an ingredient's STORED validation results
+  are not surfaced, and `claim.missing` has no manifest label to attach to. The suite is not run in CI;
+  the harness that maps `Validate` onto its expectations lives outside this repo.
 - **Timestamp verification = full CMS, not just `genTime`.** `timestamp.go` extends the
   `rfc3161GenTime` descent to verify the SignedData signature and chain the TSA cert to the embedded
   TSA pool. **The signedAttrs re-encoding gotcha:** the signature covers the attrs as a universal
@@ -995,6 +1063,9 @@ Where the recent ones live: `assertion.boxesHash.*` in `boxeshash_test.go`; `ass
 including the Merkle paths in `bmffmerkle_test.go`, and the split-file paths plus
 `ValidateFragmented` in `fragmented_test.go`; `manifest.update.invalid` /
 `manifest.update.wrongParents` / `manifest.multipleParents` in `updatemanifest_test.go`;
+`claim.*` / `assertion.cbor.invalid` / `assertion.ingredient.malformed` in `claimcheck_test.go` and
+`corpus_test.go`; `signingCredential.ocsp.*` in `stapledocsp_test.go`; `assertion.multiAssetHash.*` in
+`multiasset_test.go`; the EKU and chain-error mappings in `chain_eku_test.go` / `chain_status_test.go`;
 `cawg.identity.*` in `cawg_test.go` (corpus-built) and `cawg_fixture_test.go` (`testdata/cawg_x509.jpg`,
 c2pa-rs's `C_with_CAWG_data.jpg`, the one fixture with an identity assertion — see
 `testdata/README.md`). The corpus builds identities through `manifestSpec.derived`, a hook run after

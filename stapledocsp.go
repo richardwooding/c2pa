@@ -9,20 +9,9 @@ import (
 	"golang.org/x/crypto/ocsp"
 )
 
-// Stapled OCSP status codes (§15.4): the signer's OCSP responses ride in the
-// COSE unprotected header (rVals.ocspVals), so revocation can be assessed
-// offline and as of signing time.
-const (
-	StatusOCSPNotRevoked StatusCode = "signingCredential.ocsp.notRevoked"
-	StatusOCSPRevoked    StatusCode = "signingCredential.ocsp.revoked"
-	StatusOCSPSkipped    StatusCode = "signingCredential.ocsp.skipped"
-)
-
-func init() {
-	statusSeverity[StatusOCSPNotRevoked] = SeveritySuccess
-	statusSeverity[StatusOCSPRevoked] = SeverityFailure
-	statusSeverity[StatusOCSPSkipped] = SeverityInformational
-}
+// Stapled OCSP (§15.4): the signer's OCSP responses ride in the COSE
+// unprotected header (rVals.ocspVals), so revocation can be assessed offline
+// and as of signing time. The status codes live in statuscodes.go.
 
 // stapledOCSPResponses returns the DER OCSP responses stapled in the COSE
 // envelope's unprotected rVals.ocspVals header, or nil.
