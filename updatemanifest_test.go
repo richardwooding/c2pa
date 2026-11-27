@@ -640,3 +640,110 @@ func TestAdjustExclusionsForUpdate(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdateManifestWithoutStandardParent is issue #91: update_manifest.jpg
+// with its parent's JUMBF type flipped from c2ma to c2um, so the chain holds
+// two update manifests and no standard one. The parent's c2pa.hash.data is one
+// §11.2.3 forbids it, and nothing up the chain may bind the asset in its
+// place: c2patool says "claim missing hard binding".
+func TestUpdateManifestWithoutStandardParent(t *testing.T) {
+	data, err := os.ReadFile("testdata/update_manifest.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	standard := updateManifestUUID
+	standard[2], standard[3] = 'm', 'a'
+	if n := bytes.Count(data, standard[:]); n != 1 {
+		t.Fatalf("fixture carries %d standard manifest superboxes, want exactly 1", n)
+	}
+	flipped := bytes.Replace(data, standard[:], updateManifestUUID[:], 1)
+
+	ctx := context.Background()
+	const parentLabel = "adobe:urn:uuid:6a6b4dbe-5ef9-40ec-81ec-d8955db3e95c"
+	store := parseStore(ctx, extractJUMBF(ctx, JPEG, flipped))
+	if p := store.byLabel()[parentLabel]; p == nil || !p.update {
+		t.Fatalf("parent was not relabelled as an update manifest")
+	}
+	pool := ownChainPool(t, store.active())
+	clock := func() time.Time { return time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC) }
+	res := Validate(ctx, JPEG, bytes.NewReader(flipped), WithSigningTrust(pool), WithClock(clock))
+	if res.Valid || res.Binding != BindingNone {
+		t.Errorf("valid=%v binding=%s, want invalid and unbound: %v", res.Valid, res.Binding, codes(res))
+	}
+	if res.Has(StatusAssertionDataHashMatch) {
+		t.Errorf("an update manifest's hard binding bound the asset: %v", codes(res))
+	}
+	if !hasAt(res, StatusManifestUpdateInvalid, parentLabel) {
+		t.Errorf("the parent's forbidden hard binding was not reported: %v", codes(res))
+	}
+	if !hasAt(res, StatusClaimHardBindingsMissing, res.ActiveManifestLabel) || !res.Has(StatusHardBindingMissing) {
+		t.Errorf("no standard manifest binds the asset and no status said so: %v", codes(res))
+	}
+}
+
+// TestUpdateManifestChain: an update manifest may update another update
+// manifest, and the walk carries on up the parentOf chain to the standard
+// manifest whose hard binding covers the asset (c2pa-rs's
+// get_hash_binding_manifest). A chain that loops reaches none.
+func TestUpdateManifestChain(t *testing.T) {
+	const (
+		standardLabel = "urn:uuid:00000000-0000-4000-8000-0000000000aa"
+		firstLabel    = "urn:uuid:00000000-0000-4000-8000-0000000000bb"
+		secondLabel   = "urn:uuid:00000000-0000-4000-8000-0000000000cc"
+	)
+	chain := func(t *testing.T, sb *signerBundle, firstParent string) []byte {
+		return buildFramedAsset(t, func(store []byte) ([]byte, []byteRange) {
+			return assembleAsset(JPEG, store)
+		}, manifestSpec{
+			signer:     sb,
+			label:      standardLabel,
+			assertions: []assertionSpec{markerAssertion()},
+			updateOverlay: &manifestSpec{
+				signer:         sb,
+				label:          firstLabel,
+				updateManifest: true,
+				noHardBinding:  true,
+				assertions:     []assertionSpec{parentOfAssertion(t, firstParent)},
+				updateOverlay: &manifestSpec{
+					signer:         sb,
+					label:          secondLabel,
+					updateManifest: true,
+					noHardBinding:  true,
+					assertions:     []assertionSpec{parentOfAssertion(t, firstLabel)},
+				},
+			},
+		})
+	}
+
+	t.Run("reaches the standard manifest", func(t *testing.T) {
+		sb := newCorpusSigner(t, cose.AlgorithmES256)
+		asset := chain(t, sb, standardLabel)
+		res := runCorpus(t, JPEG, asset, sb)
+		if res.ActiveManifestLabel != secondLabel {
+			t.Fatalf("active manifest = %s, want %s", res.ActiveManifestLabel, secondLabel)
+		}
+		if !res.Valid || res.Binding != BindingVerified || !hasAt(res, StatusAssertionDataHashMatch, standardLabel+"/c2pa.hash.data") {
+			t.Fatalf("valid=%v binding=%s: %v", res.Valid, res.Binding, codes(res))
+		}
+
+		tampered := append([]byte(nil), asset...)
+		tampered[len(tampered)-8] ^= 0xFF
+		res = runCorpus(t, JPEG, tampered, sb)
+		if res.Valid || !res.Has(StatusAssertionDataHashMismatch) {
+			t.Errorf("editing the content under a chain of updates went unnoticed: %v", codes(res))
+		}
+	})
+
+	t.Run("loops", func(t *testing.T) {
+		sb := newCorpusSigner(t, cose.AlgorithmES256)
+		// The first update names the second as its parent, and the second
+		// names the first: neither ever reaches the standard manifest.
+		res := runCorpus(t, JPEG, chain(t, sb, secondLabel), sb)
+		if res.Valid || res.Binding != BindingNone || res.Has(StatusAssertionDataHashMatch) {
+			t.Errorf("valid=%v binding=%s: %v", res.Valid, res.Binding, codes(res))
+		}
+		if !hasAt(res, StatusClaimHardBindingsMissing, secondLabel) || !res.Has(StatusHardBindingMissing) {
+			t.Errorf("a looping chain binds nothing and no status said so: %v", codes(res))
+		}
+	})
+}

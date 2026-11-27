@@ -262,7 +262,8 @@ type manifestSpec struct {
 	updateManifest bool
 	// updateOverlay, when set, appends a SECOND manifest to the store after
 	// this one. The store's last manifest is the active one, so this is how an
-	// asset whose active manifest updates an earlier one is built.
+	// asset whose active manifest updates an earlier one is built. An overlay's
+	// own updateOverlay is appended after it, for a chain of updates.
 	updateOverlay *manifestSpec
 	// derived, when set, produces further assertions from the ones already
 	// boxed — the hard binding included, with the digest of the current
