@@ -484,7 +484,14 @@ empty for that whole generation of files.
   reaching the same manifest at depth > 0 would also call it unevaluated. The forbidden set is
   hard bindings, thumbnails, and any action outside `c2pa.edited.metadata` / `c2pa.opened` /
   `c2pa.published` / `c2pa.redacted` → `manifest.update.invalid`; zero or several parents →
-  `manifest.update.wrongParents`. **Every path that REJECTS an update manifest also records
+  `manifest.update.wrongParents`. **The parent may itself be an update manifest**:
+  `verifyUpdateManifest` walks up the `parentOf` chain (`updateParent` holds each hop to §11.2.3 at
+  its own URI) to the first STANDARD manifest and verifies that one's binding — c2pa-rs's
+  `get_hash_binding_manifest`. A chain that never reaches one (every manifest relabelled `c2um`, or a
+  loop) adds `claim.hardBindings.missing` at the active manifest — c2patool's "claim missing hard
+  binding" — on top of the rejection. Hashing an update parent's forbidden `c2pa.hash.data` instead
+  reported Valid and bound (issue #91, `TestUpdateManifestWithoutStandardParent`).
+  **Every path that REJECTS an update manifest also records
   `hardBinding.missing`** (`rejectUpdateManifest`): it returns before the parent's binding is
   verified, so nothing hashed the asset, and reporting only the structural complaint left that
   unsayable — two bytes flipping `c2ma` to `c2um` lift a genuinely signed manifest onto any file,

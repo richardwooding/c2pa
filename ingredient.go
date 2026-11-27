@@ -111,24 +111,75 @@ func resolveManifest(ref string, byLabel map[string]*parsedManifest) *parsedMani
 // parentOf ingredient §11.2.3 requires. That manifest describes THESE bytes —
 // unlike an ordinary ingredient's, which describes the ingredient's own — so
 // its hard binding is verified against the asset rather than skipped.
+//
+// The manifest being updated may itself be an update manifest, so the walk goes
+// up the parentOf chain to the first standard manifest, as c2pa-rs's
+// get_hash_binding_manifest does. Each update manifest on the way is held to
+// §11.2.3 at its own URI; a chain that never reaches a standard manifest (every
+// manifest relabelled c2um, or a cycle) binds nothing, and taking the hard
+// binding an update manifest is forbidden to carry would vouch for the asset
+// on the strength of a manifest §11.2.3 rejects (issue #91).
 func (v *validator) verifyUpdateManifest(m *parsedManifest, store *parsedStore, uri string) {
+	byLabel := store.byLabel()
+	visited := map[string]bool{m.label: true}
+	for cur, curURI := m, uri; ; {
+		parent, ok := v.updateParent(cur, byLabel, curURI)
+		if !ok {
+			if cur != m {
+				v.add(StatusClaimHardBindingsMissing, uri,
+					"no standard manifest up the update manifest's parentOf chain carries a hard binding", nil)
+			}
+			return
+		}
+		// The parent's binding covers this asset, so it is checked here rather
+		// than skipped the way an ingredient's is — and recorded, so the
+		// ingredient walk that reaches the same manifest a moment later does
+		// not also report it as unevaluated.
+		if v.hardBound == nil {
+			v.hardBound = map[string]bool{}
+		}
+		v.hardBound[parent.label] = true
+		if !parent.update {
+			// The update was appended to the store after the parent signed it,
+			// so the parent's data-hash exclusion describes a shorter store than
+			// the one in the file; §15.12.1.1 has the verifier extend it
+			// (verifyDataHash).
+			v.updateSeen = true
+			v.verifyHardBinding(parent, parent.label)
+			return
+		}
+		if visited[parent.label] {
+			v.add(StatusClaimHardBindingsMissing, uri,
+				"update manifests' parentOf chain loops without reaching a standard manifest", nil)
+			v.rejectUpdateManifest(StatusManifestUpdateWrongParents, parent.label,
+				"update manifest's parentOf chain loops back to "+parent.label)
+			return
+		}
+		visited[parent.label] = true
+		cur, curURI = parent, parent.label
+	}
+}
+
+// updateParent holds one update manifest to §11.2.3 and resolves the manifest
+// it updates. On a violation it records the rejection and reports false.
+func (v *validator) updateParent(m *parsedManifest, byLabel map[string]*parsedManifest, uri string) (*parsedManifest, bool) {
 	for _, a := range m.assertions {
 		switch {
 		case isHardBindingLabel(a.label):
 			v.rejectUpdateManifest(StatusManifestUpdateInvalid, uri,
 				"update manifest carries the hard binding "+a.label+
 					", but it changed no content")
-			return
+			return nil, false
 		case strings.Contains(a.label, "c2pa.thumbnail"):
 			v.rejectUpdateManifest(StatusManifestUpdateInvalid, uri,
 				"update manifest carries a thumbnail assertion, which implies a content change")
-			return
+			return nil, false
 		case isActionsLabel(a.label):
 			if bad, ok := disallowedUpdateAction(a.data); !ok {
 				v.rejectUpdateManifest(StatusManifestUpdateInvalid, uri,
 					"update manifest declares the action "+bad+
 						", which is not one an update may perform")
-				return
+				return nil, false
 			}
 		}
 	}
@@ -137,29 +188,17 @@ func (v *validator) verifyUpdateManifest(m *parsedManifest, store *parsedStore, 
 	if len(parents) != 1 {
 		v.rejectUpdateManifest(StatusManifestUpdateWrongParents, uri,
 			"update manifest must name exactly one parentOf ingredient, the manifest it updates")
-		return
+		return nil, false
 	}
-	parent := resolveManifest(parents[0], store.byLabel())
+	parent := resolveManifest(parents[0], byLabel)
 	if parent == nil {
 		v.add(StatusIngredientManifestMissing, uri,
 			"update manifest's parentOf ingredient names a manifest not present in the store", nil)
 		v.rejectUpdateManifest(StatusIngredientManifestMismatch, uri,
 			"update manifest's parentOf ingredient names a manifest not present in the store")
-		return
+		return nil, false
 	}
-	// The parent's binding covers this asset, so it is checked here rather than
-	// skipped the way an ingredient's is — and recorded, so the ingredient walk
-	// that reaches the same manifest a moment later does not also report it as
-	// unevaluated.
-	if v.hardBound == nil {
-		v.hardBound = map[string]bool{}
-	}
-	v.hardBound[parent.label] = true
-	// The update was appended to the store after the parent signed it, so the
-	// parent's data-hash exclusion describes a shorter store than the one in
-	// the file; §15.12.1.1 has the verifier extend it (verifyDataHash).
-	v.updateSeen = true
-	v.verifyHardBinding(parent, parent.label)
+	return parent, true
 }
 
 // rejectUpdateManifest records why an update manifest was not accepted, and
