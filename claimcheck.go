@@ -73,13 +73,16 @@ func (v *validator) checkClaimStructure(m *parsedManifest, uri string) (hardBind
 		if a.tbox != "cbor" {
 			continue
 		}
-		var val any
-		if decMode.Unmarshal(a.data, &val) != nil {
+		// Well-formedness, not decodability: decMode decodes maps into
+		// map[string]any, so a map with integer keys — a COSE_Key in
+		// c2pa.session-keys — is valid CBOR it cannot decode.
+		if decMode.Wellformed(a.data) != nil {
 			v.add(StatusAssertionCBORInvalid, uri+"/"+a.label, "assertion content is not valid CBOR", nil)
 			continue
 		}
 		if strings.HasPrefix(a.label, "c2pa.ingredient.v") {
-			if im, ok := val.(map[string]any); ok && im["activeManifest"] != nil && im["validationResults"] == nil {
+			var im map[string]any
+			if decMode.Unmarshal(a.data, &im) == nil && im["activeManifest"] != nil && im["validationResults"] == nil {
 				v.add(StatusAssertionIngredientMalform, uri+"/"+a.label,
 					"ingredient assertion names an active manifest but carries no validationResults", nil)
 			}
