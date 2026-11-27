@@ -36,6 +36,14 @@ func TestCheckClaimStructure(t *testing.T) {
 		{"hard binding not referenced", parsedManifest{claimBytes: []byte{1}, claim: v2(map[string]any{"created_assertions": []any{map[string]any{
 			"url": "self#jumbf=c2pa.assertions/c2pa.actions.v2", "hash": make([]byte, 32)}}}), assertions: []rawAssertion{hash}}, StatusClaimHardBindingsMissing, false},
 		{"assertion not CBOR", parsedManifest{claimBytes: []byte{1}, claim: v2(nil), assertions: []rawAssertion{hash, {label: "c2pa.actions.v2", tbox: "cbor", data: []byte{0xff}}}}, StatusAssertionCBORInvalid, true},
+		{"assertion truncated", parsedManifest{claimBytes: []byte{1}, claim: v2(nil), assertions: []rawAssertion{hash, {label: "c2pa.actions.v2", tbox: "cbor", data: []byte{0xa1, 0x01}}}}, StatusAssertionCBORInvalid, true},
+		{"assertion trailing bytes", parsedManifest{claimBytes: []byte{1}, claim: v2(nil), assertions: []rawAssertion{hash, {label: "c2pa.actions.v2", tbox: "cbor", data: []byte{0xa1, 0x01, 0x01, 0x00}}}}, StatusAssertionCBORInvalid, true},
+		// Issue #92: integer map keys are valid CBOR, though decMode cannot
+		// decode them into map[string]any.
+		{"integer map keys", parsedManifest{claimBytes: []byte{1}, claim: v2(nil), assertions: []rawAssertion{hash, {label: "c2pa.session-keys", tbox: "cbor", data: []byte{0xa1, 0x01, 0x01}}}}, "", true},
+		{"COSE_Key session keys", parsedManifest{claimBytes: []byte{1}, claim: v2(nil), assertions: []rawAssertion{hash, {label: "c2pa.session-keys", tbox: "cbor",
+			data: cbor(map[string]any{"keys": []any{map[int]any{1: 2, 2: []byte("k1"), 3: -7, -1: 1, -2: make([]byte, 32)}}})}}}, "", true},
+		{"ingredient with integer keys", parsedManifest{claimBytes: []byte{1}, claim: v2(nil), assertions: []rawAssertion{hash, {label: "c2pa.ingredient.v3", tbox: "cbor", data: []byte{0xa1, 0x01, 0x01}}}}, "", true},
 		{"ingredient without validationResults", parsedManifest{claimBytes: []byte{1}, claim: v2(nil), assertions: []rawAssertion{hash, {label: "c2pa.ingredient.v3", tbox: "cbor",
 			data: cbor(map[string]any{"activeManifest": map[string]any{"url": "x"}})}}}, StatusAssertionIngredientMalform, true},
 	}

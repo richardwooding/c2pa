@@ -648,3 +648,20 @@ func TestExtractStore_PastReadCap(t *testing.T) {
 		t.Fatal("re-sign of the large PDF did not chain the prior manifest")
 	}
 }
+
+// TestSignIntegerKeyAssertion is issue #92: c2pa.session-keys (C2PA live
+// video) holds COSE_Keys, maps keyed by the integers 1, 2, 3, -1, -2. That is
+// well-formed CBOR, so the self-check must not call it assertion.cbor.invalid
+// and refuse to write the output.
+func TestSignIntegerKeyAssertion(t *testing.T) {
+	s, sc := newTestSigner(t)
+	m := createdManifest("session keys")
+	m.Assertions = []Assertion{{Label: "c2pa.session-keys", Value: map[string]any{
+		"keys": []any{map[int]any{1: 2, 2: []byte("kid-1"), 3: -7, -1: 1, -2: make([]byte, 32), -3: make([]byte, 32)}},
+	}}}
+	out := signBytes(t, s, JPEG, unsignedJPEG(t), m)
+	res := Validate(context.Background(), JPEG, bytes.NewReader(out), WithSigningTrust(sc.roots), WithOnlineRevocation(false))
+	if !res.Valid || res.Has(StatusAssertionCBORInvalid) {
+		t.Fatalf("got %v", codes(res))
+	}
+}
